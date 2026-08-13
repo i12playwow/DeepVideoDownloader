@@ -141,6 +141,7 @@ ipcMain.handle("settings-save", (e, next) => {
   config = { ...config, ...next };
   saveConfig(config);
   proxyManager = new ProxyManager(config);
+  dm.proxyManager = proxyManager;
   dm.config = config;
   return { ok: true };
 });

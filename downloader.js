@@ -24,7 +24,7 @@ function sanitizeName(name) {
   return String(name || "video").replace(/[\\/:*?"<>|\r\n\t]+/g, "_").trim().slice(0, 180) || "video";
 }
 
-async function requestWithRedirects(targetUrl, { method = "GET", headers = {}, agent = null } = {}) {
+async function requestWithRedirects(targetUrl, { method = "GET", headers = {}, agent = null, onReq = null } = {}) {
   let current = targetUrl;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     let urlObj;
@@ -40,9 +40,14 @@ async function requestWithRedirects(targetUrl, { method = "GET", headers = {}, a
         agent,
         headers: { "User-Agent": UA, ...headers }
       }, (res) => {
+        if (onReq) onReq(req, false);
         resolve({ status: res.statusCode, headers: res.headers, res, finalUrl: current });
       });
-      req.on("error", reject);
+      if (onReq) onReq(req, true);
+      req.on("error", (err) => {
+        if (onReq) onReq(req, false);
+        reject(err);
+      });
       req.setTimeout(45000, () => req.destroy(new Error("Request timeout")));
       req.end();
     });
@@ -152,7 +157,7 @@ class DownloadManager {
 
   async pump() {
     while (this.active < (this.config.concurrency || 3)) {
-      const next = Array.from(this.items.values()).find((i) => i.status === "queued");
+      const next = Array.from(this.items.values()).find((i) => i.status === "queued" && !i._running);
       if (!next) break;
       next.status = "running";
       this.active++;
@@ -204,6 +209,16 @@ class DownloadManager {
 
   // ---------------- main flow ----------------
   async run(item) {
+    if (item._running) return; // already being processed (guards resume-during-probe)
+    item._running = true;
+    try {
+      await this.runInner(item);
+    } finally {
+      item._running = false;
+    }
+  }
+
+  async runInner(item) {
     await fsp.mkdir(this.dir, { recursive: true });
     item.tempDir = path.join(this.dir, item.id);
     await fsp.mkdir(item.tempDir, { recursive: true });
@@ -220,6 +235,9 @@ class DownloadManager {
     const info = await this.probe(item, baseHeaders);
     item.total = info.length;
     this.emit(item);
+
+    // probe can take seconds (proxy latency tests); bail if paused/cancelled meanwhile
+    if (item.status !== "running") return;
 
     if (item.total > 2 * 1024 * 1024 && info.acceptRanges && (this.config.segments || 1) > 1) {
       await this.runSegmented(item, info, baseHeaders);
@@ -249,7 +267,8 @@ class DownloadManager {
     const result = await requestWithRedirects(item.url, {
       method: "HEAD",
       headers: baseHeaders,
-      agent
+      agent,
+      onReq: (req, on) => this._trackReq(item, req, on)
     });
     const length = parseInt(result.headers["content-length"] || "0", 10);
     return {
@@ -279,7 +298,12 @@ class DownloadManager {
         await this.downloadSegment(item, seg, baseHeaders);
       }
     });
-    await Promise.all(workers);
+    try {
+      await Promise.all(workers);
+    } catch (e) {
+      this.abort(item); // stop sibling workers writing to parts after a failure
+      throw e;
+    }
 
     const out = createWriteStream(item.finalPath);
     for (const seg of segments) {
@@ -300,7 +324,12 @@ class DownloadManager {
     const resumeStart = seg.start + (existing ? existing.size : 0);
     const headers = { ...baseHeaders, Range: `bytes=${resumeStart}-${seg.end}` };
 
-    const result = await requestWithRedirects(item.url, { method: "GET", headers, agent });
+    const result = await requestWithRedirects(item.url, {
+      method: "GET",
+      headers,
+      agent,
+      onReq: (req, on) => this._trackReq(item, req, on)
+    });
     const res = result.res;
     const status = result.status;
     if (status !== 206 && status !== 200) {
@@ -324,7 +353,12 @@ class DownloadManager {
       ? { ...baseHeaders, Range: `bytes=${resumeStart}-` }
       : baseHeaders;
 
-    const result = await requestWithRedirects(item.url, { method: "GET", headers, agent });
+    const result = await requestWithRedirects(item.url, {
+      method: "GET",
+      headers,
+      agent,
+      onReq: (req, on) => this._trackReq(item, req, on)
+    });
     const res = result.res;
     const status = result.status;
 
@@ -377,8 +411,15 @@ class DownloadManager {
   }
 
   // ---------------- controls ----------------
+  // Track in-flight requests/responses so abort() can interrupt both phases.
+  _trackReq(item, req, on) {
+    if (on) item._activeReses.add(req);
+    else item._activeReses.delete(req);
+  }
+
   abort(item) {
     const err = new Error("Aborted by user");
+    err.name = "AbortError";
     for (const res of item._activeReses) {
       try { res.destroy(err); } catch (e) { /* ignore */ }
     }
@@ -422,6 +463,9 @@ class DownloadManager {
     if (!item) return;
     if (["done", "error", "cancelled"].includes(item.status)) {
       this.items.delete(id);
+      if (item.tempDir) {
+        fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+      }
       this.onUpdate({ _removed: id });
     }
   }

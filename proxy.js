@@ -10,11 +10,18 @@ const { URL } = require("url");
 function parseProxyUrl(p) {
   try {
     const u = new URL(p);
+    // u.origin strips userinfo and is "null" for non-special schemes (socks://),
+    // which would break agent construction; rebuild the URL from parts.
+    let url = u.protocol + "//" + u.host;
+    if (u.username) {
+      const creds = encodeURIComponent(u.username) + (u.password ? ":" + encodeURIComponent(u.password) : "");
+      url = u.protocol + "//" + creds + "@" + u.host;
+    }
     return {
       protocol: u.protocol.replace(":", ""),
       host: u.hostname,
       port: u.port,
-      url: u.origin
+      url
     };
   } catch (e) {
     return null;
