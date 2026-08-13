@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deep Video Downloader</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>▶ Deep Video Downloader</h1>
+    <div class="hint">WebSocket server: <code id="wsHint">ws://127.0.0.1:8765</code> — links arrive from the browser extension</div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Downloads</h2>
+        <div class="panel-actions">
+          <button id="openDir" class="btn ghost">Open folder</button>
+        </div>
+      </div>
+      <table id="dls">
+        <thead>
+          <tr><th>File</th><th>Size</th><th class="wide">Progress</th><th>Speed</th><th>Proxy</th><th>Status</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="dlsBody">
+          <tr id="emptyRow"><td colspan="7">No downloads yet. Find an MP4 in the browser and it will appear here.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Advanced controls</h2>
+      </div>
+      <div class="grid">
+        <label>Download folder
+          <input type="text" id="downloadDir">
+        </label>
+        <label>Parallel downloads
+          <input type="number" id="concurrency" min="1" max="10">
+        </label>
+        <label>Segments per file (multi-connection)
+          <input type="number" id="segments" min="1" max="16">
+        </label>
+        <label>Speed limit (KB/s, 0 = unlimited)
+          <input type="number" id="speedLimitKB" min="0">
+        </label>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="autoProxy"> Auto proxy — pick fastest proxy per connection to boost speed</label>
+      </div>
+      <div class="grid cols-2">
+        <label>Proxy list (one per line: http://…, https://…, socks5://…)
+          <textarea id="proxies" rows="5" placeholder="http://127.0.0.1:7890&#10;socks5://127.0.0.1:1080"></textarea>
+        </label>
+        <div>
+          <label>Proxy test target URL</label>
+          <input type="text" id="testUrl" value="https://www.google.com">
+          <div class="row"><button id="testProxies" class="btn">Test proxies</button><button id="save" class="btn">Save settings</button></div>
+          <ul id="proxyResults"></ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

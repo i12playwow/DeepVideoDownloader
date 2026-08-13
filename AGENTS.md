@@ -5,7 +5,7 @@ Electron desktop app ("Deep Video Downloader"): receives MP4 URLs from a browser
 ## Commands
 
 - Run the app: `npm start` (Electron, plain CommonJS). No build, test, lint, or typecheck step exists — verify changes by launching.
-- Dev dependency `electron` only; runtime deps: `ws`, proxy-agent packages (`http-proxy-agent`, `https-proxy-agent`, `socks-proxy-agent`), `follow-redirects`.
+- Dev dependency `electron` only; runtime deps: `ws`, proxy-agent packages (`http-proxy-agent`, `https-proxy-agent`, `socks-proxy-agent`).
 
 ## Architecture
 
@@ -18,8 +18,9 @@ Electron desktop app ("Deep Video Downloader"): receives MP4 URLs from a browser
 ## Integration contract (no extension code in this repo)
 
 - WebSocket server binds `127.0.0.1` only, port from config (default `8765`).
-- On connect, server sends `{"type":"hello","version":...}`. Inbound `{"type":"download",url,title,referer}` → replies `{"type":"accepted",id}` or `{"type":"error",message}`; `{"type":"ping"}` → `{"type":"pong"}`.
+- On connect, server sends `{"type":"hello","version":...}`. Inbound `{"type":"download",url,title,referer}` → replies `{"type":"accepted",id,ids}` or `{"type":"error",message}`; `{"type":"ping"}` → `{"type":"pong"}`. `download` may also carry `sources` (array of `{kind,url,label}`): the app enqueues every `kind:"link"` entry as its own download (label appended to the file name) and falls back to plain `url` when no usable source exists. Non-`link` kinds (`iframe`, `server`) are ignored — they are player pages, not direct files.
 - Status is relayed back over WS as `{"type":"status",id,...}` on every update.
+- A WS bind failure (`EADDRINUSE`) shows an error box and quits — the app does not run silently without extension integration.
 
 ## IPC surface (three files must stay in sync)
 
@@ -35,7 +36,10 @@ Electron desktop app ("Deep Video Downloader"): receives MP4 URLs from a browser
 ## Download engine quirks
 
 - Segmented mode only runs when size > 2 MB, the server advertises `Accept-Ranges: bytes`, and `segments > 1`; otherwise a single stream is used.
-- Segments stream into `<downloadDir>/<id>/part<N>.part` then concatenated to the final file. Partial segments/final files are used for resume; a 200 (server ignored Range) discards partial data.
-- Output filename = sanitized `title` + `.mp4`; on a name collision a timestamp is appended (`name_<ms>.mp4`).
+- Segments stream into `<downloadDir>/<id>/part<N>.part` then concatenated to the final file. A single-stream resume appends at the final-file size; segmented resume skips already-complete `.part` files (guards against HTTP 416 on resume). A `200` (server ignored Range) discards/rewrites partial data in both modes.
+- Pause/cancel aborts **all** in-flight connections for an item (tracked in a per-item Set), not just one.
+- `speedLimitKB` is enforced globally across all concurrent downloads (a manager-wide window, not per download).
+- The HEAD probe sends no `Range` header; Content-Length from HEAD is trusted (missing/zero → single-stream fallback). The probe's chosen proxy is reused for the single-stream path; segmented mode re-picks the fastest proxy per segment.
+- Output filename = sanitized `title` (+ `[label]` when the download came from a `sources` entry) + `.mp4`; on a name collision a timestamp is appended (`name_<ms>.mp4`), preserving the label.
 - `autoProxy` picks the lowest-latency proxy per connection via HEAD probe; a failing proxy is marked bad for 15 s (`proxy.js` `markBad`).
 - Code style is plain CommonJS with terse file-top comments; match that.

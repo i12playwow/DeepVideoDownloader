@@ -1,0 +1,133 @@
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --border: rgba(255, 255, 255, 0.1);
+  --accent: #3b82f6;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --green: #22c55e;
+  --amber: #fbbf24;
+  --red: #ef4444;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+  padding: 16px;
+}
+
+header { margin-bottom: 16px; }
+header h1 { font-size: 18px; margin-bottom: 4px; }
+.hint { color: var(--muted); font-size: 12px; }
+.hint code { background: var(--panel); padding: 2px 6px; border-radius: 4px; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  margin-bottom: 16px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.panel-head h2 { font-size: 14px; }
+.panel-actions { display: flex; gap: 8px; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+th { color: var(--muted); font-weight: 600; }
+td.wide { min-width: 220px; }
+tr:hover td { background: rgba(255, 255, 255, 0.03); }
+
+.name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub { color: var(--muted); font-size: 10px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.bar-wrap { background: rgba(255,255,255,0.08); border-radius: 6px; height: 8px; overflow: hidden; }
+.bar {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #3b82f6, #22c55e);
+  transition: width 0.2s;
+}
+.pct { color: var(--muted); font-size: 11px; margin-top: 3px; }
+
+.speed { color: var(--amber); font-weight: 600; white-space: nowrap; }
+.proxy { color: var(--muted); font-size: 11px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.status { font-weight: 600; white-space: nowrap; }
+.st-queued, .st-paused, .st-cancelled { color: var(--muted); }
+.st-running { color: var(--accent); }
+.st-done { color: var(--green); }
+.st-error { color: var(--red); }
+
+td.actions { white-space: nowrap; }
+td.actions button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  margin-right: 4px;
+}
+td.actions button:hover { background: rgba(255,255,255,0.08); }
+td.actions button.danger:hover { border-color: var(--red); color: var(--red); }
+
+.btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn:hover { background: #2563eb; }
+.btn.ghost { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+.btn.ghost:hover { background: #334155; }
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.grid.cols-2 { grid-template-columns: 1fr 1fr; }
+.grid label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+input[type="text"], input[type="number"], textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 12px;
+  outline: none;
+  font-family: inherit;
+}
+input:focus, textarea:focus { border-color: var(--accent); }
+textarea { resize: vertical; font-family: monospace; }
+
+.checks { margin-bottom: 12px; }
+.checks label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; }
+
+.row { display: flex; gap: 8px; margin: 10px 0; }
+#proxyResults { list-style: none; font-size: 11px; color: var(--muted); }
+#proxyResults li { padding: 3px 0; display: flex; gap: 8px; }
+#proxyResults .ok { color: var(--green); }
+#proxyResults .fail { color: var(--red); }
