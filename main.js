@@ -211,32 +211,35 @@ async function loadBrowserExtension() {
   }
 }
 
-function sendBrowserState() {
-  if (!mainWindow || mainWindow.isDestroyed() || !browserWindow || browserWindow.isDestroyed()) return;
-  try {
-    mainWindow.webContents.send("browser-state", {
-      url: browserWindow.webContents.getURL(),
-      canBack: browserWindow.webContents.navigationHistory.canGoBack(),
-      canForward: browserWindow.webContents.navigationHistory.canGoForward()
-    });
-  } catch (e) { /* ignore */ }
+let pendingTabs = [];
+
+function sendBrowserTabs(urls, kind) {
+  if (!browserWindow || browserWindow.isDestroyed()) return;
+  const channel = kind === "add" ? "browser-add-tabs" : "browser-open-tabs";
+  try { browserWindow.webContents.send(channel, urls); } catch (e) { /* ignore */ }
 }
 
-function createBrowserWindow(url) {
-  if (browserWindow && !browserWindow.isDestroyed()) { browserWindow.show(); browserWindow.focus(); return; }
+function createBrowserWindow(urls) {
+  const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
+  if (browserWindow && !browserWindow.isDestroyed()) {
+    browserWindow.show(); browserWindow.focus();
+    if (list.length) sendBrowserTabs(list, "add");
+    return;
+  }
+  pendingTabs = list;
   browserWindow = new BrowserWindow({
     width: 1200,
     height: 850,
     title: "Deep Grab Browser",
     backgroundColor: "#0f172a",
-    webPreferences: { session: browserSession() }
+    webPreferences: {
+      session: browserSession(),
+      webviewTag: true,
+      preload: path.join(__dirname, "browser-preload.js")
+    }
   });
-  browserWindow.webContents.on("did-navigate", sendBrowserState);
-  browserWindow.webContents.on("did-navigate-in-page", sendBrowserState);
   browserWindow.on("closed", () => { browserWindow = null; });
-  browserWindow.loadURL(url || config.browserHomepage || "https://www.google.com").catch(() => {
-    browserWindow.loadFile(path.join(__dirname, "browser-start.html")).catch(() => {});
-  });
+  browserWindow.loadFile(path.join(__dirname, "browser.html")).catch(() => {});
 }
 
 // Locate an installed external browser executable (Chrome/Edge/Brave), or null.
@@ -503,19 +506,9 @@ if (gotLock) {
     if (target) handleOpenedFile(target);
   });
 
-  ipcMain.handle("browser-open", (e, url) => { createBrowserWindow(url); });
-  ipcMain.handle("browser-nav", (e, url) => {
-    if (browserWindow && !browserWindow.isDestroyed()) browserWindow.loadURL(String(url)).catch(() => {});
-  });
-  ipcMain.handle("browser-back", () => {
-    if (browserWindow && !browserWindow.isDestroyed()) browserWindow.webContents.navigationHistory.goBack();
-  });
-  ipcMain.handle("browser-forward", () => {
-    if (browserWindow && !browserWindow.isDestroyed()) browserWindow.webContents.navigationHistory.goForward();
-  });
-  ipcMain.handle("browser-reload", () => {
-    if (browserWindow && !browserWindow.isDestroyed()) browserWindow.webContents.reload();
-  });
+  ipcMain.handle("browser-open", (e, urls) => { createBrowserWindow(urls); });
+  ipcMain.handle("browser-nav", (e, url) => { createBrowserWindow(url); });
+  ipcMain.handle("browser-get-tabs", () => { const t = pendingTabs; pendingTabs = []; return t; });
   ipcMain.handle("browser-external", (e, url, browser) => openInExternalBrowser(url, browser));
 
   app.whenReady().then(() => {

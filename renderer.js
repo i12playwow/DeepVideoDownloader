@@ -262,12 +262,8 @@ $("testProxies").addEventListener("click", async () => {
     if (!urls.length) { window.api.openBrowser(); return; }
     const target = $("browserTarget").value;
     if (target === "builtin") {
-      // built-in window shows one page at a time; open the first
-      window.api.openBrowser(urls[0]);
-      window.api.browserNav(urls[0]);
-      if (urls.length > 1) {
-        alert("The built-in browser shows one page at a time — opened the first URL. Use Chrome/Edge/Brave to open all.");
-      }
+      // open each URL as a tab in the built-in browser
+      window.api.openBrowser(urls);
     } else {
       let notFound = false;
       urls.forEach((u) => {
@@ -278,13 +274,15 @@ $("testProxies").addEventListener("click", async () => {
   };
   $("browserGo").addEventListener("click", browserGo);
   $("browserUrl").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) browserGo(); });
-  $("browserBack").addEventListener("click", () => window.api.browserBack());
-  $("browserFwd").addEventListener("click", () => window.api.browserForward());
-  $("browserReload").addEventListener("click", () => window.api.browserReload());
-  window.api.onBrowserState((s) => {
-    if (s.url) $("browserUrl").value = s.url;
-    $("browserBack").disabled = !s.canBack;
-    $("browserFwd").disabled = !s.canForward;
+  $("downloadAll").addEventListener("click", async () => {
+    const urls = parseUrls();
+    if (!urls.length) return;
+    let ok = 0;
+    for (const u of urls) {
+      const r = await window.api.add(u);
+      if (r && r.ok) ok++;
+    }
+    alert("Enqueued " + ok + " of " + urls.length + " URL(s).");
   });
 
 $("resumeLast").addEventListener("click", async () => {

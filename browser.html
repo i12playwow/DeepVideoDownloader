@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Deep Grab Browser</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: system-ui, Segoe UI, sans-serif; }
+    body { display: flex; flex-direction: column; background: #0f172a; color: #e2e8f0; }
+    #nav { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: #1e293b; border-bottom: 1px solid #334155; flex: 0 0 auto; }
+    button { background: #334155; color: #e2e8f0; border: none; border-radius: 5px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
+    button:hover { background: #475569; }
+    button:disabled { opacity: .4; cursor: default; }
+    #url { flex: 1; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 5px; padding: 6px 10px; font-size: 13px; }
+    #tabbar { display: flex; align-items: center; gap: 4px; padding: 4px 8px; background: #16233b; overflow-x: auto; flex: 0 0 auto; border-bottom: 1px solid #1e293b; }
+    .tab { display: inline-flex; align-items: center; gap: 6px; max-width: 180px; padding: 4px 8px; border-radius: 6px 6px 0 0; background: #1e293b; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; }
+    .tab.active { background: #334155; }
+    .tab .t { overflow: hidden; text-overflow: ellipsis; }
+    .tab .x { padding: 0 2px; opacity: .7; }
+    .tab .x:hover { opacity: 1; }
+    .tab-new { background: transparent; color: #94a3b8; padding: 2px 8px; font-size: 16px; }
+    #content { flex: 1 1 auto; position: relative; }
+    webview { width: 100%; height: 100%; border: none; position: absolute; top: 0; left: 0; }
+  </style>
+</head>
+<body>
+  <div id="nav">
+    <button id="back" title="Back">&#8592;</button>
+    <button id="fwd" title="Forward">&#8594;</button>
+    <button id="reload" title="Reload">&#8635;</button>
+    <input id="url" type="text" placeholder="Enter a URL and press Enter">
+    <button id="go">Go</button>
+  </div>
+  <div id="tabbar">
+    <button class="tab-new" id="newtab" title="New tab">+</button>
+  </div>
+  <div id="content"></div>
+  <script>
+    const urlInput = document.getElementById("url");
+    const backBtn = document.getElementById("back");
+    const fwdBtn = document.getElementById("fwd");
+    const reloadBtn = document.getElementById("reload");
+    const goBtn = document.getElementById("go");
+    const tabbar = document.getElementById("tabbar");
+    const content = document.getElementById("content");
+    let seq = 0;
+    let tabs = [];
+    let activeId = null;
+
+    const host = (u) => { try { return new URL(u).hostname; } catch (e) { return u; } };
+
+    function activeTab() { return tabs.find(t => t.id === activeId) || null; }
+
+    function activate(id) {
+      activeId = id;
+      tabs.forEach(t => {
+        const on = t.id === id;
+        t.wv.style.display = on ? "block" : "none";
+        t.btn.classList.toggle("active", on);
+      });
+      const a = activeTab();
+      if (a) { urlInput.value = a.url; refreshNav(); }
+    }
+
+    function refreshNav() {
+      const a = activeTab();
+      if (!a) return;
+      try {
+        backBtn.disabled = !a.wv.canGoBack();
+        fwdBtn.disabled = !a.wv.canGoForward();
+      } catch (e) { /* webview not dom-ready yet */ }
+    }
+
+    function bind(wv, btn, t) {
+      wv.addEventListener("did-navigate", (e) => { t.url = e.url; btn.querySelector(".t").textContent = host(e.url); if (t.id === activeId) urlInput.value = e.url; refreshNav(); });
+      wv.addEventListener("did-navigate-in-page", (e) => { t.url = e.url; if (t.id === activeId) urlInput.value = e.url; });
+      wv.addEventListener("did-start-loading", () => { if (t.id === activeId) { try { backBtn.disabled = !wv.canGoBack(); } catch (e) {} } });
+      wv.addEventListener("did-stop-loading", () => { t.url = wv.getURL(); if (t.id === activeId) refreshNav(); });
+    }
+
+    function addTab(url) {
+      const id = "t" + (++seq);
+      const wv = document.createElement("webview");
+      wv.setAttribute("partition", "persist:deepgrab-browser");
+      wv.setAttribute("allowpopups", "");
+      wv.style.display = "none";
+      wv.setAttribute("src", url || "https://www.google.com");
+      content.appendChild(wv);
+
+      const btn = document.createElement("div");
+      btn.className = "tab";
+      btn.innerHTML = '<span class="t">' + host(url || "https://www.google.com") + '</span><span class="x" title="Close">&#10005;</span>';
+      btn.addEventListener("click", (e) => { if (!e.target.classList.contains("x")) activate(id); });
+      btn.querySelector(".x").addEventListener("click", () => closeTab(id));
+      tabbar.appendChild(btn);
+
+      const t = { id, wv, btn, url: url || "https://www.google.com" };
+      tabs.push(t);
+      bind(wv, btn, t);
+      activate(id);
+    }
+
+    function closeTab(id) {
+      const idx = tabs.findIndex(t => t.id === id);
+      if (idx === -1) return;
+      const t = tabs[idx];
+      t.wv.remove();
+      t.btn.remove();
+      tabs.splice(idx, 1);
+      if (activeId === id) {
+        if (tabs.length) activate(tabs[Math.max(0, idx - 1)].id);
+        else addTab("https://www.google.com");
+      }
+    }
+
+    function go() {
+      let u = urlInput.value.trim();
+      if (!u) return;
+      if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) u = "https://" + u;
+      const a = activeTab();
+      if (a) a.wv.loadURL(u);
+    }
+
+    goBtn.addEventListener("click", go);
+    urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+    reloadBtn.addEventListener("click", () => { const a = activeTab(); if (a) a.wv.reload(); });
+    backBtn.addEventListener("click", () => { const a = activeTab(); if (a) a.wv.goBack(); });
+    fwdBtn.addEventListener("click", () => { const a = activeTab(); if (a) a.wv.goForward(); });
+    document.getElementById("newtab").addEventListener("click", () => addTab("https://www.google.com"));
+
+    window.api.getInitialTabs().then((urls) => {
+      const list = (urls || []).filter(Boolean);
+      if (list.length) list.forEach((u) => addTab(u));
+      else addTab("https://www.google.com");
+    });
+  </script>
+</body>
+</html>
