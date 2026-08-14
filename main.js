@@ -381,6 +381,25 @@ ipcMain.handle("downloads-add", async (e, url) => {
     return { ok: false, error: err.message };
   }
 });
+// Batch enqueue — import hundreds/thousands of URLs in one IPC call instead of
+// one round-trip per URL. Resolution stays lazy (enqueue is cheap); items are
+// pumped by the existing concurrency-limited queue.
+ipcMain.handle("downloads-add-many", async (e, urls) => {
+  if (!Array.isArray(urls)) return { ok: false, error: "Invalid list" };
+  let ok = 0;
+  const ids = [];
+  for (const raw of urls) {
+    const url = typeof raw === "string" ? raw.trim() : "";
+    if (!url) continue;
+    try {
+      let title = "video";
+      try { const u = new URL(url); title = u.pathname.split("/").filter(Boolean).pop() || u.hostname; } catch (err) { /* default */ }
+      const id = await dm.enqueue({ url, title, referer: "" });
+      ids.push(id); ok++;
+    } catch (err) { /* skip invalid */ }
+  }
+  return { ok: true, count: ok, ids };
+});
 ipcMain.handle("download-schedule", (e, { id, mode, scheduledStart, scheduledStop }) => {
   const item = dm.items.get(id);
   if (!item) return { ok: false, error: "Item not found" };

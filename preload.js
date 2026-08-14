@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld("api", {
   cancel: (id) => ipcRenderer.invoke("download-cancel", id),
   remove: (id) => ipcRenderer.invoke("download-remove", id),
   add: (url) => ipcRenderer.invoke("downloads-add", url),
+  addMany: (urls) => ipcRenderer.invoke("downloads-add-many", urls),
   schedule: (data) => ipcRenderer.invoke("download-schedule", data),
   testProxies: (url) => ipcRenderer.invoke("test-proxies", url),
   openDir: () => ipcRenderer.invoke("open-dir"),

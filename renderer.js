@@ -55,22 +55,24 @@ function errorColor(it) {
   return it.errorCategory === "expired" ? "var(--amber)" : "var(--red)";
 }
 
-function render() {
-  const tbody = $("dlsBody");
-  const displayItems = showing === "history" ? Array.from(historyItems.values()) : Array.from(items.values());
+// Virtualized list: only rows in the viewport are in the DOM, with spacer rows
+// keeping the scrollbar sized to the full list. Keeps the UI smooth with
+// thousands of queued downloads. ROW_H is an approximate fixed row height.
+const ROW_H = 40;
+let renderTimer = null;
 
-  if (!displayItems.length) {
-    tbody.innerHTML = `<tr id="emptyRow"><td colspan="9">${showing === "history" ? "No history yet." : "No downloads yet. Find an MP4 in the browser and it will appear here."}</td></tr>`;
-    updateBatchBar();
-    return;
-  }
-  tbody.innerHTML = "";
-  for (const it of displayItems) {
-    const tr = document.createElement("tr");
-    const pct = it.total ? Math.min(100, (it.received / it.total) * 100) : 0;
-    const done = it.status === "done" || it.status === "cancelled";
+function spacer(px) {
+  const tr = document.createElement("tr");
+  tr.style.height = px + "px";
+  tr.style.border = "none";
+  tr.innerHTML = '<td colspan="9"></td>';
+  return tr;
+}
 
-    tr.innerHTML = `
+function rowHtml(it, showing) {
+  const pct = it.total ? Math.min(100, (it.received / it.total) * 100) : 0;
+  const done = it.status === "done" || it.status === "cancelled";
+  return `
       <td class="sel">${showing === "history" ? "" : `<input type="checkbox" data-sel="${esc(it.id)}" ${selected.has(it.id) ? "checked" : ""}>`}</td>
       <td class="name" title="${esc(it.url)}">
         <div>${esc(it.fileName)}</div>
@@ -86,9 +88,38 @@ function render() {
       <td class="sched">${fmtSched(it)}</td>
       <td class="status ${statusClass(it.status)}">${esc(it.status)}</td>
       <td class="actions">${showing === "history" ? histActionButtons(it) : actionButtons(it)}</td>`;
+}
+
+function render() {
+  const tbody = $("dlsBody");
+  const displayItems = showing === "history" ? Array.from(historyItems.values()) : Array.from(items.values());
+  const total = displayItems.length;
+
+  if (!total) {
+    tbody.innerHTML = `<tr id="emptyRow"><td colspan="9">${showing === "history" ? "No history yet." : "No downloads yet. Find an MP4 in the browser and it will appear here."}</td></tr>`;
+    updateBatchBar();
+    return;
+  }
+  const scroll = $("dlsScroll");
+  const st = scroll.scrollTop || 0;
+  const vh = scroll.clientHeight || 400;
+  const start = Math.max(0, Math.floor(st / ROW_H) - 6);
+  const end = Math.min(total, Math.ceil((st + vh) / ROW_H) + 6);
+  tbody.innerHTML = "";
+  if (start > 0) tbody.appendChild(spacer(start * ROW_H));
+  for (let i = start; i < end; i++) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = rowHtml(displayItems[i], showing);
     tbody.appendChild(tr);
   }
+  if (end < total) tbody.appendChild(spacer((total - end) * ROW_H));
   updateBatchBar();
+}
+
+// Coalesce rapid updates (status + progress) into one re-render per window.
+function scheduleRender() {
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => { renderTimer = null; render(); }, 120);
 }
 
 function actionButtons(it) {
@@ -196,7 +227,11 @@ window.api.onUpdate((item) => {
   } else {
     items.set(item.id, item);
   }
-  render();
+  scheduleRender();
+});
+
+$("dlsScroll").addEventListener("scroll", () => {
+  if (!renderTimer) render(); // virtualized render is cheap; keep rows in view
 });
 
 // ---------------- settings ----------------
@@ -277,12 +312,9 @@ $("testProxies").addEventListener("click", async () => {
   $("downloadAll").addEventListener("click", async () => {
     const urls = parseUrls();
     if (!urls.length) return;
-    let ok = 0;
-    for (const u of urls) {
-      const r = await window.api.add(u);
-      if (r && r.ok) ok++;
-    }
-    alert("Enqueued " + ok + " of " + urls.length + " URL(s).");
+    const r = await window.api.addMany(urls);
+    const n = r && r.ok ? r.count : 0;
+    alert("Enqueued " + n + " of " + urls.length + " URL(s).");
   });
 
 $("resumeLast").addEventListener("click", async () => {
@@ -298,6 +330,7 @@ $("showActive").addEventListener("click", () => {
   showing = "active";
   $("showActive").classList.add("active");
   $("showHistory").classList.remove("active");
+  $("dlsScroll").scrollTop = 0;
   render();
 });
 
@@ -305,6 +338,7 @@ $("showHistory").addEventListener("click", () => {
   showing = "history";
   $("showHistory").classList.add("active");
   $("showActive").classList.remove("active");
+  $("dlsScroll").scrollTop = 0;
   loadHistory();
   render();
 });
