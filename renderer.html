@@ -9,7 +9,10 @@
 <body>
   <header>
     <h1>▶ Deep Video Downloader</h1>
-    <div class="hint">WebSocket server: <code id="wsHint">ws://127.0.0.1:8765</code> — links arrive from the browser extension</div>
+    <div class="hint">WebSocket server: <code>ws://127.0.0.1:8765</code> — links arrive from the browser extension</div>
+    <div style="margin-top: 4px;">
+      <button id="themeToggle" class="btn ghost" style="font-size: 11px;">🌓 Toggle theme</button>
+    </div>
   </header>
 
   <main>
@@ -18,14 +21,27 @@
         <h2>Downloads</h2>
         <div class="panel-actions">
           <button id="openDir" class="btn ghost">Open folder</button>
+          <button id="resumeLast" class="btn ghost">↻ Resume last</button>
+          <button id="showActive" class="btn ghost active">Active</button>
+          <button id="showHistory" class="btn ghost">History</button>
+          <button id="clearHistory" class="btn ghost">Clear history</button>
+          <button id="exportJson" class="btn ghost">Export JSON</button>
+          <button id="exportCsv" class="btn ghost">Export CSV</button>
         </div>
+      </div>
+      <div class="batch-bar" id="batchBar">
+        <button id="batchPause" class="btn ghost" disabled>⏸ Pause selected</button>
+        <button id="batchResume" class="btn ghost" disabled>▶ Resume selected</button>
+        <button id="batchCancel" class="btn ghost" disabled>✕ Cancel selected</button>
+        <button id="batchRemove" class="btn ghost" disabled>🗑 Remove selected</button>
+        <span id="batchCount" class="batch-count"></span>
       </div>
       <table id="dls">
         <thead>
-          <tr><th>File</th><th>Size</th><th class="wide">Progress</th><th>Speed</th><th>Proxy</th><th>Status</th><th>Actions</th></tr>
+          <tr><th class="sel"><input type="checkbox" id="selAll" title="Select all"></th><th>File</th><th>Size</th><th class="wide">Progress</th><th>Speed</th><th>Proxy</th><th>Sched</th><th>Status</th><th>Actions</th></tr>
         </thead>
         <tbody id="dlsBody">
-          <tr id="emptyRow"><td colspan="7">No downloads yet. Find an MP4 in the browser and it will appear here.</td></tr>
+          <tr id="emptyRow"><td colspan="9">No downloads yet. Find an MP4 in the browser and it will appear here.</td></tr>
         </tbody>
       </table>
     </section>
@@ -47,6 +63,12 @@
         <label>Speed limit (KB/s, 0 = unlimited)
           <input type="number" id="speedLimitKB" min="0">
         </label>
+        <label>Retry attempts (network failures)
+          <input type="number" id="maxRetries" min="0" max="10" value="3">
+        </label>
+        <label>URL refresh attempts (expired direct links)
+          <input type="number" id="maxRefresh" min="0" max="10" value="2">
+        </label>
       </div>
       <div class="checks">
         <label><input type="checkbox" id="autoProxy"> Auto proxy — pick fastest proxy per connection to boost speed</label>
@@ -62,6 +84,16 @@
           <ul id="proxyResults"></ul>
         </div>
       </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Bandwidth</h2>
+        <div class="panel-actions">
+          <span id="bwStats" style="font-size: 11px; color: var(--muted);"></span>
+        </div>
+      </div>
+      <canvas id="bwChart" width="900" height="120" style="width: 100%; height: 120px;"></canvas>
     </section>
   </main>
 

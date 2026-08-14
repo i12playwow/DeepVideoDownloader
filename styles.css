@@ -1,3 +1,16 @@
+[data-theme="light"] {
+  --bg: #f8fafc;
+  --panel: #ffffff;
+  --border: rgba(0, 0, 0, 0.1);
+  --accent: #3b82f6;
+  --text: #1e293b;
+  --muted: #64748b;
+  --green: #22c55e;
+  --amber: #fbbf24;
+  --red: #ef4444;
+  --blue: #60a5fa;
+}
+
 :root {
   --bg: #0f172a;
   --panel: #1e293b;
@@ -8,6 +21,8 @@
   --green: #22c55e;
   --amber: #fbbf24;
   --red: #ef4444;
+  --blue: #60a5fa;
+  --theme-color: #1e293b;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -41,6 +56,14 @@ header h1 { font-size: 18px; margin-bottom: 4px; }
 .panel-head h2 { font-size: 14px; }
 .panel-actions { display: flex; gap: 8px; }
 
+.batch-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.batch-bar .btn { padding: 5px 10px; font-size: 11px; }
+.batch-count { color: var(--muted); font-size: 11px; margin-left: 4px; }
+.btn:disabled { opacity: 0.4; cursor: default; }
+
+th.sel, td.sel { width: 26px; padding-right: 2px; padding-left: 6px; }
+th.sel input, td.sel input { margin: 0; }
+
 table { width: 100%; border-collapse: collapse; }
 th, td {
   text-align: left;
@@ -63,13 +86,16 @@ tr:hover td { background: rgba(255, 255, 255, 0.03); }
   transition: width 0.2s;
 }
 .pct { color: var(--muted); font-size: 11px; margin-top: 3px; }
+.refreshed { color: var(--amber); font-size: 10px; margin-top: 2px; }
 
 .speed { color: var(--amber); font-weight: 600; white-space: nowrap; }
 .proxy { color: var(--muted); font-size: 11px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched { color: var(--muted); font-size: 11px; white-space: nowrap; }
 
 .status { font-weight: 600; white-space: nowrap; }
 .st-queued, .st-paused, .st-cancelled { color: var(--muted); }
 .st-running { color: var(--accent); }
+.st-scheduled { color: var(--blue); }
 .st-done { color: var(--green); }
 .st-error { color: var(--red); }
 
@@ -87,6 +113,8 @@ td.actions button {
 td.actions button:hover { background: rgba(255,255,255,0.08); }
 td.actions button.danger:hover { border-color: var(--red); color: var(--red); }
 
+.st-done, .st-cancelled { opacity: 0.7; }
+
 .btn {
   background: var(--accent);
   color: #fff;
@@ -100,6 +128,7 @@ td.actions button.danger:hover { border-color: var(--red); color: var(--red); }
 .btn:hover { background: #2563eb; }
 .btn.ghost { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
 .btn.ghost:hover { background: #334155; }
+.btn.ghost.active { background: var(--panel); border-color: var(--accent); color: var(--accent); }
 
 .grid {
   display: grid;
@@ -121,6 +150,13 @@ input[type="text"], input[type="number"], textarea {
 }
 input:focus, textarea:focus { border-color: var(--accent); }
 textarea { resize: vertical; font-family: monospace; }
+
+#bwChart {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px;
+}
 
 .checks { margin-bottom: 12px; }
 .checks label { display: flex; align-items: center; gap: 6px; cursor: pointer; }

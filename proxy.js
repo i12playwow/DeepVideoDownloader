@@ -7,21 +7,18 @@ const http = require("http");
 const https = require("https");
 const { URL } = require("url");
 
+const PROXY_SCHEMES = ["http", "https", "socks", "socks4", "socks5", "socks5h"];
+
 function parseProxyUrl(p) {
   try {
     const u = new URL(p);
-    // u.origin strips userinfo and is "null" for non-special schemes (socks://),
-    // which would break agent construction; rebuild the URL from parts.
-    let url = u.protocol + "//" + u.host;
-    if (u.username) {
-      const creds = encodeURIComponent(u.username) + (u.password ? ":" + encodeURIComponent(u.password) : "");
-      url = u.protocol + "//" + creds + "@" + u.host;
-    }
+    const protocol = u.protocol.replace(":", "");
+    if (!PROXY_SCHEMES.includes(protocol)) return null;
     return {
-      protocol: u.protocol.replace(":", ""),
+      protocol,
       host: u.hostname,
       port: u.port,
-      url
+      url: u.href
     };
   } catch (e) {
     return null;
@@ -86,28 +83,41 @@ class ProxyManager {
         return resolve(null);
       }
 
-      const started = Date.now();
-      const req = mod.request(urlObj, {
-        method: "HEAD",
-        agent,
-        headers: { "User-Agent": this.config.ua || "Mozilla/5.0" },
-        timeout
-      }, (res) => {
-        res.resume();
-        this.latency.set(p.url, Date.now() - started);
-        resolve({ ms: Date.now() - started, status: res.statusCode });
+      const probe = (method) => new Promise((res) => {
+        const started = Date.now();
+        const req = mod.request(urlObj, {
+          method,
+          agent,
+          headers: {
+            "User-Agent": this.config.ua || "Mozilla/5.0",
+            ...(method === "GET" ? { Range: "bytes=0-0" } : {})
+          },
+          timeout
+        }, (r) => {
+          r.resume();
+          res({ ms: Date.now() - started, status: r.statusCode });
+        });
+        req.on("error", () => res(null));
+        req.on("timeout", () => { req.destroy(); res(null); });
+        req.end();
       });
 
-      req.on("error", () => {
-        this.markBad(p);
-        this.latency.delete(p.url);
-        resolve(null);
-      });
-      req.on("timeout", () => {
-        req.destroy();
-        this.markBad(p);
-        this.latency.delete(p.url);
-        resolve(null);
+      // HEAD first; servers that reject HEAD would otherwise report the proxy
+      // as dead, so fall back to a ranged GET.
+      probe("HEAD").then((head) => {
+        if (head) {
+          this.latency.set(p.url, head.ms);
+          return resolve({ ms: head.ms, status: head.status });
+        }
+        return probe("GET").then((get) => {
+          if (!get) {
+            this.markBad(p);
+            this.latency.delete(p.url);
+            return resolve(null);
+          }
+          this.latency.set(p.url, get.ms);
+          return resolve({ ms: get.ms, status: get.status });
+        });
       });
     });
   }
