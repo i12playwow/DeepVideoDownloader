@@ -25,6 +25,12 @@ const DEFAULT_CONFIG = {
   autoProxy: true,
   ffmpegPath: "ffmpeg",
   theme: "dark",
+  saveHistory: true,
+  skipDuplicates: true,
+  autoCloseTab: true,
+  maxHistory: 2000,
+  liveWindow: 0,
+  autoTrimAt: 500,
   proxies: [
     "http://127.0.0.1:7890",
     "socks5://127.0.0.1:1080"
@@ -106,6 +112,16 @@ function pushUpdate(item) {
       }));
     }
   });
+  // Auto-close the built-in browser tab that produced this download and move
+  // to the next, when enabled (matches by the source page / referer URL).
+  if (
+    config.autoCloseTab &&
+    browserWindow && !browserWindow.isDestroyed() &&
+    (item.status === "done" || item.status === "error" || item.status === "cancelled")
+  ) {
+    const ref = item.referer || item.url;
+    try { browserWindow.webContents.send("browser-close-tab-for-url", ref); } catch (e) { /* ignore */ }
+  }
 }
 
 function startWsServer() {
@@ -376,29 +392,19 @@ ipcMain.handle("downloads-add", async (e, url) => {
       title = u.pathname.split("/").filter(Boolean).pop() || u.hostname;
     } catch (err) { /* keep default title */ }
     const id = await dm.enqueue({ url, title, referer: "" });
+    if (id === null) return { ok: false, duplicate: true, url };
     return { ok: true, id };
   } catch (err) {
     return { ok: false, error: err.message };
   }
 });
-// Batch enqueue — import hundreds/thousands of URLs in one IPC call instead of
-// one round-trip per URL. Resolution stays lazy (enqueue is cheap); items are
-// pumped by the existing concurrency-limited queue.
+// Batch import — hands URLs to the windowed loader (addPending) so thousands of
+// URLs are pulled into the active map a few at a time instead of materializing
+// them all at once.
 ipcMain.handle("downloads-add-many", async (e, urls) => {
   if (!Array.isArray(urls)) return { ok: false, error: "Invalid list" };
-  let ok = 0;
-  const ids = [];
-  for (const raw of urls) {
-    const url = typeof raw === "string" ? raw.trim() : "";
-    if (!url) continue;
-    try {
-      let title = "video";
-      try { const u = new URL(url); title = u.pathname.split("/").filter(Boolean).pop() || u.hostname; } catch (err) { /* default */ }
-      const id = await dm.enqueue({ url, title, referer: "" });
-      ids.push(id); ok++;
-    } catch (err) { /* skip invalid */ }
-  }
-  return { ok: true, count: ok, ids };
+  const n = dm.addPending(urls);
+  return { ok: true, count: n };
 });
 ipcMain.handle("download-schedule", (e, { id, mode, scheduledStart, scheduledStop }) => {
   const item = dm.items.get(id);

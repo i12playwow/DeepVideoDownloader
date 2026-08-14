@@ -68,7 +68,7 @@
           <input type="text" id="downloadDir">
         </label>
         <label>Parallel downloads
-          <input type="number" id="concurrency" min="1" max="10">
+          <input type="number" id="concurrency" min="1" max="200" title="Higher = faster bulk downloads but more network/Cloudflare/IP-ban risk">
         </label>
         <label>Segments per file (multi-connection)
           <input type="number" id="segments" min="1" max="16">
@@ -85,6 +85,9 @@
       </div>
       <div class="checks">
         <label><input type="checkbox" id="autoProxy"> Auto proxy — pick fastest proxy per connection to boost speed</label>
+        <label><input type="checkbox" id="saveHistory"> Save history (history.json in the download folder)</label>
+        <label><input type="checkbox" id="skipDuplicates"> Skip already-downloaded URLs (duplicate handling)</label>
+        <label><input type="checkbox" id="autoCloseTab"> Auto-close the browser tab + go to the next after a download</label>
       </div>
       <div class="grid cols-2">
         <label>Proxy list (one per line: http://…, https://…, socks5://…)

@@ -83,10 +83,23 @@ function isProxyFailure(err) {
   );
 }
 
+// HTTP 429 or a Cloudflare challenge body means we're being rate-limited /
+// bot-blocked, NOT that the video is dead. Retry with backoff + a different
+// proxy rather than re-resolving (the source page is likely blocked too).
+function isRateLimited(err) {
+  return !!(err && err.status === 429);
+}
+function isCloudflareBlocked(err) {
+  if (!err) return false;
+  return /cf-chl|challenge-platform|turnstile|just a moment|attention required|cf-ray|cloudflare/i.test(String(err.message));
+}
+
 function categorizeError(err) {
   if (!err) return "unknown";
   if (err.category) return err.category;
   if (err.aborted) return "aborted";
+  if (isRateLimited(err)) return "rate-limited";
+  if (isCloudflareBlocked(err)) return "blocked";
   if (err.status) return "http";
   if (/ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|socket/i.test(String(err.code || "") + " " + String(err.message))) return "network";
   if (isExpiredError(err)) return "expired";
@@ -531,9 +544,13 @@ class DownloadManager {
     this.active = 0;
     this._id = 0;
     this.history = [];
+    this._pending = [];       // bulk-import URLs waiting to be loaded into items
+    this._downloaded = new Set(); // URLs that reached "done" (for duplicate handling)
+    this._hostLast = new Map();   // hostname -> last request time (per-host pacing)
     this._speedBytes = 0;
     this._speedStart = Date.now();
     this._loadHistory();
+    this._loadDownloaded();
   }
 
    list() {
@@ -571,6 +588,7 @@ class DownloadManager {
    }
 
     _saveHistory() {
+      if (this.config.saveHistory === false) return; // history persistence toggle
       try {
         fsp.writeFile(this.historyPath, JSON.stringify(this.history, null, 2), "utf8").catch(() => {});
       } catch (e) { /* ignore */ }
@@ -608,7 +626,118 @@ class DownloadManager {
       return path.join(this.dir, "history.json");
     }
 
-   async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "" }) {
+    get downloadedPath() {
+      return path.join(this.dir, "downloaded.json");
+    }
+
+    _loadDownloaded() {
+      try {
+        const data = JSON.parse(fs.readFileSync(this.downloadedPath, "utf8"));
+        if (Array.isArray(data)) this._downloaded = new Set(data);
+      } catch (e) {
+        this._downloaded = new Set();
+      }
+    }
+
+    _saveDownloaded() {
+      try {
+        fsp.writeFile(this.downloadedPath, JSON.stringify(Array.from(this._downloaded), null, 0), "utf8").catch(() => {});
+      } catch (e) { /* ignore */ }
+    }
+
+    isDownloaded(url) {
+      return this._downloaded.has(String(url || ""));
+    }
+
+    _markDownloaded(url) {
+      this._downloaded.add(String(url || ""));
+      this._saveDownloaded();
+    }
+
+    // Move a terminal item to history (frees its slot for the windowed loader).
+    _toHistory(item) {
+      const histEntry = {
+        id: item.id,
+        url: item.url,
+        title: item.title,
+        referer: item.referer,
+        fileName: item.fileName,
+        total: item.total,
+        received: item.received,
+        status: item.status,
+        error: item.error,
+        timestamp: Date.now(),
+        endTime: Date.now(),
+        _samples: item._samples.slice(-120)
+      };
+      this.history.push(histEntry);
+      const cap = this.config.maxHistory || 500;
+      if (this.history.length > cap) this.history = this.history.slice(-cap);
+      this._saveHistory();
+      this.items.delete(item.id);
+      if (item.tempDir) fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+      this.onUpdate({ _removed: item.id });
+      this.refill();
+    }
+
+    // On a terminal state: record dedupe, auto-move to history when running a
+    // bulk/windowed import (or when the active map grows large), then refill.
+    _maybeFinalize(item) {
+      if (!item) return;
+      if (item.status === "done") this._markDownloaded(item.url);
+      const trim =
+        (this._pending && this._pending.length > 0) ||
+        this.items.size > (this.config.autoTrimAt || 500);
+      if (trim) this._toHistory(item);
+      else this.refill();
+    }
+
+    // Windowed loader: pull queued URLs from the pending list into the active
+    // map up to the live cap, so bulk imports stay memory-bounded.
+    refill() {
+      if (!this._pending || !this._pending.length) return;
+      const cap = this.config.liveWindow || (this.config.concurrency || 3) * 4;
+      while (this._pending.length && this.items.size < cap) {
+        const u = this._pending.shift();
+        if (!u) continue;
+        this.enqueue({ url: u, title: "", referer: "" }).catch(() => {});
+      }
+    }
+
+    // Enqueue a whole batch without materializing all of them at once.
+    addPending(urls) {
+      let added = 0;
+      for (const u of urls) {
+        const s = typeof u === "string" ? u.trim() : "";
+        if (!s) continue;
+        this._pending.push(s);
+        added++;
+      }
+      this.refill();
+      return added;
+    }
+
+    _hostOf(url) {
+      try { return new URL(url).hostname; } catch (e) { return null; }
+    }
+
+    // Per-host pacing: keep a minimum interval between requests to the same host
+    // so bulk downloads don't trip Cloudflare rate limits / IP bans.
+    async _paceHost(url, cooldownMs) {
+      const host = this._hostOf(url);
+      if (!host) return;
+      const min = cooldownMs || this.config.hostDelayMs || 120;
+      const last = this._hostLast.get(host) || 0;
+      const wait = min - (Date.now() - last);
+      if (wait > 0) await delay(wait);
+      this._hostLast.set(host, Date.now());
+    }
+
+   async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", force = false }) {
+    // Duplicate handling: skip URLs already downloaded (unless forced).
+    if (!force && this.config.skipDuplicates !== false && this.isDownloaded(url)) {
+      return null;
+    }
     const id = "dl-" + (++this._id) + "-" + Date.now();
     // Fall back to the streamtape/fstape URL slug when the sender gave no title.
     const effectiveTitle = title || titleFromReferer(referer);
@@ -697,6 +826,7 @@ class DownloadManager {
           next.errorCategory = categorizeError(err);
           next.speed = 0;
           this.emit(next);
+          this._maybeFinalize(next);
         })
         .finally(() => {
           this.active--;
@@ -773,6 +903,18 @@ class DownloadManager {
         break;
       } catch (err) {
         if (err.aborted || attempt >= maxRefresh) throw err;
+        // Rate-limited / Cloudflare-blocked: rotate proxy, back off, and retry
+        // the same URL — the video isn't dead and re-resolving the (also blocked)
+        // source page would just waste requests.
+        if (isRateLimited(err) || isCloudflareBlocked(err)) {
+          if (this.proxyManager && item._proxy) this.proxyManager.markBad(item._proxy);
+          item._proxy = null;
+          await delay(1500 * (attempt + 1));
+          item.error = "";
+          item.status = "running";
+          this.emit(item);
+          continue;
+        }
         // Expired direct URL (e.g. streamtape signed token) — re-resolve the
         // original page and retry from scratch with the fresh URL.
         if (!isExpiredError(err)) throw err;
@@ -831,6 +973,9 @@ class DownloadManager {
 
     const actualUrl = item._resolvedUrl || item.url;
 
+    // Cloudflare/anti-bot pacing: don't hammer a single host with back-to-back requests.
+    await this._paceHost(actualUrl);
+
     if (item.kind === "hls" || isHlsUrl(actualUrl)) {
       item.kind = "hls";
       item.total = 0; // playlist has no byte size — indeterminate progress
@@ -863,6 +1008,7 @@ class DownloadManager {
     item.status = "done";
     item.speed = 0;
     this.emit(item);
+    this._maybeFinalize(item);
   }
 
    async probe(item, baseHeaders, actualUrl) {
@@ -1260,37 +1406,17 @@ class DownloadManager {
     } else if (item.status === "queued" || item.status === "paused") {
       item.status = "cancelled";
     }
-     fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+      fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
     if (item.finalPath) fsp.rm(item.finalPath, { force: true }).catch(() => {});
     this.emit(item);
+    this._maybeFinalize(item);
   }
 
    remove(id) {
      const item = this.items.get(id);
      if (!item) return;
      if (["done", "error", "cancelled"].includes(item.status)) {
-        const histEntry = {
-          id: item.id,
-          url: item.url,
-          title: item.title,
-          referer: item.referer,
-          fileName: item.fileName,
-          total: item.total,
-          received: item.received,
-          status: item.status,
-          error: item.error,
-          timestamp: Date.now(),
-          endTime: Date.now(),
-          _samples: item._samples.slice(-120)
-        };
-       this.history.push(histEntry);
-       if (this.history.length > 500) this.history = this.history.slice(-500);
-       this._saveHistory();
-       this.items.delete(id);
-       if (item.tempDir) {
-         fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
-       }
-       this.onUpdate({ _removed: id });
+       this._toHistory(item);
      }
    }
  }

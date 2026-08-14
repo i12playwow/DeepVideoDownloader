@@ -133,6 +133,12 @@
       if (list.length) list.forEach((u) => addTab(u));
       else addTab("https://www.google.com");
     });
+
+    // Auto-close the tab whose page produced a finished download (and go to next).
+    window.api.onCloseTabForUrl((url) => {
+      const idx = tabs.findIndex((t) => t.url === url);
+      if (idx !== -1) closeTab(tabs[idx].id);
+    });
   </script>
 </body>
 </html>

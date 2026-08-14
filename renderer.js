@@ -244,6 +244,9 @@ async function loadSettings() {
   $("maxRetries").value = s.maxRetries ?? 3;
   $("maxRefresh").value = s.maxRefresh ?? 2;
   $("autoProxy").checked = !!s.autoProxy;
+  $("saveHistory").checked = s.saveHistory !== false;
+  $("skipDuplicates").checked = s.skipDuplicates !== false;
+  $("autoCloseTab").checked = s.autoCloseTab !== false;
   $("proxies").value = (s.proxies || []).join("\n");
   applyTheme(s.theme || "dark");
 }
@@ -268,6 +271,9 @@ $("save").addEventListener("click", async () => {
     maxRetries: Math.max(0, parseInt($("maxRetries").value || "3", 10)),
     maxRefresh: Math.max(0, parseInt($("maxRefresh").value || "2", 10)),
     autoProxy: $("autoProxy").checked,
+    saveHistory: $("saveHistory").checked,
+    skipDuplicates: $("skipDuplicates").checked,
+    autoCloseTab: $("autoCloseTab").checked,
     proxies: $("proxies").value.split("\n").map((p) => p.trim()).filter(Boolean)
   });
 });
