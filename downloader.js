@@ -691,7 +691,7 @@ class DownloadManager {
       this.emit(next);
       this.run(next)
         .catch((err) => {
-          if (next.status === "paused" || next.status === "cancelled") return;
+          if (err.aborted || next.status === "paused" || next.status === "cancelled") return;
           next.status = "error";
           next.error = err.message || String(err);
           next.errorCategory = categorizeError(err);
@@ -1260,7 +1260,8 @@ class DownloadManager {
     } else if (item.status === "queued" || item.status === "paused") {
       item.status = "cancelled";
     }
-    fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+     fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+    if (item.finalPath) fsp.rm(item.finalPath, { force: true }).catch(() => {});
     this.emit(item);
   }
 
