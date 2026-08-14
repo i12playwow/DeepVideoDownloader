@@ -250,24 +250,34 @@ $("testProxies").addEventListener("click", async () => {
 
   $("openDir").addEventListener("click", () => window.api.openDir());
   $("openBrowser").addEventListener("click", () => window.api.openBrowser());
+  const parseUrls = () => {
+    return String($("browserUrl").value || "")
+      .split(/[\n,;\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((u) => (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u) ? u : "https://" + u));
+  };
   const browserGo = () => {
-    let u = ($("browserUrl").value || "").trim();
-    if (!u) { window.api.openBrowser(); return; }
-    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) u = "https://" + u;
+    const urls = parseUrls();
+    if (!urls.length) { window.api.openBrowser(); return; }
     const target = $("browserTarget").value;
     if (target === "builtin") {
-      window.api.openBrowser(u);
-      window.api.browserNav(u);
+      // built-in window shows one page at a time; open the first
+      window.api.openBrowser(urls[0]);
+      window.api.browserNav(urls[0]);
+      if (urls.length > 1) {
+        alert("The built-in browser shows one page at a time — opened the first URL. Use Chrome/Edge/Brave to open all.");
+      }
     } else {
-      window.api.openExternal(u, target).then((r) => {
-        if (r && r.error === "not-found") {
-          alert("Could not find " + target + " on this system.");
-        }
+      let notFound = false;
+      urls.forEach((u) => {
+        window.api.openExternal(u, target).then((r) => { if (r && r.error === "not-found") notFound = true; });
       });
+      setTimeout(() => { if (notFound) alert("Could not find " + target + " on this system."); }, 800);
     }
   };
   $("browserGo").addEventListener("click", browserGo);
-  $("browserUrl").addEventListener("keydown", (e) => { if (e.key === "Enter") browserGo(); });
+  $("browserUrl").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) browserGo(); });
   $("browserBack").addEventListener("click", () => window.api.browserBack());
   $("browserFwd").addEventListener("click", () => window.api.browserForward());
   $("browserReload").addEventListener("click", () => window.api.browserReload());
