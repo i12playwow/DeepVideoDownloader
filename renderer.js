@@ -52,7 +52,7 @@ function statusClass(st) {
 }
 
 function errorColor(it) {
-  return it.errorCategory === "expired" ? "var(--amber)" : "var(--red)";
+  return (it.errorCategory === "expired" || it.errorCategory === "requires-browser") ? "var(--amber)" : "var(--red)";
 }
 
 // Virtualized list: only rows in the viewport are in the DOM, with spacer rows

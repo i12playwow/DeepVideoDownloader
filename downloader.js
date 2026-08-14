@@ -130,7 +130,19 @@ async function resolveStreamtape(videoPageUrl, { proxyManager, config }, baseHea
   // #botlink and appends &stream=1. Returning the /e/ page itself would
   // download the player HTML as the "video", so fail instead of falling back.
   const gv = html.match(STRGV);
-  if (!gv) throw new Error("Could not find video source on Streamtape page.");
+  if (!gv) {
+    // Since 8/2026 modern streamtape embeds no longer inline get_video — the
+    // signed URL comes from a /stat/<token>?a=0&rc=<recaptcha> POST that only a
+    // real browser (recaptcha + click) can drive. Surface this distinctly so it
+    // isn't mistaken for a dead video and the user is pointed at the built-in
+    // browser / extension.
+    if (/\/stat\//i.test(html)) {
+      const err = new Error("Streamtape requires browser capture (recaptcha/stat gate) — open it in the built-in browser.");
+      err.category = "requires-browser";
+      throw err;
+    }
+    throw new Error("Could not find video source on Streamtape page.");
+  }
   // fstape is a streamtape clone — same embed/HTML/get_video structure
   const host = /fstape\.com/i.test(videoPageUrl) ? "fstape.com" : "streamtape.com";
   const apiUrl =
