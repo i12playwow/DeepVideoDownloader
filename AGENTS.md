@@ -59,7 +59,7 @@ Each `resolve*()` returns `{resolvedUrl, proxy, agent, origin?}` and re-resolves
 
 ## Verification (no test suite)
 - Resolvers: serve mock HTML on 127.0.0.1, call `resolve*()` with `{proxyManager:{}, config:{autoProxy:false, maxRetries:2}}`.
-- Full download: local server must honor `Range` (HEAD → Content-Length + `Accept-Ranges`; GET Range → 206) or segmented fails. Use `test-range-server.js` + `test-video.mp4`.
+- Full download: local server must honor `Range` (HEAD → Content-Length + `Accept-Ranges`; GET Range → 206) or segmented fails. Use `test-range-server.js` + `test-video.mp4`. Verified 8/2026: segmented download is byte-identical to source; `pause()`→`resume()` (back-to-back) and mid-flight `cancel()` both pass with the guards above; HLS remuxes to a valid `.mp4` via ffmpeg from a local VOD fixture.
 - Extension↔app: `ws` client to 8765, send `download`/`probe`, assert `accepted`/`probe-result`/`status`→`done`. `test-page.html` + `test-best-only.js` cover Best-only selection + WS contract.
 - Network capture: not headless-testable — reload unpacked extension, play a video, check found list. Already-played videos must play again (not retroactive).
 
@@ -70,6 +70,8 @@ Each `resolve*()` returns `{resolvedUrl, proxy, agent, origin?}` and re-resolves
 - `STRGV` matches the signed `get_video?id=..&expires=..&ip=..&token=..` baked into the embed page; rebuild as `https://streamtape.com/get_video?...&stream=1`. A URL **already containing** `get_video?` is treated as resolved and passed through (fetching it downloads the video binary). Don't reintroduce the old `STRRE`/`STRVID` approach (returned the `/e/` HTML as `.mp4`).
 - The size probe (`HEAD Range: bytes=0-0`) trusts `Content-Range: bytes 0-0/TOTAL` over the range-truncated `content-length` (both `downloader.js` and `main.js` `probeUrl`), or a Range-honoring server mis-reports the file as 1 byte.
 - Item `_activeRes` is a Set of live responses **plus in-flight requests** (`requestWithRedirects` takes `onReq` → `_trackReq`), so `abort()` interrupts the request phase too. `abort()` errors carry `name:"AbortError"` + `aborted:true` so retry/refresh logic skips cancelled items. `_runOnce` re-checks status right after the probe (probe can take seconds).
+- `pump()`'s `.catch` **must keep ignoring `err.aborted`** — not just `paused`/`cancelled` status. A `pause()` immediately followed by `resume()` re-queues the item (status back to `running`) before the pause's stale `AbortError` lands; without the `err.aborted` guard that late abort wrongly flips the resumed item to `error` (fixed 8/2026 — don't "tighten" the guard away).
+- `cancel()` **must remove the empty `finalPath`** it created mid-flight, not just `tempDir`, or a cancelled download leaves a 0-byte `.mp4` in the download dir (fixed 8/2026).
 - Speed limit is **manager-wide** (`_speedBytes`/`_speedStart`), not per download.
 - `new URL(p).origin` returns `"null"` for non-http(s) schemes — `parseProxyUrl` must use `u.href`. `ws://`/`wss://` rejected as proxy schemes.
 - Never run `asar extract-file <app.asar> <file>` from the repo root — it writes into CWD (a follow-up `Remove-Item` deletes the real source). Restore `main.js` from `dist/win-unpacked/resources/app.asar`.
