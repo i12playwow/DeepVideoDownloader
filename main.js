@@ -239,6 +239,41 @@ function createBrowserWindow(url) {
   });
 }
 
+// Locate an installed external browser executable (Chrome/Edge/Brave), or null.
+function findBrowser(name) {
+  const candidates = {
+    chrome: [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      path.join(os.homedir(), "AppData", "Local", "Google", "Chrome", "Application", "chrome.exe")
+    ],
+    edge: [
+      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"
+    ],
+    brave: [
+      "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+      path.join(os.homedir(), "AppData", "Local", "BraveSoftware", "Brave-Browser", "Application", "brave.exe")
+    ]
+  };
+  return (candidates[name] || []).find((p) => fs.existsSync(p)) || null;
+}
+
+// Open a URL in an external browser (chrome/edge/brave/default).
+function openInExternalBrowser(url, browser) {
+  const target = String(browser || "default").toLowerCase();
+  if (target === "default") {
+    shell.openExternal(String(url)).catch(() => {});
+    return { ok: true, browser: target, exe: "system-default" };
+  }
+  const exe = findBrowser(target);
+  if (!exe) return { error: "not-found", browser: target };
+  execFile(exe, [String(url)], (err) => {
+    if (err) console.error("[browser] launch error:", err.message);
+  });
+  return { ok: true, browser: target, exe };
+}
+
 // ---------------- clipboard monitoring ----------------
 const VIDEO_DOMAINS = [
   "streamtape.com",
@@ -481,6 +516,7 @@ if (gotLock) {
   ipcMain.handle("browser-reload", () => {
     if (browserWindow && !browserWindow.isDestroyed()) browserWindow.webContents.reload();
   });
+  ipcMain.handle("browser-external", (e, url, browser) => openInExternalBrowser(url, browser));
 
   app.whenReady().then(() => {
     startWsServer();

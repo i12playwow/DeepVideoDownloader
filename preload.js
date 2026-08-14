@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld("api", {
   browserBack: () => ipcRenderer.invoke("browser-back"),
   browserForward: () => ipcRenderer.invoke("browser-forward"),
   browserReload: () => ipcRenderer.invoke("browser-reload"),
+  openExternal: (url, browser) => ipcRenderer.invoke("browser-external", url, browser),
   onBrowserState: (cb) => ipcRenderer.on("browser-state", (e, s) => cb(s)),
   onUpdate: (cb) => ipcRenderer.on("download-update", (e, item) => cb(item)),
   onClipboardUrl: (cb) => ipcRenderer.on("clipboard-url", (e, data) => cb(data)),

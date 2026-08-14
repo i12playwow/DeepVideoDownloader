@@ -254,8 +254,17 @@ $("testProxies").addEventListener("click", async () => {
     let u = ($("browserUrl").value || "").trim();
     if (!u) { window.api.openBrowser(); return; }
     if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) u = "https://" + u;
-    window.api.openBrowser(u);
-    window.api.browserNav(u);
+    const target = $("browserTarget").value;
+    if (target === "builtin") {
+      window.api.openBrowser(u);
+      window.api.browserNav(u);
+    } else {
+      window.api.openExternal(u, target).then((r) => {
+        if (r && r.error === "not-found") {
+          alert("Could not find " + target + " on this system.");
+        }
+      });
+    }
   };
   $("browserGo").addEventListener("click", browserGo);
   $("browserUrl").addEventListener("keydown", (e) => { if (e.key === "Enter") browserGo(); });
