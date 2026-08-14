@@ -212,7 +212,12 @@ function browserSession() {
 }
 
 async function loadBrowserExtension() {
-  const extPath = config.extensionPath || path.join(__dirname, "extension");
+  // Packaged: the extension is asarUnpack'd to resources/app.asar.unpacked/extension
+  // (session.loadExtension needs a real path, not a path inside the asar).
+  const extPath = config.extensionPath ||
+    (app.isPackaged
+      ? path.join(process.resourcesPath, "app.asar.unpacked", "extension")
+      : path.join(__dirname, "extension"));
   if (!fs.existsSync(extPath)) {
     console.warn("[browser] Deep Grab extension not found at " + extPath);
     return;
