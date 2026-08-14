@@ -557,6 +557,7 @@ if (gotLock) {
 
   app.on("quit", () => {
     stopClipboardMonitor();
+    if (dm && typeof dm.flush === "function") dm.flush();
     if (wss) wss.close();
   });
 } else {

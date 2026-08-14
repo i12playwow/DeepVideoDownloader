@@ -547,6 +547,7 @@ class DownloadManager {
     this._pending = [];       // bulk-import URLs waiting to be loaded into items
     this._downloaded = new Set(); // URLs that reached "done" (for duplicate handling)
     this._hostLast = new Map();   // hostname -> last request time (per-host pacing)
+    this._persistTimer = null;    // debounced writer for history/downloaded.json
     this._speedBytes = 0;
     this._speedStart = Date.now();
     this._loadHistory();
@@ -587,11 +588,32 @@ class DownloadManager {
      }
    }
 
-    _saveHistory() {
+    _saveHistoryNow() {
       if (this.config.saveHistory === false) return; // history persistence toggle
       try {
         fsp.writeFile(this.historyPath, JSON.stringify(this.history, null, 2), "utf8").catch(() => {});
       } catch (e) { /* ignore */ }
+    }
+
+    _saveDownloadedNow() {
+      try {
+        fsp.writeFile(this.downloadedPath, JSON.stringify(Array.from(this._downloaded), null, 0), "utf8").catch(() => {});
+      } catch (e) { /* ignore */ }
+    }
+
+    // Debounced persistence: coalesce the many per-completion history/downloaded
+    // writes during a bulk run into one disk write every ~500ms.
+    _persistSoon() {
+      if (this._persistTimer) return;
+      this._persistTimer = setTimeout(() => {
+        this._persistTimer = null;
+        this._saveHistoryNow();
+        this._saveDownloadedNow();
+      }, 500);
+    }
+
+    _saveHistory() {
+      this._persistSoon();
     }
 
     getBandwidthStats() {
@@ -640,9 +662,14 @@ class DownloadManager {
     }
 
     _saveDownloaded() {
-      try {
-        fsp.writeFile(this.downloadedPath, JSON.stringify(Array.from(this._downloaded), null, 0), "utf8").catch(() => {});
-      } catch (e) { /* ignore */ }
+      this._persistSoon();
+    }
+
+    // Write any pending history/downloaded changes immediately (e.g. on quit).
+    flush() {
+      if (this._persistTimer) { clearTimeout(this._persistTimer); this._persistTimer = null; }
+      this._saveHistoryNow();
+      this._saveDownloadedNow();
     }
 
     isDownloaded(url) {
@@ -1420,8 +1447,10 @@ class DownloadManager {
      candidates.push(...this.history);
      if (!candidates.length) return null;
      const time = (c) => c.timestamp || (parseInt(String(c.id).split("-")[2], 10) || 0);
-     const last = candidates.reduce((a, b) => (time(b) > time(a) ? b : a));
-     return this.enqueue({ url: last.url, title: last.title, referer: last.referer || "" });
+  const last = candidates.reduce((a, b) => (time(b) > time(a) ? b : a));
+  // force:true so resuming a finished download re-downloads it rather than
+  // creating a "duplicate" entry.
+  return this.enqueue({ url: last.url, title: last.title, referer: last.referer || "", force: true });
    }
 
    cancel(id) {
