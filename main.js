@@ -17,11 +17,12 @@ const CONFIG_PATH = path.join(__dirname, "config.json");
 const DEFAULT_CONFIG = {
   port: 8765,
   downloadDir: path.join(os.homedir(), "Downloads", "DeepGrab"),
-  concurrency: 3,
+  concurrency: 8,
   segments: 4,
   speedLimitKB: 0,
   maxRetries: 3,
   maxRefresh: 2,
+  hostDelayMs: 120,
   autoProxy: true,
   ffmpegPath: "ffmpeg",
   theme: "dark",
@@ -392,8 +393,7 @@ ipcMain.handle("downloads-add", async (e, url) => {
       title = u.pathname.split("/").filter(Boolean).pop() || u.hostname;
     } catch (err) { /* keep default title */ }
     const id = await dm.enqueue({ url, title, referer: "" });
-    if (id === null) return { ok: false, duplicate: true, url };
-    return { ok: true, id };
+    return { ok: true, id, duplicate: id !== null && dm.isDownloaded(url) };
   } catch (err) {
     return { ok: false, error: err.message };
   }

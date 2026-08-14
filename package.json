@@ -21,7 +21,13 @@
       "renderer.js",
       "styles.css",
       "downloader.js",
-      "proxy.js"
+      "proxy.js",
+      "browser.html",
+      "browser-preload.js",
+      "extension"
+    ],
+    "asarUnpack": [
+      "extension/**"
     ],
     "win": {
       "target": [
