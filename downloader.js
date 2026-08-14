@@ -666,10 +666,18 @@ class DownloadManager {
     }
 
     // Write any pending history/downloaded changes immediately (e.g. on quit).
+    // Synchronous so a graceful quit deterministically persists the latest
+    // state before teardown (a pending debounce timer otherwise loses <500ms).
     flush() {
       if (this._persistTimer) { clearTimeout(this._persistTimer); this._persistTimer = null; }
-      this._saveHistoryNow();
-      this._saveDownloadedNow();
+      try {
+        if (this.config.saveHistory !== false) {
+          fs.writeFileSync(this.historyPath, JSON.stringify(this.history, null, 2), "utf8");
+        }
+      } catch (e) { /* ignore */ }
+      try {
+        fs.writeFileSync(this.downloadedPath, JSON.stringify(Array.from(this._downloaded), null, 0), "utf8");
+      } catch (e) { /* ignore */ }
     }
 
     isDownloaded(url) {
@@ -1444,14 +1452,14 @@ class DownloadManager {
      for (const it of this.items.values()) {
        if (["done", "error", "cancelled"].includes(it.status)) candidates.push(it);
      }
-     candidates.push(...this.history);
-     if (!candidates.length) return null;
-     const time = (c) => c.timestamp || (parseInt(String(c.id).split("-")[2], 10) || 0);
-  const last = candidates.reduce((a, b) => (time(b) > time(a) ? b : a));
-  // force:true so resuming a finished download re-downloads it rather than
-  // creating a "duplicate" entry.
-  return this.enqueue({ url: last.url, title: last.title, referer: last.referer || "", force: true });
-   }
+      candidates.push(...this.history);
+      if (!candidates.length) return null;
+      const time = (c) => c.timestamp || (parseInt(String(c.id).split("-")[2], 10) || 0);
+      const last = candidates.reduce((a, b) => (time(b) > time(a) ? b : a));
+      // force:true so resuming a finished download re-downloads it rather than
+      // creating a "duplicate" entry.
+      return this.enqueue({ url: last.url, title: last.title, referer: last.referer || "", force: true });
+    }
 
    cancel(id) {
      const item = this.items.get(id);
