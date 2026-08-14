@@ -3,7 +3,7 @@
 Electron desktop downloader ("Deep Video Downloader") + companion Chrome MV3 extension ("Deep Grab") + supjav userscripts. CommonJS, no bundler, no build step for dev.
 
 ## Commands
-- Run: `npm.cmd start` (never `npm` — PowerShell can't run `npm.ps1`). `run.bat` adds `--no-sandbox --disable-gpu` but hardcodes the repo path; `npm.cmd start` doesn't.
+- Run: `npm.cmd start` (never `npm` — PowerShell can't run `npm.ps1`). Do **not** use `run.bat` — it hardcodes the OneDrive copy path (launches stale code even from Desktop); `npm.cmd start` uses the current dir.
 - Package: `npm.cmd run dist` → `dist/DeepVideoDownloader Setup 1.0.0.exe` + `dist/win-unpacked/`.
 - No lint/test/typecheck. Syntax check: `node -c <file>.js` (extension JS included).
 
@@ -28,6 +28,7 @@ Each `resolve*()` returns `{resolvedUrl, proxy, agent, origin?}` and re-resolves
 - Generic URLs pass through untouched. Resolved URL stored on `item._resolvedUrl` (used via `item._resolvedUrl || item.url`). Resolution is **lazy**: `enqueue()` returns an id immediately (WS `accepted` never blocks on a resolver fetch); pause/cancel during resolution aborts via the same post-async status check as the probe.
 - Expired direct URLs (403/404/410 or `expired|token|forbidden`) auto-re-resolve up to `config.maxRefresh` (default 2), bumping `refreshCount`. A signed `get_video?` URL re-resolves from `item.referer` (the embed page — the only place a fresh expiry+token exists): `isSignedRefreshable`/`refreshSourceUrl`.
 - **Resume last** (`↻ Resume last` → `download-resume-last` → `dm.resumeLast()`): re-queues the most recent `done`/`error`/`cancelled` item (else newest history entry) from its saved url/title/referer → fresh id; null when nothing to resume.
+- `sanitizeName()` **strips a trailing video extension** so callers can append `.mp4` — don't "simplify" it away or titles like `foo.mp4` become `foo.mp4.mp4` (fixed 8/2026).
 
 ## HLS downloads
 `.m3u8` URLs get `item.kind:"hls"` at enqueue → `runHls()` (not probe/segmented): fetch playlist → pick best variant (`pickHlsVariant`: RESOLUTION then BANDWIDTH) → parse segments (`parseHlsPlaylist`; AES-128 `#EXT-X-KEY` → hard error, `.ts` only) → download **sequentially** via `downloadHlsSegment` (proxy failover, `_trackReq` abort, global speed limit). Resume skips existing `seg<N>.part`. Progress **indeterminate** (`total` stays 0). After the last segment `remuxToMp4` shells out to `ffmpeg` (`config.ffmpegPath`, default on PATH) with `-c copy -bsf:a aac_adtstoasc -movflags +faststart` → real `.mp4`.
