@@ -248,7 +248,25 @@ $("testProxies").addEventListener("click", async () => {
   });
 });
 
-$("openDir").addEventListener("click", () => window.api.openDir());
+  $("openDir").addEventListener("click", () => window.api.openDir());
+  $("openBrowser").addEventListener("click", () => window.api.openBrowser());
+  const browserGo = () => {
+    let u = ($("browserUrl").value || "").trim();
+    if (!u) { window.api.openBrowser(); return; }
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) u = "https://" + u;
+    window.api.openBrowser(u);
+    window.api.browserNav(u);
+  };
+  $("browserGo").addEventListener("click", browserGo);
+  $("browserUrl").addEventListener("keydown", (e) => { if (e.key === "Enter") browserGo(); });
+  $("browserBack").addEventListener("click", () => window.api.browserBack());
+  $("browserFwd").addEventListener("click", () => window.api.browserForward());
+  $("browserReload").addEventListener("click", () => window.api.browserReload());
+  window.api.onBrowserState((s) => {
+    if (s.url) $("browserUrl").value = s.url;
+    $("browserBack").disabled = !s.canBack;
+    $("browserFwd").disabled = !s.canForward;
+  });
 
 $("resumeLast").addEventListener("click", async () => {
   const res = await window.api.resumeLast();

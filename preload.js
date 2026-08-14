@@ -18,6 +18,12 @@ contextBridge.exposeInMainWorld("api", {
   testProxies: (url) => ipcRenderer.invoke("test-proxies", url),
   openDir: () => ipcRenderer.invoke("open-dir"),
   showInFolder: (p) => ipcRenderer.invoke("open-path", p),
+  openBrowser: (url) => ipcRenderer.invoke("browser-open", url),
+  browserNav: (url) => ipcRenderer.invoke("browser-nav", url),
+  browserBack: () => ipcRenderer.invoke("browser-back"),
+  browserForward: () => ipcRenderer.invoke("browser-forward"),
+  browserReload: () => ipcRenderer.invoke("browser-reload"),
+  onBrowserState: (cb) => ipcRenderer.on("browser-state", (e, s) => cb(s)),
   onUpdate: (cb) => ipcRenderer.on("download-update", (e, item) => cb(item)),
   onClipboardUrl: (cb) => ipcRenderer.on("clipboard-url", (e, data) => cb(data)),
   onFileOpened: (cb) => ipcRenderer.on("file-opened", (e, data) => cb(data))

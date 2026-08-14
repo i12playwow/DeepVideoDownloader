@@ -10,7 +10,13 @@
   <header>
     <h1>▶ Deep Video Downloader</h1>
     <div class="hint">WebSocket server: <code>ws://127.0.0.1:8765</code> — links arrive from the browser extension</div>
-    <div style="margin-top: 4px;">
+    <div style="margin-top: 4px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center;">
+      <button id="openBrowser" class="btn ghost" style="font-size: 11px;">🌐 Open browser</button>
+      <button id="browserBack" class="btn ghost" style="font-size: 11px;" disabled title="Back">←</button>
+      <button id="browserFwd" class="btn ghost" style="font-size: 11px;" disabled title="Forward">→</button>
+      <button id="browserReload" class="btn ghost" style="font-size: 11px;" title="Reload">⟳</button>
+      <input id="browserUrl" type="text" placeholder="Type a URL and press Enter" style="min-width: 260px; background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:5px;padding:5px 8px;font-size:12px;">
+      <button id="browserGo" class="btn ghost" style="font-size: 11px;">Go</button>
       <button id="themeToggle" class="btn ghost" style="font-size: 11px;">🌓 Toggle theme</button>
     </div>
   </header>

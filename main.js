@@ -4,7 +4,7 @@ process.on("unhandledRejection", (err) => {
   console.error("[unhandledRejection]", err);
 });
 
-const { app, BrowserWindow, ipcMain, shell, clipboard } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, clipboard, session } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -185,6 +185,58 @@ function createWindow() {
   });
   mainWindow.loadFile(path.join(__dirname, "renderer.html"));
   mainWindow.on("closed", () => { mainWindow = null; });
+}
+
+// ---------------- built-in browser (Deep Grab extension) ----------------
+let browserWindow = null;
+
+function browserSession() {
+  return session.fromPartition("persist:deepgrab-browser");
+}
+
+async function loadBrowserExtension() {
+  const extPath = config.extensionPath || path.join(__dirname, "extension");
+  if (!fs.existsSync(extPath)) {
+    console.warn("[browser] Deep Grab extension not found at " + extPath);
+    return;
+  }
+  try {
+    const ses = browserSession();
+    if (ses.getAllExtensions().length === 0) {
+      const info = await ses.loadExtension(extPath);
+      console.log("[browser] loaded Deep Grab extension:", info && info.id);
+    }
+  } catch (e) {
+    console.error("[browser] failed to load extension:", e.message);
+  }
+}
+
+function sendBrowserState() {
+  if (!mainWindow || mainWindow.isDestroyed() || !browserWindow || browserWindow.isDestroyed()) return;
+  try {
+    mainWindow.webContents.send("browser-state", {
+      url: browserWindow.webContents.getURL(),
+      canBack: browserWindow.webContents.navigationHistory.canGoBack(),
+      canForward: browserWindow.webContents.navigationHistory.canGoForward()
+    });
+  } catch (e) { /* ignore */ }
+}
+
+function createBrowserWindow(url) {
+  if (browserWindow && !browserWindow.isDestroyed()) { browserWindow.show(); browserWindow.focus(); return; }
+  browserWindow = new BrowserWindow({
+    width: 1200,
+    height: 850,
+    title: "Deep Grab Browser",
+    backgroundColor: "#0f172a",
+    webPreferences: { session: browserSession() }
+  });
+  browserWindow.webContents.on("did-navigate", sendBrowserState);
+  browserWindow.webContents.on("did-navigate-in-page", sendBrowserState);
+  browserWindow.on("closed", () => { browserWindow = null; });
+  browserWindow.loadURL(url || config.browserHomepage || "https://www.google.com").catch(() => {
+    browserWindow.loadFile(path.join(__dirname, "browser-start.html")).catch(() => {});
+  });
 }
 
 // ---------------- clipboard monitoring ----------------
@@ -416,9 +468,24 @@ if (gotLock) {
     if (target) handleOpenedFile(target);
   });
 
+  ipcMain.handle("browser-open", (e, url) => { createBrowserWindow(url); });
+  ipcMain.handle("browser-nav", (e, url) => {
+    if (browserWindow && !browserWindow.isDestroyed()) browserWindow.loadURL(String(url)).catch(() => {});
+  });
+  ipcMain.handle("browser-back", () => {
+    if (browserWindow && !browserWindow.isDestroyed()) browserWindow.webContents.navigationHistory.goBack();
+  });
+  ipcMain.handle("browser-forward", () => {
+    if (browserWindow && !browserWindow.isDestroyed()) browserWindow.webContents.navigationHistory.goForward();
+  });
+  ipcMain.handle("browser-reload", () => {
+    if (browserWindow && !browserWindow.isDestroyed()) browserWindow.webContents.reload();
+  });
+
   app.whenReady().then(() => {
     startWsServer();
     createWindow();
+    loadBrowserExtension();
     startClipboardMonitor();
     registerFileAssociations();
     app.on("activate", () => {
