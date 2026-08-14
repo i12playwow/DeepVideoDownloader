@@ -700,8 +700,25 @@ class DownloadManager {
       while (this._pending.length && this.items.size < cap) {
         const u = this._pending.shift();
         if (!u) continue;
-        this.enqueue({ url: u, title: "", referer: "" }).catch(() => {});
+        // Bulk imports skip already-downloaded URLs silently (no duplicate rows).
+        this.enqueue({ url: u, title: "", referer: "", markDuplicate: false }).catch(() => {});
       }
+    }
+
+    // Re-download a "duplicate" entry the user explicitly wants anyway.
+    forceDownload(id) {
+      const item = this.items.get(id);
+      if (!item) return false;
+      if (item.status === "duplicate") {
+        item.duplicate = false;
+        item.status = "queued";
+        item.error = "";
+        item.speed = 0;
+        this.emit(item);
+        this.pump();
+        return true;
+      }
+      return false;
     }
 
     // Enqueue a whole batch without materializing all of them at once.
@@ -733,11 +750,12 @@ class DownloadManager {
       this._hostLast.set(host, Date.now());
     }
 
-   async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", force = false }) {
-    // Duplicate handling: skip URLs already downloaded (unless forced).
-    if (!force && this.config.skipDuplicates !== false && this.isDownloaded(url)) {
-      return null;
-    }
+   async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", force = false, markDuplicate = true }) {
+    // Duplicate handling: an already-downloaded URL becomes a "duplicate" list
+    // entry (so the user can "Download anyway"), unless the bulk/windowed path
+    // opts out with markDuplicate:false (skip silently — no item to avoid bloat).
+    const isDup = !force && this.config.skipDuplicates !== false && this.isDownloaded(url);
+    if (isDup && markDuplicate === false) return null;
     const id = "dl-" + (++this._id) + "-" + Date.now();
     // Fall back to the streamtape/fstape URL slug when the sender gave no title.
     const effectiveTitle = title || titleFromReferer(referer);
@@ -768,6 +786,7 @@ class DownloadManager {
       _proxy: null,
       refreshCount: 0,
       errorCategory: "",
+      duplicate: false,
       _activeRes: new Set(),
       _samples: [],
       public() {
@@ -779,6 +798,7 @@ class DownloadManager {
           kind: this.kind || "mp4",
           fileName: this.fileName,
           status: this.status,
+          duplicate: !!this.duplicate,
           total: this.total,
           received: this.received,
           speed: this.speed,
@@ -795,6 +815,13 @@ class DownloadManager {
     };
      this.items.set(id, item);
      this.emit(item);
+     if (isDup) {
+       // Already downloaded — show it in the list but don't auto-download.
+       item.status = "duplicate";
+       item.duplicate = true;
+       this.emit(item);
+       return id;
+     }
      if (item.scheduledStart && Date.now() < item.scheduledStart) {
        item.status = "scheduled";
        this.emit(item);

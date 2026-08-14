@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("api", {
   resumeLast: () => ipcRenderer.invoke("download-resume-last"),
   cancel: (id) => ipcRenderer.invoke("download-cancel", id),
   remove: (id) => ipcRenderer.invoke("download-remove", id),
+  forceDownload: (id) => ipcRenderer.invoke("downloads-force", id),
   add: (url) => ipcRenderer.invoke("downloads-add", url),
   addMany: (urls) => ipcRenderer.invoke("downloads-add-many", urls),
   schedule: (data) => ipcRenderer.invoke("download-schedule", data),

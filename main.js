@@ -406,6 +406,7 @@ ipcMain.handle("downloads-add-many", async (e, urls) => {
   const n = dm.addPending(urls);
   return { ok: true, count: n };
 });
+ipcMain.handle("downloads-force", (e, id) => ({ ok: dm.forceDownload(id) }));
 ipcMain.handle("download-schedule", (e, { id, mode, scheduledStart, scheduledStop }) => {
   const item = dm.items.get(id);
   if (!item) return { ok: false, error: "Item not found" };

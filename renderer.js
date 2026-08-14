@@ -143,6 +143,10 @@ function actionButtons(it) {
   if (["done", "error", "cancelled"].includes(it.status)) {
     html += `<button data-act="remove" data-id="${it.id}">🗑</button>`;
   }
+  if (it.status === "duplicate") {
+    html += `<button data-act="forceDownload" data-id="${it.id}" title="Download anyway">▶</button>`;
+    html += `<button data-act="remove" data-id="${it.id}">🗑</button>`;
+  }
   return html;
 }
 
