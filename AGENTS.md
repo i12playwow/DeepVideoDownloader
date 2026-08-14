@@ -9,7 +9,7 @@ Electron desktop downloader ("Deep Video Downloader") + companion Chrome MV3 ext
 
 ## Architecture
 - `main.js` — Electron main: window, WS server (127.0.0.1:8765), IPC handlers, clipboard monitor, probe handler.
-- `downloader.js` — download engine (segmented, queue, pause/resume/cancel, retry, **global** speed limit, scheduling, history) + site resolvers + HLS engine. History → `<downloadDir>\history.json` (moves with the dir), not the repo.
+- `downloader.js` — download engine (segmented, queue, pause/resume/cancel, retry, **global** speed limit, scheduling, history) + site resolvers + HLS engine. History → `<downloadDir>\history.json` (moves with the dir), not the repo. **History is only persisted on `remove(id)`**, not on completion — a `done` item stays in the active map until dismissed, so a fresh `download` won't write `history.json` until removed (verified 8/2026).
 - `proxy.js` — `ProxyManager`; exports `parseProxyUrl`, `agentFor`, `transport`.
 - `preload.js` — `contextBridge` → `window.api`; the only renderer→main path (`contextIsolation:true`, `nodeIntegration:false`).
 - `renderer.html/js/styles.css` — UI.
