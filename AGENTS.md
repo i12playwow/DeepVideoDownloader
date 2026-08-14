@@ -16,7 +16,7 @@ Electron desktop downloader ("Deep Video Downloader") + companion Chrome MV3 ext
 - **IPC whitelist**: every channel exists in 3 places that must stay in sync — `preload.js` (`window.api`), `ipcMain.handle` in `main.js`, call sites in `renderer.js` (e.g. `download-resume-last`). Adding/renaming one means touching all three.
 - `config.json` at `__dirname` (falls back to `DEFAULT_CONFIG` in main.js). **Excluded from the packaged asar** — never ship a real one. `config - Copy.json` is a stale backup.
 - `extension/` — self-contained MV3, not in `package.json`. Edit → **must reload at `chrome://extensions`**. `webRequest` + `*://*/*` perms, `all_frames:true`.
-- `extension-firefox/` — same JS, Firefox manifest (event page + gecko id). **Stale**: missing the `webRequest` capture Chrome gained — port it if parity matters.
+- `extension-firefox/` — same JS as `extension/` (copied verbatim), Firefox manifest (event page + gecko id). **Ported 8/2026**: `webRequest` capture, cnporn extraction, pipeline, dedupe all in sync. Edit → **must reload at `about:debugging#/runtime/this-firefox`**. Load via "Load Temporary Add-on".
 - Root `.user.js`/`test-*.js`/`test-page.html`/`test-video.mp4` are leftovers — see Userscripts + Verification.
 
 ## Download flow
