@@ -562,6 +562,8 @@ class DownloadManager {
     this._persistTimer = null;    // debounced writer for history/downloaded.json
     this._speedBytes = 0;
     this._speedStart = Date.now();
+    this._connBusy = 0;           // in-flight segmented connections
+    this._connWaiters = [];       // semaphore waiters for the global conn cap
     this._loadHistory();
     this._loadDownloaded();
   }
@@ -782,6 +784,8 @@ class DownloadManager {
         item.status = "queued";
         item.error = "";
         item.speed = 0;
+        item.lastEmit = Date.now();
+        item._lastBytes = item.received;
         this.emit(item);
         this.pump();
         return true;
@@ -851,6 +855,7 @@ class DownloadManager {
       scheduledStop: scheduledStop || null,
       lastEmit: 0,
       _lastBytes: 0,
+      _pathCreated: false, // true once finalPath was created this run (dedupe-rename guard)
       _proxy: null,
       refreshCount: 0,
       errorCategory: "",
@@ -1090,7 +1095,20 @@ class DownloadManager {
       }
 
       if (item.total > 2 * 1024 * 1024 && info.acceptRanges && (this.config.segments || 1) > 1) {
-        await this.runSegmented(item, info, baseHeaders);
+        try {
+          await this.runSegmented(item, info, baseHeaders);
+        } catch (err) {
+          if (err.category !== "norange") throw err;
+          // Server ignored Range (HTTP 200 full body); a truncated part merge
+          // would be corrupt. Kill in-flight segments, drop the partials, and
+          // fall back to a single stream from byte 0.
+          this.abort(item);
+          await fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+          await fsp.rm(item.finalPath, { force: true }).catch(() => {});
+          item.received = 0;
+          item._lastBytes = 0;
+          await this.runSingle(item, info, baseHeaders);
+        }
       } else {
         await this.runSingle(item, info, baseHeaders);
       }
@@ -1117,18 +1135,29 @@ class DownloadManager {
     if (this.config.autoProxy) {
       proxy = item._proxy || null;
       if (!proxy) {
-        proxy = await this.proxyManager.pickBest(item.url, 6000);
+        proxy = await this.proxyManager.pickBest(actualUrl, 6000);
         item._proxy = proxy;
       }
     }
     item.proxy = proxy ? proxy.url : "direct";
-    const agent = proxy ? this.proxyManager.agentFor(proxy, item.url) : null;
-    const result = await requestWithRedirects(actualUrl || item.url, {
+    const agent = proxy ? this.proxyManager.agentFor(proxy, actualUrl) : null;
+    let result = await requestWithRedirects(actualUrl || item.url, {
       method: "HEAD",
       headers: { ...baseHeaders, Range: "bytes=0-0" },
       agent,
       onReq: (req, on) => this._trackReq(item, req, on)
     });
+    // Some servers reject HEAD outright (405/501). Fall back to a ranged GET and
+    // read only the headers — the tiny body is destroyed, never written to disk.
+    if (result.status === 405 || result.status === 501) {
+      result = await requestWithRedirects(actualUrl || item.url, {
+        method: "GET",
+        headers: { ...baseHeaders, Range: "bytes=0-0" },
+        agent,
+        onReq: (req, on) => this._trackReq(item, req, on)
+      });
+      try { result.res.destroy(); } catch (e) { /* ignore */ }
+    }
     const cr = contentRangeTotal(result.headers["content-range"]);
     const length = cr != null ? cr : parseInt(result.headers["content-length"] || "0", 10);
     return {
@@ -1155,7 +1184,11 @@ class DownloadManager {
     const workers = Array.from({ length: limit }, async () => {
       while (queue.length) {
         const seg = queue.shift();
-        await this.downloadSegment(item, seg, baseHeaders);
+        // Global cap across *all* active downloads: a 3-download × 4-segment
+        // run must not open 12 connections at once. Semaphore limit is the max
+        // of concurrency and per-file segment count so one file's workers don't
+        // deadlock waiting on slots another file holds.
+        await this._withConnSlot(() => this.downloadSegment(item, seg, baseHeaders));
       }
     });
     await Promise.all(workers);
@@ -1171,18 +1204,18 @@ class DownloadManager {
 
    async downloadSegment(item, seg, baseHeaders, attempt = 0) {
      const maxRetries = this.config.maxRetries ?? DEFAULT_MAX_RETRIES;
+     const actualUrl = item._resolvedUrl || item.url;
      let proxy = item._proxy || null;
      if (this.config.autoProxy && !proxy) {
-       proxy = await this.proxyManager.pickBest(item.url, 5000);
+       proxy = await this.proxyManager.pickBest(actualUrl, 5000);
        item._proxy = proxy;
      }
-     const agent = proxy ? this.proxyManager.agentFor(proxy, item.url) : null;
+     const agent = proxy ? this.proxyManager.agentFor(proxy, actualUrl) : null;
      try {
        const existing = await fsp.stat(seg.partPath).catch(() => null);
        const resumeStart = seg.start + (existing ? existing.size : 0);
        const headers = { ...baseHeaders, Range: `bytes=${resumeStart}-${seg.end}` };
 
-       const actualUrl = item._resolvedUrl || item.url;
        const result = await requestWithRedirects(actualUrl, { method: "GET", headers, agent, maxRetries, onReq: (req, on) => this._trackReq(item, req, on) });
        const res = result.res;
        const status = result.status;
@@ -1193,13 +1226,17 @@ class DownloadManager {
          err.category = "http";
          throw err;
        }
+       if (status === 200) {
+         // Server ignored Range and restarted at byte 0 — a truncated part would
+         // silently corrupt the merge. Signal the fallback to a single stream.
+         res.resume();
+         const err = new Error("Server ignored Range (HTTP 200) — falling back to single stream");
+         err.category = "norange";
+         throw err;
+       }
 
        let mode = "w";
-       if (status === 200) {
-         // Server ignored Range and restarted at byte 0 — truncate the part
-         // so a stale partial can never corrupt the merge.
-         await fsp.rm(seg.partPath, { force: true }).catch(() => {});
-       } else if (resumeStart > seg.start) {
+       if (resumeStart > seg.start) {
          const start = contentRangeStart(result.headers["content-range"]);
          if (start != null && start !== resumeStart) {
            res.resume();
@@ -1227,22 +1264,39 @@ class DownloadManager {
    }
 
     // ---------------- single stream ----------------
+    // Global cap on concurrent segment connections across ALL active downloads
+    // (see runSegmented). Semaphore limit keeps one file's workers from
+    // deadlocking on slots another file holds.
+    async _withConnSlot(fn) {
+      const limit = Math.max(this.config.concurrency || 3, this.config.segments || 4);
+      while (this._connBusy >= limit) {
+        await new Promise((resolve) => this._connWaiters.push(resolve));
+      }
+      this._connBusy++;
+      try {
+        return await fn();
+      } finally {
+        this._connBusy--;
+        const w = this._connWaiters.shift();
+        if (w) w();
+      }
+    }
+
     async runSingle(item, info, baseHeaders, attempt = 0) {
+    const actualUrl = item._resolvedUrl || item.url;
     let proxy = item._proxy || null;
     if (this.config.autoProxy && !proxy) {
-      proxy = await this.proxyManager.pickBest(item.url, 6000);
+      proxy = await this.proxyManager.pickBest(actualUrl, 6000);
       item._proxy = proxy;
     }
     item.proxy = proxy ? proxy.url : "direct";
-    const agent = proxy ? this.proxyManager.agentFor(proxy, item.url) : null;
+    const agent = proxy ? this.proxyManager.agentFor(proxy, actualUrl) : null;
     try {
       const existing = await fsp.stat(item.finalPath).catch(() => null);
       const resumeStart = existing ? existing.size : 0;
       const headers = resumeStart > 0
         ? { ...baseHeaders, Range: `bytes=${resumeStart}-` }
         : baseHeaders;
-
-      const actualUrl = item._resolvedUrl || item.url;
 
       const maxRetries = this.config.maxRetries ?? DEFAULT_MAX_RETRIES;
       const result = await requestWithRedirects(actualUrl, { method: "GET", headers, agent, maxRetries, onReq: (req, on) => this._trackReq(item, req, on) });
