@@ -907,6 +907,7 @@ class DownloadManager {
         return {
           id: this.id,
           url: this.url,
+          referer: this.referer,
           title: this.title,
           label: this.label || "",
           kind: this.kind || "mp4",

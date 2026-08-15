@@ -155,6 +155,10 @@ function startWsServer() {
            const usable = links.length
              ? links
              : (typeof msg.url === "string" ? [{ kind: "link", url: msg.url, label: "" }] : []);
+           if (!usable.length) {
+             ws.send(JSON.stringify({ type: "error", message: "No usable source", url: msg.url || "" }));
+             return;
+           }
            const ids = [];
            for (const s of usable) {
              const id = await dm.enqueue({
@@ -303,13 +307,24 @@ function findBrowser(name) {
 // Open a URL in an external browser (chrome/edge/brave/default).
 function openInExternalBrowser(url, browser) {
   const target = String(browser || "default").toLowerCase();
+  // only http(s) ever reaches the shell — reject file:/javascript:/ms-msdt: etc.
+  let s = String(url || "").trim();
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) s = "https://" + s;
+  let href;
+  try {
+    const u = new URL(s);
+    if (!/^https?:$/.test(u.protocol)) return { error: "invalid-url", browser: target };
+    href = u.href;
+  } catch (e) {
+    return { error: "invalid-url", browser: target };
+  }
   if (target === "default") {
-    shell.openExternal(String(url)).catch(() => {});
+    shell.openExternal(href).catch(() => {});
     return { ok: true, browser: target, exe: "system-default" };
   }
   const exe = findBrowser(target);
   if (!exe) return { error: "not-found", browser: target };
-  execFile(exe, [String(url)], (err) => {
+  execFile(exe, [href], (err) => {
     if (err) console.error("[browser] launch error:", err.message);
   });
   return { ok: true, browser: target, exe };
@@ -389,7 +404,12 @@ function stopClipboardMonitor() {
 // ---------------- IPC ----------------
 ipcMain.handle("settings-get", () => config);
 ipcMain.handle("settings-save", (e, next) => {
-  config = { ...config, ...next };
+  const allowed = new Set(Object.keys(DEFAULT_CONFIG));
+  const clean = {};
+  if (next && typeof next === "object") {
+    for (const k of Object.keys(next)) if (allowed.has(k)) clean[k] = next[k];
+  }
+  config = { ...config, ...clean };
   saveConfig(config);
   proxyManager = new ProxyManager(config);
   dm.config = config;
@@ -488,10 +508,14 @@ ipcMain.handle("test-proxies", async (e, target) => {
 
 ipcMain.handle("get-active-dir", () => dm.dir);
 ipcMain.handle("open-dir", () => {
-  const active = dm.dir; // opens the folder downloads currently land in
-  fs.mkdirSync(active, { recursive: true });
-  shell.openPath(active);
-  return { ok: true, dir: active };
+  try {
+    const active = dm.dir; // opens the folder downloads currently land in
+    fs.mkdirSync(active, { recursive: true });
+    shell.openPath(active);
+    return { ok: true, dir: active };
+  } catch (e) {
+    return { ok: false, dir: "", error: String(e.message || e) };
+  }
 });
 
 ipcMain.handle("open-path", (e, p) => {

@@ -151,6 +151,15 @@
       const idx = tabs.findIndex((t) => t.url === url);
       if (idx !== -1) closeTab(tabs[idx].id);
     });
+
+    // The main window already had a browser open and wants more URLs opened here.
+    const addTabs = (urls) => {
+      const list = (urls || []).filter(Boolean);
+      if (!list.length) return;
+      list.forEach((u) => addTab(u));
+    };
+    window.api.onAddTabs(addTabs);
+    window.api.onOpenTabs(addTabs);
   </script>
 </body>
 </html>

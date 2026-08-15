@@ -50,6 +50,7 @@ class ProxyManager {
 
   list() {
     return (this.config.proxies || [])
+      .filter((p) => typeof p === "string")
       .map((p) => p.trim())
       .filter(Boolean)
       .map(parseProxyUrl)
