@@ -13,7 +13,12 @@ const { WebSocketServer } = require("ws");
 const { DownloadManager, requestWithRedirects } = require("./downloader");
 const { ProxyManager } = require("./proxy");
 
-const CONFIG_PATH = path.join(__dirname, "config.json");
+// Dev builds read/write config.json next to main.js (gitignored). Packaged
+// apps must NOT write into the read-only app.asar — use the writable userData
+// dir so settings actually persist in an installed build.
+const CONFIG_PATH = app.isPackaged
+  ? path.join(app.getPath("userData"), "config.json")
+  : path.join(__dirname, "config.json");
 const DEFAULT_CONFIG = {
   port: 8765,
   downloadDir: path.join(os.homedir(), "Downloads", "DeepGrab"),
