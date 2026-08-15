@@ -107,7 +107,7 @@ function categorizeError(err) {
   return "unknown";
 }
 
-async function resolveStreamtape(videoPageUrl, { proxyManager, config }, baseHeaders = {}) {
+async function resolveStreamtape(videoPageUrl, { proxyManager, config, paceHost }, baseHeaders = {}) {
   // Already a signed direct link (get_video?id=..&expires=..&ip=..&token=..):
   // normalize &stream=1 and pass through. Fetching it would download the video
   // file itself — STRGV targets the embed page's HTML, not this.
@@ -118,6 +118,7 @@ async function resolveStreamtape(videoPageUrl, { proxyManager, config }, baseHea
   const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
   const proxy = config.autoProxy ? await proxyManager.pickBest(videoPageUrl, 6000) : null;
   const agent = proxy ? proxyManager.agentFor(proxy, videoPageUrl) : null;
+  if (paceHost) await paceHost(videoPageUrl);
   let html;
   try {
     html = await fetchHtml(videoPageUrl, agent, baseHeaders, 0, maxRetries);
@@ -188,7 +189,7 @@ async function fetchHtml(url, agent, headers = {}, retries = 0, maxRetries = DEF
 // page hosting HLS. Resolve streamtape/fstape to the signed direct URL; fetch
 // the turbovidhls page and pull the m3u8 from #video_player[data-hash] so the
 // HLS engine can download it.
-async function resolveSupjav(videoPageUrl, { proxyManager, config }, baseHeaders = {}) {
+async function resolveSupjav(videoPageUrl, { proxyManager, config, paceHost }, baseHeaders = {}) {
   const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
   const proxy = config.autoProxy ? await proxyManager.pickBest(videoPageUrl, 6000) : null;
   const agent = proxy ? proxyManager.agentFor(proxy, videoPageUrl) : null;
@@ -196,6 +197,7 @@ async function resolveSupjav(videoPageUrl, { proxyManager, config }, baseHeaders
   if (!olid) throw new Error("Supjav: no player id (supjav.php?l=...) in URL");
   const rev = olid[1].split("").reverse().join("");
   const cUrl = new URL("?c=" + rev, videoPageUrl).href;
+  if (paceHost) await paceHost(cUrl);
   let result;
   try {
     result = await requestWithRedirects(cUrl, {
@@ -215,6 +217,7 @@ async function resolveSupjav(videoPageUrl, { proxyManager, config }, baseHeaders
   if (TVH_EMBED_RE.test(embed)) {
     let html;
     try {
+      if (paceHost) await paceHost(embed);
       html = await fetchHtml(embed, agent, baseHeaders, 0, maxRetries);
     } catch (err) {
       throw new Error("Supjav: failed to fetch turbovidhls player - " + err.message);
@@ -226,10 +229,11 @@ async function resolveSupjav(videoPageUrl, { proxyManager, config }, baseHeaders
   throw new Error("Supjav: player did not redirect to a streamtape/fstape embed or turbovidhls player");
 }
 
-async function resolveCnPorn(videoPageUrl, { proxyManager, config }, baseHeaders = {}) {
+async function resolveCnPorn(videoPageUrl, { proxyManager, config, paceHost }, baseHeaders = {}) {
   const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
   const proxy = config.autoProxy ? await proxyManager.pickBest(videoPageUrl, 6000) : null;
   const agent = proxy ? proxyManager.agentFor(proxy, videoPageUrl) : null;
+  if (paceHost) await paceHost(videoPageUrl);
   let html;
   try {
     html = await fetchHtml(videoPageUrl, agent, baseHeaders, 0, maxRetries);
@@ -261,6 +265,7 @@ async function resolveCnPorn(videoPageUrl, { proxyManager, config }, baseHeaders
   if (/cnporn\.org\/embed\//i.test(embedUrl)) {
     let embedHtml;
     try {
+      if (paceHost) await paceHost(embedUrl);
       embedHtml = await fetchHtml(embedUrl, agent, baseHeaders, 0, maxRetries);
     } catch (err) {
       throw new Error("CnPorn: failed to fetch embed - " + err.message);
@@ -283,10 +288,11 @@ async function resolveCnPorn(videoPageUrl, { proxyManager, config }, baseHeaders
 const XVEMBED = /(?:<iframe[^>]*src=["']|data-src=["'])([^"']*xvideos\.com\/embedframe[^"']+)["']/i;
 const XVDIRECT = /<video[^>]*>\s*<source[^>]+src=["']([^"']+\.mp4[^"']*)["']/i;
 
-async function resolveXVideos(videoPageUrl, { proxyManager, config }, baseHeaders = {}) {
+async function resolveXVideos(videoPageUrl, { proxyManager, config, paceHost }, baseHeaders = {}) {
   const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
   const proxy = config.autoProxy ? await proxyManager.pickBest(videoPageUrl, 6000) : null;
   const agent = proxy ? proxyManager.agentFor(proxy, videoPageUrl) : null;
+  if (paceHost) await paceHost(videoPageUrl);
   let html;
   try {
     html = await fetchHtml(videoPageUrl, agent, baseHeaders, 0, maxRetries);
@@ -312,10 +318,11 @@ const XHEMBED = /src=["'](https?:\/\/[^"']*xhamster\.com\/xembed[^"']+)["']/i;
 const XHPLAY = /<a\b(?=[^>]*class=["'][^"']*ht-prev[^"']*["'])[^>]*href=["']([^"']*xhamster\.com\/videos\/[^"']+)["']/i;
 const XHMP4 = /<source[^>]+src=["']([^"']+\.mp4[^"']*)["']/i;
 
-async function resolveXHamster(videoPageUrl, { proxyManager, config }, baseHeaders = {}) {
+async function resolveXHamster(videoPageUrl, { proxyManager, config, paceHost }, baseHeaders = {}) {
   const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
   const proxy = config.autoProxy ? await proxyManager.pickBest(videoPageUrl, 6000) : null;
   const agent = proxy ? proxyManager.agentFor(proxy, videoPageUrl) : null;
+  if (paceHost) await paceHost(videoPageUrl);
   let html;
   try {
     html = await fetchHtml(videoPageUrl, agent, baseHeaders, 0, maxRetries);
@@ -344,42 +351,43 @@ async function resolveXHamster(videoPageUrl, { proxyManager, config }, baseHeade
 
 // Detect the site and follow the re-resolution chain to a final direct URL.
 // Returns null for URLs with no resolver (generic mp4 pass through untouched).
-async function resolveUrl(url, { proxyManager, config }, baseHeaders = {}) {
+async function resolveUrl(url, { proxyManager, config, paceHost }, baseHeaders = {}) {
+  const ctx = { proxyManager, config, paceHost };
   if (/(?:streamtape|fstape)\.com/i.test(url)) {
-    const r = await resolveStreamtape(url, { proxyManager, config }, baseHeaders);
+    const r = await resolveStreamtape(url, ctx, baseHeaders);
     return r.resolvedUrl;
   }
   if (SJ_PLAYER_RE.test(url)) {
-    const r = await resolveSupjav(url, { proxyManager, config }, baseHeaders);
+    const r = await resolveSupjav(url, ctx, baseHeaders);
     if (/streamtape|fstape\.com/i.test(r.resolvedUrl)) {
-      const r2 = await resolveStreamtape(r.resolvedUrl, { proxyManager, config }, { ...baseHeaders, Referer: r.resolvedUrl });
+      const r2 = await resolveStreamtape(r.resolvedUrl, ctx, { ...baseHeaders, Referer: r.resolvedUrl });
       return r2.resolvedUrl;
     }
     if (HLS_RE.test(r.resolvedUrl)) return r.resolvedUrl;
     return r.resolvedUrl;
   }
   if (/cnporn\.org/i.test(url)) {
-    const r = await resolveCnPorn(url, { proxyManager, config }, baseHeaders);
+    const r = await resolveCnPorn(url, ctx, baseHeaders);
     if (/streamtape\.com/i.test(r.resolvedUrl) || r.origin === "streamtape-embed") {
-      const r2 = await resolveStreamtape(r.resolvedUrl, { proxyManager, config }, baseHeaders);
+      const r2 = await resolveStreamtape(r.resolvedUrl, ctx, baseHeaders);
       return r2.resolvedUrl;
     }
     return r.resolvedUrl;
   }
   if (/xvideos\.com/i.test(url)) {
-    const r = await resolveXVideos(url, { proxyManager, config }, baseHeaders);
+    const r = await resolveXVideos(url, ctx, baseHeaders);
     if (/streamtape\.com/i.test(r.resolvedUrl)) {
-      const r2 = await resolveStreamtape(r.resolvedUrl, { proxyManager, config }, baseHeaders);
+      const r2 = await resolveStreamtape(r.resolvedUrl, ctx, baseHeaders);
       return r2.resolvedUrl;
     }
     return r.resolvedUrl;
   }
   if (/xhamster\.com/i.test(url)) {
-    const r = await resolveXHamster(url, { proxyManager, config }, baseHeaders);
+    const r = await resolveXHamster(url, ctx, baseHeaders);
     if (/xvideos\.com/i.test(r.resolvedUrl)) {
-      const r2 = await resolveXVideos(r.resolvedUrl, { proxyManager, config }, baseHeaders);
+      const r2 = await resolveXVideos(r.resolvedUrl, ctx, baseHeaders);
       if (/streamtape\.com/i.test(r2.resolvedUrl)) {
-        const r3 = await resolveStreamtape(r2.resolvedUrl, { proxyManager, config }, baseHeaders);
+        const r3 = await resolveStreamtape(r2.resolvedUrl, ctx, baseHeaders);
         return r3.resolvedUrl;
       }
       return r2.resolvedUrl;
@@ -559,6 +567,7 @@ class DownloadManager {
     this._pending = [];       // bulk-import URLs waiting to be loaded into items
     this._downloaded = new Set(); // URLs that reached "done" (for duplicate handling)
     this._hostLast = new Map();   // hostname -> last request time (per-host pacing)
+    this._paceChains = new Map(); // hostname -> promise chain serializing _paceHost callers
     this._persistTimer = null;    // debounced writer for history/downloaded.json
     this._speedBytes = 0;
     this._speedStart = Date.now();
@@ -816,15 +825,25 @@ class DownloadManager {
     }
 
     // Per-host pacing: keep a minimum interval between requests to the same host
-    // so bulk downloads don't trip Cloudflare rate limits / IP bans.
+    // so bulk downloads don't trip Cloudflare rate limits / IP bans. Serialized
+    // per host via _paceChains: concurrent callers chain onto the previous
+    // caller's granted slot (which sets _hostLast before releasing), so they fire
+    // in sequence instead of reading a stale _hostLast and bursting together.
     async _paceHost(url, cooldownMs) {
       const host = this._hostOf(url);
       if (!host) return;
       const min = cooldownMs || this.config.hostDelayMs || 120;
+      const prev = this._paceChains.get(host) || Promise.resolve();
+      let grant;
+      const slot = new Promise((r) => { grant = r; });
+      // The chain always resolves so a (never-rejecting) failure can't poison it.
+      this._paceChains.set(host, prev.then(() => slot, () => slot));
+      await prev.catch(() => {});
       const last = this._hostLast.get(host) || 0;
       const wait = min - (Date.now() - last);
       if (wait > 0) await delay(wait);
       this._hostLast.set(host, Date.now());
+      grant();
     }
 
    async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", force = false, markDuplicate = true }) {
@@ -1046,6 +1065,12 @@ class DownloadManager {
         // Expired direct URL (e.g. streamtape signed token) — re-resolve the
         // original page and retry from scratch with the fresh URL.
         if (!isExpiredError(err)) throw err;
+        // A bare HTTP 403/404/410 can mean the *proxy* is Cloudflare-blocked
+        // (no cf-chl text in the message) rather than a dead URL. Rotate + clear
+        // so the retry re-picks instead of hammering the same blocked proxy
+        // through every refresh cycle. A genuinely expired URL fails regardless.
+        if (item._proxy && this.proxyManager) this.proxyManager.markBad(item._proxy);
+        item._proxy = null;
         // get_video links are passed through (resolved === original), so the
         // usual "resolved differs from url" test can't gate them; a signed link
         // with a streamtape/fstape referer is still refreshable — from the page.
@@ -1054,7 +1079,7 @@ class DownloadManager {
         if (!refreshable) throw err;
         let fresh = null;
         try {
-          fresh = await resolveUrl(refreshSourceUrl(item), { proxyManager: this.proxyManager, config: this.config }, baseHeaders);
+          fresh = await resolveUrl(refreshSourceUrl(item), { proxyManager: this.proxyManager, config: this.config, paceHost: (u) => this._paceHost(u) }, baseHeaders);
         } catch (e) { /* re-resolution failed — keep original error */ }
         if (!fresh || fresh === item._resolvedUrl) throw err;
         item._resolvedUrl = fresh;
@@ -1080,7 +1105,7 @@ class DownloadManager {
 
     // resolve lazily (deferred from enqueue); can take seconds via proxies
     if (!item._resolvedUrl) {
-      const r = await resolveUrl(item.url, { proxyManager: this.proxyManager, config: this.config }, baseHeaders);
+      const r = await resolveUrl(item.url, { proxyManager: this.proxyManager, config: this.config, paceHost: (u) => this._paceHost(u) }, baseHeaders);
       if (r) item._resolvedUrl = r;
       if (item.status !== "running") {
         const err = new Error("Aborted");
@@ -1404,6 +1429,7 @@ class DownloadManager {
     this.emit(item);
 
     let playlistUrl = m3u8Url;
+    await this._paceHost(playlistUrl);
     let body = await fetchHtml(playlistUrl, agent, baseHeaders, 0, maxRetries);
     if (item.status !== "running") this.throwAborted();
 
@@ -1411,6 +1437,7 @@ class DownloadManager {
     if (HLS_MASTER_RE.test(body)) {
       const variant = pickHlsVariant(body, playlistUrl);
       if (!variant) throw new Error("HLS: no usable variant in master playlist");
+      await this._paceHost(variant);
       body = await fetchHtml(variant, agent, baseHeaders, 0, maxRetries);
       playlistUrl = variant;
       if (item.status !== "running") this.throwAborted();
