@@ -216,15 +216,26 @@ function browserSession() {
   return session.fromPartition("persist:deepgrab-browser");
 }
 
+// Resolve the Deep Grab extension folder: honor config.extensionPath only if it
+// actually holds a manifest (a stale path silently disabled the browser's
+// extension), otherwise fall back to the packaged asar.unpacked copy and then
+// __dirname/extension (dev). Returns the real path or null.
+function resolveExtensionDir() {
+  const candidates = [
+    config.extensionPath,
+    app.isPackaged ? path.join(process.resourcesPath, "app.asar.unpacked", "extension") : null,
+    path.join(__dirname, "extension")
+  ].filter(Boolean);
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(c, "manifest.json"))) return c;
+  }
+  return null;
+}
+
 async function loadBrowserExtension() {
-  // Packaged: the extension is asarUnpack'd to resources/app.asar.unpacked/extension
-  // (session.loadExtension needs a real path, not a path inside the asar).
-  const extPath = config.extensionPath ||
-    (app.isPackaged
-      ? path.join(process.resourcesPath, "app.asar.unpacked", "extension")
-      : path.join(__dirname, "extension"));
-  if (!fs.existsSync(extPath)) {
-    console.warn("[browser] Deep Grab extension not found at " + extPath);
+  const extPath = resolveExtensionDir();
+  if (!extPath) {
+    console.warn("[browser] Deep Grab extension not found (checked config.extensionPath, asar.unpacked, __dirname/extension)");
     return;
   }
   try {
@@ -306,11 +317,7 @@ function openInExternalBrowser(url, browser) {
 
 // Resolve the Deep Grab extension folder (same precedence as loadBrowserExtension).
 function extensionDir() {
-  const ext = config.extensionPath ||
-    (app.isPackaged
-      ? path.join(process.resourcesPath, "app.asar.unpacked", "extension")
-      : path.join(__dirname, "extension"));
-  return fs.existsSync(path.join(ext, "manifest.json")) ? ext : null;
+  return resolveExtensionDir();
 }
 
 // One-click install: launch a real Chrome/Edge/Brave with Deep Grab loaded.

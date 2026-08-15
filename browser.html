@@ -19,7 +19,7 @@
     .tab .x { padding: 0 2px; opacity: .7; }
     .tab .x:hover { opacity: 1; }
     .tab-new { background: transparent; color: #94a3b8; padding: 2px 8px; font-size: 16px; }
-    #content { flex: 1 1 auto; position: relative; }
+    #content { flex: 1 1 0%; min-height: 0; position: relative; }
     webview { width: 100%; height: 100%; border: none; position: absolute; top: 0; left: 0; }
   </style>
 </head>
@@ -47,6 +47,17 @@
     let tabs = [];
     let activeId = null;
 
+    // Electron webviews (OOPIF) don't reliably follow % sizing inside flex
+    // containers and can sit at the 300x150 default; force explicit pixel size
+    // on every webview whenever the content area changes size or a tab is shown.
+    function sizeWebviews() {
+      const w = content.clientWidth;
+      const h = content.clientHeight;
+      tabs.forEach((t) => { t.wv.style.width = w + "px"; t.wv.style.height = h + "px"; });
+    }
+    new ResizeObserver(sizeWebviews).observe(content);
+    window.addEventListener("resize", sizeWebviews);
+
     const host = (u) => { try { return new URL(u).hostname; } catch (e) { return u; } };
 
     function activeTab() { return tabs.find(t => t.id === activeId) || null; }
@@ -58,6 +69,7 @@
         t.wv.style.display = on ? "block" : "none";
         t.btn.classList.toggle("active", on);
       });
+      sizeWebviews();
       const a = activeTab();
       if (a) { urlInput.value = a.url; refreshNav(); }
     }
