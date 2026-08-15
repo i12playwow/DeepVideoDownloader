@@ -583,9 +583,13 @@ class DownloadManager {
    exportHistory(format = "json") {
      if (format === "csv") {
        const csv = [
-         "ID,File,Size,Status,Duration,Completed,Duration(ms)",
+         "ID,File,Size,Status,Started,Completed,Duration(s)",
          ...this.history.map((h) =>
-           [h.id, `"${h.fileName}"`, h.total, h.status, h.timestamp, h.endTime ? Math.round((h.endTime - h.timestamp) / 1000) : ""].join(",")
+           [h.id, `"${h.fileName}"`, h.total, h.status,
+            new Date(h.timestamp).toISOString(),
+            h.endTime ? new Date(h.endTime).toISOString() : "",
+            h.endTime ? Math.round((h.endTime - h.timestamp) / 1000) : ""
+           ].join(",")
          )
        ];
        return csv.join("\n");
@@ -941,7 +945,11 @@ class DownloadManager {
      const now = Date.now();
      const due = Array.from(this.items.values()).filter((i) => i.status === "scheduled" && now >= (i.scheduledStart || 0));
      if (due.length) {
-       due.forEach((i) => { i.status = "queued"; this.emit(i); });
+       due.forEach((i) => {
+         // Whole start..stop window already elapsed — pause instead of starting.
+         if (i.scheduledStop && now >= i.scheduledStop) { this.pause(i.id); return; }
+         i.status = "queued"; this.emit(i);
+       });
        this.pump();
      }
      // Stop-time enforcement: pause running/queued downloads whose stop time passed.
@@ -1169,6 +1177,7 @@ class DownloadManager {
     // Some servers reject HEAD outright (405/501). Fall back to a ranged GET and
     // read only the headers — the tiny body is destroyed, never written to disk.
     if (result.status === 405 || result.status === 501) {
+      try { result.res.resume(); } catch (e) { /* ignore */ }
       result = await requestWithRedirects(actualUrl || item.url, {
         method: "GET",
         headers: { ...baseHeaders, Range: "bytes=0-0" },
@@ -1210,7 +1219,14 @@ class DownloadManager {
         await this._withConnSlot(() => this.downloadSegment(item, seg, baseHeaders));
       }
     });
-    await Promise.all(workers);
+    try {
+      await Promise.all(workers);
+    } catch (err) {
+      // A segment failed terminally — abort sibling workers so they don't keep
+      // streaming into the temp dir while the item is retried or finalized.
+      this.abort(item);
+      throw err;
+    }
 
     const out = createWriteStream(item.finalPath);
     for (const seg of segments) {
@@ -1471,22 +1487,28 @@ class DownloadManager {
     await fsp.writeFile(listPath, lines.join("\n"), "utf8");
     const tmpOut = item.finalPath + ".part";
     // Output is <final>.part so ffmpeg can't infer the muxer from the extension — force mp4.
-    await this.runFfmpeg(ffmpeg, ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", "-f", "mp4", tmpOut]);
+    await this.runFfmpeg(ffmpeg, ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", "-f", "mp4", tmpOut], item);
     await fsp.rm(item.finalPath, { force: true }).catch(() => {});
     await fsp.rename(tmpOut, item.finalPath);
     await fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
   }
 
-  runFfmpeg(ffmpeg, args) {
+  runFfmpeg(ffmpeg, args, track) {
     return new Promise((resolve, reject) => {
       const cp = spawn(ffmpeg, args, { stdio: ["ignore", "ignore", "pipe"] });
+      // Track the child so abort()/pause()/cancel() can kill a mid-remux ffmpeg.
+      if (track) track._activeRes.add(cp);
       let errOut = "";
       cp.stderr.on("data", (c) => {
         errOut += c;
         if (errOut.length > 4000) errOut = errOut.slice(-4000);
       });
-      cp.on("error", (e) => reject(new Error("ffmpeg failed to start: " + e.message)));
+      cp.on("error", (e) => {
+        if (track) track._activeRes.delete(cp);
+        reject(new Error("ffmpeg failed to start: " + e.message));
+      });
       cp.on("close", (code) => {
+        if (track) track._activeRes.delete(cp);
         if (code === 0) resolve();
         else reject(new Error("ffmpeg remux failed (" + code + "): " + errOut.split("\n").slice(-3).join("\n")));
       });
@@ -1555,7 +1577,11 @@ class DownloadManager {
     err.name = "AbortError";
     err.aborted = true;
     for (const res of item._activeRes) {
-      try { res.destroy(err); } catch (e) { /* ignore */ }
+      try {
+        // ChildProcess (ffmpeg remux) has kill(), not destroy().
+        if (typeof res.kill === "function") res.kill();
+        else res.destroy(err);
+      } catch (e) { /* ignore */ }
     }
   }
 
@@ -1576,6 +1602,9 @@ class DownloadManager {
        item.speed = 0;
        this.emit(item);
        this.pump();
+       // A scheduled-stop item that was paused can lose its sweep timer (the
+       // sweep ignores paused items); re-arm so the stop is still enforced.
+       if (item.scheduledStart || item.scheduledStop) this.checkScheduled();
      }
    }
 
