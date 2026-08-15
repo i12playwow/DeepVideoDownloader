@@ -67,6 +67,12 @@
         <label>Download folder
           <input type="text" id="downloadDir">
         </label>
+        <label>Secondary folder (when primary drive is full)
+          <input type="text" id="downloadDir2" placeholder="e.g. D:\Downloads (different drive)">
+        </label>
+        <label>Switch when free space below (MB)
+          <input type="number" id="minFreeMB" min="0" value="500">
+        </label>
         <label>Parallel downloads
           <input type="number" id="concurrency" min="1" max="200" title="Higher = faster bulk downloads but more network/Cloudflare/IP-ban risk">
         </label>

@@ -652,9 +652,28 @@ class DownloadManager {
       };
     }
 
+    // Secondary-folder fallback: when the primary drive's free space drops below
+    // minFreeMB and a downloadDir2 is configured (different volume), new
+    // downloads (and their history/downloaded.json) go to the second folder.
+    _activeDirSync() {
+      const primary = this.config.downloadDir || path.join(os.homedir(), "Downloads", "DeepGrab");
+      const second = this.config.downloadDir2;
+      if (second) {
+        try {
+          const s = fs.statfsSync(primary);
+          const freeMB = (s.bavail * s.bsize) / (1024 * 1024);
+          if (freeMB < (this.config.minFreeMB || 500)) {
+            fs.mkdirSync(second, { recursive: true });
+            return second;
+          }
+        } catch (e) { /* statfs/mkdir failed — fall through to primary */ }
+      }
+      return primary;
+    }
+
     get dir() {
-    return this.config.downloadDir || path.join(os.homedir(), "Downloads", "DeepGrab");
-  }
+      return this._activeDirSync();
+    }
 
     get historyPath() {
       return path.join(this.dir, "history.json");

@@ -242,6 +242,8 @@ $("dlsScroll").addEventListener("scroll", () => {
 async function loadSettings() {
   const s = await window.api.getSettings();
   $("downloadDir").value = s.downloadDir;
+  $("downloadDir2").value = s.downloadDir2 || "";
+  $("minFreeMB").value = s.minFreeMB ?? 500;
   $("concurrency").value = s.concurrency;
   $("segments").value = s.segments;
   $("speedLimitKB").value = s.speedLimitKB;
@@ -269,6 +271,8 @@ $("themeToggle").addEventListener("click", () => {
 $("save").addEventListener("click", async () => {
   await window.api.saveSettings({
     downloadDir: $("downloadDir").value.trim(),
+    downloadDir2: $("downloadDir2").value.trim(),
+    minFreeMB: Math.max(0, parseInt($("minFreeMB").value || "500", 10)),
     concurrency: Math.max(1, parseInt($("concurrency").value || "1", 10)),
     segments: Math.max(1, parseInt($("segments").value || "1", 10)),
     speedLimitKB: Math.max(0, parseInt($("speedLimitKB").value || "0", 10)),

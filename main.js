@@ -17,6 +17,8 @@ const CONFIG_PATH = path.join(__dirname, "config.json");
 const DEFAULT_CONFIG = {
   port: 8765,
   downloadDir: path.join(os.homedir(), "Downloads", "DeepGrab"),
+  downloadDir2: "",
+  minFreeMB: 500,
   concurrency: 8,
   segments: 4,
   speedLimitKB: 0,
