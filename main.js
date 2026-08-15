@@ -460,7 +460,7 @@ ipcMain.handle("download-schedule", (e, { id, mode, scheduledStart, scheduledSto
     if (item.status === "scheduled") item.status = "queued";
   }
   dm.emit(item);
-  if (item.status === "scheduled") dm.checkScheduled();
+  dm.checkScheduled(); // arms the stop-time sweep even for a running item
   return { ok: true };
 });
 

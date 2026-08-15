@@ -641,7 +641,8 @@ class DownloadManager {
       }
 
       const valid = speeds.filter((s) => s.speed > 0);
-      const current = valid.length ? valid[valid.length - 1].speed : 0;
+      const latest = valid.length ? valid.reduce((a, b) => (b.time > a.time ? b : a)) : null;
+      const current = latest ? latest.speed : 0;
       const avg = Math.round(valid.reduce((a, s) => a + s.speed, 0) / valid.length);
       const peak = Math.max(...valid.map((s) => s.speed));
 
@@ -901,7 +902,7 @@ class DownloadManager {
        this.emit(item);
      }
      this.pump();
-     if (item.scheduledStart && Date.now() < item.scheduledStart) {
+     if (item.scheduledStart || item.scheduledStop) {
        this.checkScheduled();
      }
      return id;
@@ -943,9 +944,27 @@ class DownloadManager {
        due.forEach((i) => { i.status = "queued"; this.emit(i); });
        this.pump();
      }
-     if (due.length || Array.from(this.items.values()).some((i) => i.status === "scheduled")) {
-       clearTimeout(this._scheduleTimer);
-       this._scheduleTimer = setTimeout(() => this.checkScheduled(), 30000);
+     // Stop-time enforcement: pause running/queued downloads whose stop time passed.
+     const stopDue = Array.from(this.items.values()).filter(
+       (i) => i.scheduledStop && now >= i.scheduledStop && (i.status === "running" || i.status === "queued")
+     );
+     if (stopDue.length) stopDue.forEach((i) => this.pause(i.id));
+     // Keep a sweep alive while anything is still scheduled or has a future
+     // start/stop time — wake just before the earliest event so both fire on time.
+     const scheduledStarts = Array.from(this.items.values())
+       .filter((i) => i.status === "scheduled" && (i.scheduledStart || 0) > now)
+       .map((i) => i.scheduledStart);
+     const nextStart = scheduledStarts.reduce((a, b) => Math.min(a, b), Infinity);
+     const nextStop = Array.from(this.items.values())
+       .filter((i) => i.scheduledStop && i.scheduledStop > now && ["running", "queued", "scheduled"].includes(i.status))
+       .map((i) => i.scheduledStop)
+       .reduce((a, b) => Math.min(a, b), Infinity);
+     const nextEvent = Math.min(nextStart, nextStop);
+     clearTimeout(this._scheduleTimer);
+     this._scheduleTimer = null;
+     if (Number.isFinite(nextEvent)) {
+       const wait = Math.min(30000, Math.max(500, nextEvent - now));
+       this._scheduleTimer = setTimeout(() => this.checkScheduled(), wait);
      }
    }
 

@@ -1,4 +1,13 @@
 const $ = (id) => document.getElementById(id);
+// Local-time "YYYY-MM-DDTHH:MM" for the schedule prompt. toISOString() would
+// return UTC, but new Date("YYYY-MM-DDTHH:MM") parses as local — the prefill
+// must be local or it's off by the timezone offset.
+function toLocalInput(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 const fmtBytes = (b) => {
   if (!b) return "0 B";
   const u = ["B", "KB", "MB", "GB"];
@@ -201,9 +210,9 @@ $("dlsBody").addEventListener("click", (e) => {
   if (act === "schedule") {
     e.preventDefault();
     const it = items.get(id);
-    const start = prompt("Start time (YYYY-MM-DDTHH:MM) or leave blank:", it.scheduledStart ? new Date(it.scheduledStart).toISOString().slice(0, 16) : "");
+    const start = prompt("Start time (YYYY-MM-DDTHH:MM) or leave blank:", toLocalInput(it.scheduledStart));
     if (start === null) return;
-    const stop = prompt("Stop time (YYYY-MM-DDTHH:MM) or leave blank:", it.scheduledStop ? new Date(it.scheduledStop).toISOString().slice(0, 16) : "");
+    const stop = prompt("Stop time (YYYY-MM-DDTHH:MM) or leave blank:", toLocalInput(it.scheduledStop));
     if (stop === null) return;
     window.api.schedule({
       id,
