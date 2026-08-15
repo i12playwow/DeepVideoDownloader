@@ -1,3 +1,15 @@
 node_modules/
 config.json
 ws-debug.log
+
+# Desktop-copy artifacts — canonical copy lives on the Desktop; keep this repo a core-JS-only subset
+build/
+dist/
+extension/
+extension-firefox/
+run.bat
+extension.crx
+extension.pem
+*.user.js
+test-*
+* - Copy*
