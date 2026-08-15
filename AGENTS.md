@@ -48,7 +48,7 @@ Each `resolve*()` returns `{resolvedUrl, proxy, agent, origin?}` and re-resolves
 ## WebSocket protocol (ws://127.0.0.1:8765)
 - Server: `{type:"hello",version,port}` on connect; pushes `{type:"status",id,url,...,status,total,received,progress,speed}` on updates.
 - Client→server:
-  - `{type:"download",url,title,referer}` → `{type:"accepted",id,ids,url}` replied **immediately**, or `{type:"error",message}`. **The `accepted` reply must echo `url`** — `background.js` matches `m.url === url` (regression fixed 8/2026; don't drop it).
+  - `{type:"download",url,title,referer}` → `{type:"accepted",id,ids,url}` replied **immediately**, or `{type:"error",message,url}`. **Both `accepted` and `error` replies must echo `url`** — `background.js` matches `m.url === url` on each so concurrent sends can't mis-attribute a reply (regression fixed 8/2026; don't drop it).
   - `download` may carry `sources` (array of `{kind,url,label}`): enqueue every `kind:"link"` entry (label → `title[label].mp4`), fall back to plain `url` when none usable; `id` = first, `ids` = all. Non-`link` kinds (`iframe`/`server`) are player pages — ignored.
   - `{type:"ping"}`→`{type:"pong"}`; `{type:"probe",url}`→`{type:"probe-result",url,size,mime,ok}`.
 - Extension: `background.js` is the WS client; `content.js` never talks WS — it uses `chrome.runtime` messages (`video-found`, `get-found`, `add-to-list`, `add-all-found`, `remove-found`, `desktop-status`, `open-new-tab`); background broadcasts `dv-found-updated`.

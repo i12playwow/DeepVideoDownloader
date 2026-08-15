@@ -169,7 +169,7 @@ function startWsServer() {
            }
           ws.send(JSON.stringify({ type: "accepted", id: ids[0], ids, url: msg.url }));
         } catch (e) {
-          ws.send(JSON.stringify({ type: "error", message: e.message }));
+          ws.send(JSON.stringify({ type: "error", message: e.message, url: msg.url }));
         }
       }
       if (msg.type === "ping") {
