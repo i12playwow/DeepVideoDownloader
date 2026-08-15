@@ -49,7 +49,7 @@ const DEFAULT_CONFIG = {
 
 function loadConfig() {
   try {
-    const raw = fs.readFileSync(CONFIG_PATH, "utf8");
+    const raw = fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, "");
     return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
   } catch (e) {
     return { ...DEFAULT_CONFIG };
