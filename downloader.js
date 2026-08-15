@@ -575,6 +575,7 @@ class DownloadManager {
     this._connWaiters = [];       // semaphore waiters for the global conn cap
     this._loadHistory();
     this._loadDownloaded();
+    this._sweepOrphanTempDirs();
   }
 
    list() {
@@ -613,6 +614,22 @@ class DownloadManager {
      } catch (e) {
        this.history = [];
      }
+   }
+
+   // Remove orphaned segmented/HLS temp dirs (dl-*) left behind when the app was
+   // killed mid-run (taskkill /F, crash). Paused state doesn't survive a restart,
+   // so any pre-existing dl-* dir is dead weight; only ids still in the active
+   // map are protected (impossible at startup, but the guard keeps a re-run safe).
+   async _sweepOrphanTempDirs() {
+     try {
+       const root = this.dir;
+       const entries = await fsp.readdir(root, { withFileTypes: true });
+       for (const e of entries) {
+         if (!e.isDirectory() || !/^dl-\d+-\d+$/.test(e.name)) continue;
+         if (this.items.has(e.name)) continue;
+         await fsp.rm(path.join(root, e.name), { recursive: true, force: true }).catch(() => {});
+       }
+     } catch (e) { /* sweep is best-effort */ }
    }
 
     _saveHistoryNow() {
