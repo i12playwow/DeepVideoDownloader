@@ -18,6 +18,7 @@ const DEFAULT_CONFIG = {
   port: 8765,
   downloadDir: path.join(os.homedir(), "Downloads", "DeepGrab"),
   downloadDir2: "",
+  downloadDir3: "",
   minFreeMB: 500,
   concurrency: 8,
   segments: 4,
@@ -445,10 +446,12 @@ ipcMain.handle("test-proxies", async (e, target) => {
   return results;
 });
 
+ipcMain.handle("get-active-dir", () => dm.dir);
 ipcMain.handle("open-dir", () => {
-  fs.mkdirSync(config.downloadDir, { recursive: true });
-  shell.openPath(config.downloadDir);
-  return { ok: true };
+  const active = dm.dir; // opens the folder downloads currently land in
+  fs.mkdirSync(active, { recursive: true });
+  shell.openPath(active);
+  return { ok: true, dir: active };
 });
 
 ipcMain.handle("open-path", (e, p) => {

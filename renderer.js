@@ -243,6 +243,7 @@ async function loadSettings() {
   const s = await window.api.getSettings();
   $("downloadDir").value = s.downloadDir;
   $("downloadDir2").value = s.downloadDir2 || "";
+  $("downloadDir3").value = s.downloadDir3 || "";
   $("minFreeMB").value = s.minFreeMB ?? 500;
   $("concurrency").value = s.concurrency;
   $("segments").value = s.segments;
@@ -272,6 +273,7 @@ $("save").addEventListener("click", async () => {
   await window.api.saveSettings({
     downloadDir: $("downloadDir").value.trim(),
     downloadDir2: $("downloadDir2").value.trim(),
+    downloadDir3: $("downloadDir3").value.trim(),
     minFreeMB: Math.max(0, parseInt($("minFreeMB").value || "500", 10)),
     concurrency: Math.max(1, parseInt($("concurrency").value || "1", 10)),
     segments: Math.max(1, parseInt($("segments").value || "1", 10)),
@@ -284,6 +286,7 @@ $("save").addEventListener("click", async () => {
     autoCloseTab: $("autoCloseTab").checked,
     proxies: $("proxies").value.split("\n").map((p) => p.trim()).filter(Boolean)
   });
+  refreshActiveDir();
 });
 
 $("testProxies").addEventListener("click", async () => {
@@ -297,8 +300,15 @@ $("testProxies").addEventListener("click", async () => {
   });
 });
 
-  $("openDir").addEventListener("click", () => window.api.openDir());
+  $("openDir").addEventListener("click", async () => { await window.api.openDir(); refreshActiveDir(); });
   $("openBrowser").addEventListener("click", () => window.api.openBrowser());
+  async function refreshActiveDir() {
+    try {
+      const d = await window.api.getActiveDir();
+      if (d) $("activeDir").textContent = "Saving to: " + d;
+    } catch (e) { /* ignore */ }
+  }
+  refreshActiveDir();
   const parseUrls = () => {
     return String($("browserUrl").value || "")
       .split(/[\n,;\s]+/)

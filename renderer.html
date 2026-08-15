@@ -32,6 +32,7 @@
         <h2>Downloads</h2>
         <div class="panel-actions">
           <button id="openDir" class="btn ghost">Open folder</button>
+          <span id="activeDir" class="hint" style="font-size: 11px; align-self: center;" title="Folder downloads currently land in"></span>
           <button id="resumeLast" class="btn ghost">↻ Resume last</button>
           <button id="showActive" class="btn ghost active">Active</button>
           <button id="showHistory" class="btn ghost">History</button>
@@ -69,6 +70,9 @@
         </label>
         <label>Secondary folder (when primary drive is full)
           <input type="text" id="downloadDir2" placeholder="e.g. D:\Downloads (different drive)">
+        </label>
+        <label>Third folder (when secondary is full too)
+          <input type="text" id="downloadDir3" placeholder="e.g. E:\Downloads (different drive)">
         </label>
         <label>Switch when free space below (MB)
           <input type="number" id="minFreeMB" min="0" value="500">

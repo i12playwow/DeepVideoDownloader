@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("api", {
   schedule: (data) => ipcRenderer.invoke("download-schedule", data),
   testProxies: (url) => ipcRenderer.invoke("test-proxies", url),
   openDir: () => ipcRenderer.invoke("open-dir"),
+  getActiveDir: () => ipcRenderer.invoke("get-active-dir"),
   showInFolder: (p) => ipcRenderer.invoke("open-path", p),
   openBrowser: (urls) => ipcRenderer.invoke("browser-open", urls),
   browserNav: (url) => ipcRenderer.invoke("browser-nav", url),

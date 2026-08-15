@@ -652,21 +652,21 @@ class DownloadManager {
       };
     }
 
-    // Secondary-folder fallback: when the primary drive's free space drops below
-    // minFreeMB and a downloadDir2 is configured (different volume), new
-    // downloads (and their history/downloaded.json) go to the second folder.
+    // Fallback chain: primary -> downloadDir2 -> downloadDir3. Walks the folders
+    // in order and uses the first whose drive has >= minFreeMB free (or the last
+    // one regardless), so downloads (and their history/downloaded.json) land in
+    // the first folder that can take them.
     _activeDirSync() {
       const primary = this.config.downloadDir || path.join(os.homedir(), "Downloads", "DeepGrab");
-      const second = this.config.downloadDir2;
-      if (second) {
-        try {
-          const s = fs.statfsSync(primary);
-          const freeMB = (s.bavail * s.bsize) / (1024 * 1024);
-          if (freeMB < (this.config.minFreeMB || 500)) {
-            fs.mkdirSync(second, { recursive: true });
-            return second;
-          }
-        } catch (e) { /* statfs/mkdir failed — fall through to primary */ }
+      const dirs = [primary, this.config.downloadDir2, this.config.downloadDir3].filter(Boolean);
+      for (let i = 0; i < dirs.length; i++) {
+        const dir = dirs[i];
+        let free = Infinity;
+        try { const s = fs.statfsSync(dir); free = (s.bavail * s.bsize) / (1024 * 1024); } catch (e) { free = Infinity; }
+        const isLast = i === dirs.length - 1;
+        if (isLast || free >= (this.config.minFreeMB || 500)) {
+          try { fs.mkdirSync(dir, { recursive: true }); return dir; } catch (e) { /* try next */ }
+        }
       }
       return primary;
     }
