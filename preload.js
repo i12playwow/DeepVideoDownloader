@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld("api", {
   openBrowser: (urls) => ipcRenderer.invoke("browser-open", urls),
   browserNav: (url) => ipcRenderer.invoke("browser-nav", url),
   openExternal: (url, browser) => ipcRenderer.invoke("browser-external", url, browser),
+  installExtension: (browser) => ipcRenderer.invoke("extension-install", browser),
   onUpdate: (cb) => ipcRenderer.on("download-update", (e, item) => cb(item)),
   onClipboardUrl: (cb) => ipcRenderer.on("clipboard-url", (e, data) => cb(data)),
   onFileOpened: (cb) => ipcRenderer.on("file-opened", (e, data) => cb(data))

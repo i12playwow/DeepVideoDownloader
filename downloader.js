@@ -732,6 +732,8 @@ class DownloadManager {
         received: item.received,
         status: item.status,
         error: item.error,
+        finalPath: item.finalPath || "",
+        thumb: item.thumb || "",
         timestamp: Date.now(),
         endTime: Date.now(),
         _samples: item._samples.slice(-120)
@@ -873,6 +875,7 @@ class DownloadManager {
           errorCategory: this.errorCategory,
           refreshCount: this.refreshCount,
           finalPath: this.finalPath,
+          thumb: this.thumb || "",
           scheduledStart: this.scheduledStart,
           scheduledStop: this.scheduledStop,
           samples: this._samples.slice(-120).map((s) => ({ time: s.time, speed: s.speed }))
@@ -1101,6 +1104,11 @@ class DownloadManager {
     item.status = "done";
     item.speed = 0;
     this.emit(item);
+    // Best-effort preview frame (needs ffmpeg; never fails the download).
+    try {
+      item.thumb = await this.makeThumb(item);
+      if (item.thumb) this.emit(item);
+    } catch (e) { /* thumbnails are optional */ }
     this._maybeFinalize(item);
   }
 
@@ -1410,6 +1418,29 @@ class DownloadManager {
         else reject(new Error("ffmpeg remux failed (" + code + "): " + errOut.split("\n").slice(-3).join("\n")));
       });
     });
+  }
+
+  // Best-effort small preview frame extracted from the finished video with
+  // ffmpeg (same binary the HLS remux uses). Returns the .thumb.jpg path or ""
+  // when thumbnails are disabled, ffmpeg is missing, or extraction fails.
+  async makeThumb(item) {
+    if (this.config.thumbnails === false) return "";
+    if (!item.finalPath || item.status !== "done") return "";
+    const thumb = item.finalPath + ".thumb.jpg";
+    if (fs.existsSync(thumb)) return thumb;
+    const ffmpeg = this.config.ffmpegPath || "ffmpeg";
+    const attempt = async (args) => {
+      try {
+        await this.runFfmpeg(ffmpeg, args);
+        return fs.existsSync(thumb) ? thumb : "";
+      } catch (e) {
+        return "";
+      }
+    };
+    // Fast-seek to ~3s for a representative frame; fall back to the first frame
+    // for clips shorter than the seek point.
+    return await attempt(["-y", "-ss", "3", "-i", item.finalPath, "-frames:v", "1", "-vf", "scale=96:-1", "-f", "image2", thumb])
+      || await attempt(["-y", "-i", item.finalPath, "-frames:v", "1", "-vf", "scale=96:-1", "-f", "image2", thumb]);
   }
 
   async streamToFile(item, res, filePath, flags) {

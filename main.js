@@ -32,6 +32,7 @@ const DEFAULT_CONFIG = {
   saveHistory: true,
   skipDuplicates: true,
   autoCloseTab: true,
+  thumbnails: true,
   maxHistory: 2000,
   liveWindow: 0,
   autoTrimAt: 500,
@@ -112,7 +113,8 @@ function pushUpdate(item) {
         error: item.error,
         errorCategory: item.errorCategory,
         refreshCount: item.refreshCount,
-        finalPath: item.finalPath
+        finalPath: item.finalPath,
+        thumb: item.thumb || ""
       }));
     }
   });
@@ -300,6 +302,37 @@ function openInExternalBrowser(url, browser) {
     if (err) console.error("[browser] launch error:", err.message);
   });
   return { ok: true, browser: target, exe };
+}
+
+// Resolve the Deep Grab extension folder (same precedence as loadBrowserExtension).
+function extensionDir() {
+  const ext = config.extensionPath ||
+    (app.isPackaged
+      ? path.join(process.resourcesPath, "app.asar.unpacked", "extension")
+      : path.join(__dirname, "extension"));
+  return fs.existsSync(path.join(ext, "manifest.json")) ? ext : null;
+}
+
+// One-click install: launch a real Chrome/Edge/Brave with Deep Grab loaded.
+// Chromium only honors --load-extension on a NON-default profile, so we run a
+// dedicated user-data-dir that persists — the extension stays loaded every time
+// that profile is opened, without touching the user's normal profile.
+function launchExtensionInBrowser(browser) {
+  const name = String(browser || "chrome").toLowerCase();
+  const exe = findBrowser(name);
+  if (!exe) return { error: "not-found", browser: name };
+  const ext = extensionDir();
+  if (!ext) return { error: "no-extension", browser: name };
+  const profile = path.join(app.getPath("userData"), "browser-profile-" + name);
+  execFile(exe, [
+    "--user-data-dir=" + profile,
+    "--load-extension=" + ext,
+    "--no-first-run",
+    "chrome://extensions"
+  ], (err) => {
+    if (err) console.error("[browser] extension launch error:", err.message);
+  });
+  return { ok: true, browser: name, exe, profile, extension: ext };
 }
 
 // ---------------- clipboard monitoring ----------------
@@ -546,6 +579,7 @@ if (gotLock) {
   ipcMain.handle("browser-nav", (e, url) => { createBrowserWindow(url); });
   ipcMain.handle("browser-get-tabs", () => { const t = pendingTabs; pendingTabs = []; return t; });
   ipcMain.handle("browser-external", (e, url, browser) => openInExternalBrowser(url, browser));
+  ipcMain.handle("extension-install", (e, browser) => launchExtensionInBrowser(browser));
 
   app.whenReady().then(() => {
     startWsServer();
