@@ -65,7 +65,7 @@ function spacer(px) {
   const tr = document.createElement("tr");
   tr.style.height = px + "px";
   tr.style.border = "none";
-  tr.innerHTML = '<td colspan="9"></td>';
+  tr.innerHTML = '<td colspan="9" style="border:none;padding:0;"></td>';
   return tr;
 }
 
@@ -74,9 +74,12 @@ function rowHtml(it, showing) {
   const done = it.status === "done" || it.status === "cancelled";
   return `
       <td class="sel">${showing === "history" ? "" : `<input type="checkbox" data-sel="${esc(it.id)}" ${selected.has(it.id) ? "checked" : ""}>`}</td>
-      <td class="name" title="${esc(it.url)}">
-        <div>${esc(it.fileName)}</div>
-        <div class="sub">${esc(it.url)}</div>
+      <td class="name-cell" title="${esc(it.url)}">
+        ${it.thumb ? `<img class="thumb" src="file:///${String(it.thumb).replace(/\\/g, "/")}" alt="" onerror="this.remove()">` : ""}
+        <div class="name-col">
+          <div class="name">${esc(it.fileName)}</div>
+          <div class="sub">${esc(it.url)}</div>
+        </div>
       </td>
       <td>${fmtBytes(it.total)}</td>
       <td class="wide">
@@ -90,14 +93,44 @@ function rowHtml(it, showing) {
       <td class="actions">${showing === "history" ? histActionButtons(it) : actionButtons(it)}</td>`;
 }
 
+let searchQuery = "";
+
+function filteredList() {
+  const base = showing === "history" ? Array.from(historyItems.values()) : Array.from(items.values());
+  if (!searchQuery) return base;
+  const q = searchQuery.toLowerCase();
+  return base.filter((it) =>
+    (it.fileName || "").toLowerCase().includes(q) ||
+    (it.url || "").toLowerCase().includes(q)
+  );
+}
+
+function updateSummary() {
+  const el = $("dlSummary");
+  if (!el) return;
+  if (showing === "history") {
+    el.textContent = historyItems.size ? historyItems.size + " entries" : "";
+    return;
+  }
+  const counts = { running: 0, queued: 0, paused: 0, scheduled: 0, done: 0, error: 0, duplicate: 0 };
+  for (const it of items.values()) if (counts[it.status] !== undefined) counts[it.status]++;
+  const parts = [];
+  [["running", "active"], ["queued", "queued"], ["paused", "paused"], ["scheduled", "scheduled"],
+   ["done", "done"], ["error", "error"], ["duplicate", "duplicate"]].forEach(([k, label]) => {
+    if (counts[k]) parts.push(counts[k] + " " + label);
+  });
+  el.textContent = parts.join(" · ");
+}
+
 function render() {
   const tbody = $("dlsBody");
-  const displayItems = showing === "history" ? Array.from(historyItems.values()) : Array.from(items.values());
+  const displayItems = filteredList();
   const total = displayItems.length;
 
   if (!total) {
-    tbody.innerHTML = `<tr id="emptyRow"><td colspan="9">${showing === "history" ? "No history yet." : "No downloads yet. Find an MP4 in the browser and it will appear here."}</td></tr>`;
+    tbody.innerHTML = `<tr id="emptyRow"><td class="empty" colspan="9">${showing === "history" ? "No history yet." : "No downloads yet. Find an MP4 in the browser and it will appear here."}</td></tr>`;
     updateBatchBar();
+    updateSummary();
     return;
   }
   const scroll = $("dlsScroll");
@@ -114,6 +147,7 @@ function render() {
   }
   if (end < total) tbody.appendChild(spacer((total - end) * ROW_H));
   updateBatchBar();
+  updateSummary();
 }
 
 // Coalesce rapid updates (status + progress) into one re-render per window.
@@ -238,6 +272,12 @@ $("dlsScroll").addEventListener("scroll", () => {
   if (!renderTimer) render(); // virtualized render is cheap; keep rows in view
 });
 
+$("search").addEventListener("input", () => {
+  searchQuery = $("search").value.trim();
+  $("dlsScroll").scrollTop = 0;
+  render();
+});
+
 // ---------------- settings ----------------
 async function loadSettings() {
   const s = await window.api.getSettings();
@@ -254,6 +294,7 @@ async function loadSettings() {
   $("saveHistory").checked = s.saveHistory !== false;
   $("skipDuplicates").checked = s.skipDuplicates !== false;
   $("autoCloseTab").checked = s.autoCloseTab !== false;
+  $("thumbnails").checked = s.thumbnails !== false;
   $("proxies").value = (s.proxies || []).join("\n");
   applyTheme(s.theme || "dark");
 }
@@ -284,6 +325,7 @@ $("save").addEventListener("click", async () => {
     saveHistory: $("saveHistory").checked,
     skipDuplicates: $("skipDuplicates").checked,
     autoCloseTab: $("autoCloseTab").checked,
+    thumbnails: $("thumbnails").checked,
     proxies: $("proxies").value.split("\n").map((p) => p.trim()).filter(Boolean)
   });
   refreshActiveDir();
@@ -301,45 +343,61 @@ $("testProxies").addEventListener("click", async () => {
 });
 
   $("openDir").addEventListener("click", async () => { await window.api.openDir(); refreshActiveDir(); });
-  $("openBrowser").addEventListener("click", () => window.api.openBrowser());
-  async function refreshActiveDir() {
-    try {
-      const d = await window.api.getActiveDir();
-      if (d) $("activeDir").textContent = "Saving to: " + d;
-    } catch (e) { /* ignore */ }
+$("openBrowser").addEventListener("click", () => window.api.openBrowser());
+async function refreshActiveDir() {
+  try {
+    const d = await window.api.getActiveDir();
+    if (d) $("activeDir").textContent = "Saving to: " + d;
+  } catch (e) { /* ignore */ }
+}
+refreshActiveDir();
+const parseUrls = () => {
+  return String($("browserUrl").value || "")
+    .split(/[\n,;\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((u) => (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u) ? u : "https://" + u));
+};
+const browserGo = () => {
+  const urls = parseUrls();
+  if (!urls.length) { window.api.openBrowser(); return; }
+  const target = $("browserTarget").value;
+  if (target === "builtin") {
+    // open each URL as a tab in the built-in browser
+    window.api.openBrowser(urls);
+  } else {
+    let notFound = false;
+    urls.forEach((u) => {
+      window.api.openExternal(u, target).then((r) => { if (r && r.error === "not-found") notFound = true; });
+    });
+    setTimeout(() => { if (notFound) alert("Could not find " + target + " on this system."); }, 800);
   }
-  refreshActiveDir();
-  const parseUrls = () => {
-    return String($("browserUrl").value || "")
-      .split(/[\n,;\s]+/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((u) => (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u) ? u : "https://" + u));
-  };
-  const browserGo = () => {
-    const urls = parseUrls();
-    if (!urls.length) { window.api.openBrowser(); return; }
-    const target = $("browserTarget").value;
-    if (target === "builtin") {
-      // open each URL as a tab in the built-in browser
-      window.api.openBrowser(urls);
-    } else {
-      let notFound = false;
-      urls.forEach((u) => {
-        window.api.openExternal(u, target).then((r) => { if (r && r.error === "not-found") notFound = true; });
-      });
-      setTimeout(() => { if (notFound) alert("Could not find " + target + " on this system."); }, 800);
-    }
-  };
-  $("browserGo").addEventListener("click", browserGo);
-  $("browserUrl").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) browserGo(); });
-  $("downloadAll").addEventListener("click", async () => {
-    const urls = parseUrls();
-    if (!urls.length) return;
-    const r = await window.api.addMany(urls);
-    const n = r && r.ok ? r.count : 0;
-    alert("Enqueued " + n + " of " + urls.length + " URL(s).");
-  });
+};
+$("browserGo").addEventListener("click", browserGo);
+$("browserUrl").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) browserGo(); });
+$("downloadAll").addEventListener("click", async () => {
+  const urls = parseUrls();
+  if (!urls.length) return;
+  const r = await window.api.addMany(urls);
+  const n = r && r.ok ? r.count : 0;
+  alert("Enqueued " + n + " of " + urls.length + " URL(s).");
+});
+
+$("installExt").addEventListener("click", async () => {
+  const target = $("browserTarget").value;
+  if (target === "builtin" || target === "default") {
+    alert("Pick Chrome, Edge, or Brave in the browser dropdown to install the extension.");
+    return;
+  }
+  const res = await window.api.installExtension(target);
+  if (res && res.error === "not-found") {
+    showToast(target[0].toUpperCase() + target.slice(1) + " is not installed on this system.", [{ label: "Dismiss", className: "btn ghost", onClick: () => {} }]);
+  } else if (res && res.ok) {
+    showToast("Deep Grab launched in " + res.browser + " on a dedicated profile — the extension is loaded for that window.", [{ label: "Dismiss", className: "btn ghost", onClick: () => {} }]);
+  } else {
+    showToast("Could not install: " + ((res && res.error) || "unknown error"), [{ label: "Dismiss", className: "btn ghost", onClick: () => {} }]);
+  }
+});
 
 $("resumeLast").addEventListener("click", async () => {
   const res = await window.api.resumeLast();
@@ -379,102 +437,68 @@ $("clearHistory").addEventListener("click", async () => {
   }
 });
 
-// ---------------- clipboard monitoring ----------------
-window.api.onClipboardUrl((data) => {
+// ---------------- toast notifications ----------------
+function showToast(title, actions) {
   const notification = document.createElement("div");
   notification.className = "clipboard-notify";
-  const title = document.createElement("div");
-  title.style.cssText = "font-size: 11px; margin-bottom: 6px;";
-  title.textContent = "📋 Video URL detected in clipboard";
+  const titleEl = document.createElement("div");
+  titleEl.className = "notify-title";
+  titleEl.textContent = title;
   const row = document.createElement("div");
-  row.style.cssText = "display: flex; gap: 6px;";
-  const addBtn = document.createElement("button");
-  addBtn.className = "btn";
-  addBtn.style.cssText = "font-size: 10px; padding: 4px 8px;";
-  addBtn.textContent = "Add download";
-  addBtn.addEventListener("click", async () => {
-    const res = await window.api.add(data.url);
-    if (!res.ok) {
-      alert("Failed to add download: " + (res.error || "unknown error"));
-    }
-    notification.remove();
+  row.className = "notify-actions";
+  (actions || []).forEach((a) => {
+    const btn = document.createElement("button");
+    btn.className = a.className || "btn";
+    btn.textContent = a.label;
+    btn.addEventListener("click", () => { a.onClick(); notification.remove(); });
+    row.appendChild(btn);
   });
-  const dismissBtn = document.createElement("button");
-  dismissBtn.className = "btn ghost";
-  dismissBtn.style.cssText = "font-size: 10px; padding: 4px 8px;";
-  dismissBtn.textContent = "Dismiss";
-  dismissBtn.addEventListener("click", () => notification.remove());
-  row.appendChild(addBtn);
-  row.appendChild(dismissBtn);
-  notification.appendChild(title);
+  notification.appendChild(titleEl);
   notification.appendChild(row);
-  notification.style.cssText = `
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px;
-    z-index: 9999;
-    max-width: 300px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  `;
   document.body.appendChild(notification);
-
   setTimeout(() => {
     if (notification.parentElement) {
       notification.remove();
     }
-   }, 15000);
+  }, 15000);
+}
+
+// ---------------- clipboard monitoring ----------------
+window.api.onClipboardUrl((data) => {
+  showToast("📋 Video URL detected in clipboard", [
+    {
+      label: "Add download",
+      className: "btn",
+      onClick: async () => {
+        const res = await window.api.add(data.url);
+        if (!res.ok) {
+          alert("Failed to add download: " + (res.error || "unknown error"));
+        }
+      }
+    },
+    { label: "Dismiss", className: "btn ghost", onClick: () => {} }
+  ]);
 });
 
 // ---------------- file opened via Windows file association ----------------
 window.api.onFileOpened((data) => {
-  const notification = document.createElement("div");
-  notification.className = "clipboard-notify";
-  const title = document.createElement("div");
-  title.style.cssText = "font-size: 11px; margin-bottom: 6px;";
-  title.textContent = "🎬 Opened: " + (data.name || data.path);
-  const row = document.createElement("div");
-  row.style.cssText = "display: flex; gap: 6px;";
-  const folderBtn = document.createElement("button");
-  folderBtn.className = "btn";
-  folderBtn.style.cssText = "font-size: 10px; padding: 4px 8px;";
-  folderBtn.textContent = "Show in folder";
-  folderBtn.addEventListener("click", async () => {
-    await window.api.showInFolder(data.path);
-    notification.remove();
-  });
-  const dismissBtn = document.createElement("button");
-  dismissBtn.className = "btn ghost";
-  dismissBtn.style.cssText = "font-size: 10px; padding: 4px 8px;";
-  dismissBtn.textContent = "Dismiss";
-  dismissBtn.addEventListener("click", () => notification.remove());
-  row.appendChild(folderBtn);
-  row.appendChild(dismissBtn);
-  notification.appendChild(title);
-  notification.appendChild(row);
-  notification.style.cssText = `
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px;
-    z-index: 9999;
-    max-width: 300px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  `;
-  document.body.appendChild(notification);
-  setTimeout(() => {
-    if (notification.parentElement) notification.remove();
-  }, 15000);
+  showToast("🎬 Opened: " + (data.name || data.path), [
+    {
+      label: "Show in folder",
+      className: "btn",
+      onClick: () => window.api.showInFolder(data.path)
+    },
+    { label: "Dismiss", className: "btn ghost", onClick: () => {} }
+  ]);
 });
 
 // ---------------- bandwidth charting ----------------
 let bwChart = null;
+
+// Canvas fillStyle can't resolve CSS var(); pull the computed value instead.
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#94a3b8";
+}
 
 function drawBandwidthChart(samples) {
   const canvas = $("bwChart");
@@ -486,7 +510,7 @@ function drawBandwidthChart(samples) {
   ctx.clearRect(0, 0, w, h);
 
   if (!samples.length) {
-    ctx.fillStyle = "var(--muted)";
+    ctx.fillStyle = cssVar("--muted");
     ctx.font = "11px system-ui";
     ctx.textAlign = "center";
     ctx.fillText("No bandwidth data yet", w / 2, h / 2);
@@ -496,7 +520,7 @@ function drawBandwidthChart(samples) {
   const max = Math.max(...samples.map((s) => s.speed), 1);
   const barWidth = (w / Math.max(samples.length, 1)) - 1;
 
-  ctx.fillStyle = "#3b82f6";
+  ctx.fillStyle = cssVar("--accent");
   samples.forEach((s, i) => {
     const height = (s.speed / max) * (h - 10);
     ctx.fillRect(i * (barWidth + 1), h - height, barWidth, height);
