@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deep Video Downloader</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>▶ Deep Video Downloader</h1>
+      <div class="subtitle">WebSocket server: <code>ws://127.0.0.1:8765</code> — links arrive from the browser extension <span id="wsBadge" class="ws-badge off">no client</span></div>
+    </div>
+    <div class="panel-actions">
+      <button id="themeToggle" class="btn ghost">🌓 Toggle theme</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="capture-row">
+        <select id="browserTarget" title="Open the URL in which browser">
+          <option value="builtin">Built-in browser</option>
+          <option value="chrome">Chrome</option>
+          <option value="edge">Edge</option>
+          <option value="brave">Brave</option>
+          <option value="default">System default</option>
+        </select>
+        <textarea id="browserUrl" class="browser-url" rows="2" placeholder="Type one or more URLs (one per line) and press Ctrl+Enter or Open"></textarea>
+        <div class="capture-actions">
+          <button id="browserGo" class="btn">Open</button>
+          <button id="openBrowser" class="btn ghost">🌐 Open browser</button>
+          <button id="downloadAll" class="btn ghost" title="Directly enqueue every URL as a download">&#8681; Download all</button>
+          <button id="installExt" class="btn ghost" title="Load Deep Grab into the selected browser on a dedicated profile — no manual chrome://extensions needed">📦 Install in browser</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Downloads</h2>
+        <div class="panel-actions">
+          <button id="openDir" class="btn ghost">Open folder</button>
+          <span id="activeDir" class="pill pill-info" title="Folder downloads currently land in"></span>
+          <button id="resumeLast" class="btn ghost">↻ Resume last</button>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <div class="seg">
+            <button id="showActive" class="btn ghost active">Active</button>
+            <button id="showHistory" class="btn ghost">History</button>
+          </div>
+          <input id="search" type="search" class="search" placeholder="Filter by name or URL…">
+        </div>
+        <div class="toolbar-right">
+          <button id="clearHistory" class="btn ghost">Clear history</button>
+          <button id="exportJson" class="btn ghost">Export JSON</button>
+          <button id="exportCsv" class="btn ghost">Export CSV</button>
+        </div>
+      </div>
+
+      <div class="batch-bar" id="batchBar">
+        <button id="batchPause" class="btn ghost" disabled>⏸ Pause selected</button>
+        <button id="batchResume" class="btn ghost" disabled>▶ Resume selected</button>
+        <button id="batchCancel" class="btn ghost" disabled>✕ Cancel selected</button>
+        <button id="batchRemove" class="btn ghost" disabled>🗑 Remove selected</button>
+        <span id="batchCount" class="batch-count"></span>
+        <span class="spacer"></span>
+        <span id="dlSummary" class="hint"></span>
+      </div>
+
+      <div id="dlsScroll">
+        <table id="dls">
+          <thead>
+            <tr>
+              <th class="sel"><input type="checkbox" id="selAll" title="Select all"></th>
+              <th>File</th>
+              <th>Size</th>
+              <th class="wide">Progress</th>
+              <th>Speed</th>
+              <th>Proxy</th>
+              <th>Sched</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="dlsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Advanced controls</h2>
+      </div>
+
+      <div class="group">
+        <h3>Storage</h3>
+        <div class="grid">
+          <label>Download folder
+            <input type="text" id="downloadDir">
+          </label>
+          <label>Switch when free space below (MB)
+            <input type="number" id="minFreeMB" min="0" value="500">
+          </label>
+          <label>Secondary folder (when primary drive is full)
+            <input type="text" id="downloadDir2" placeholder="e.g. D:\Downloads (different drive)">
+          </label>
+          <label>Third folder (when secondary is full too)
+            <input type="text" id="downloadDir3" placeholder="e.g. E:\Downloads (different drive)">
+          </label>
+        </div>
+      </div>
+
+      <div class="group">
+        <h3>Performance</h3>
+        <div class="grid">
+          <label>Parallel downloads
+            <input type="number" id="concurrency" min="1" max="200" title="Higher = faster bulk downloads but more network/Cloudflare/IP-ban risk">
+          </label>
+          <label>Segments per file (multi-connection)
+            <input type="number" id="segments" min="1" max="16">
+          </label>
+          <label>Speed limit (KB/s, 0 = unlimited)
+            <input type="number" id="speedLimitKB" min="0">
+          </label>
+          <label>Retry attempts (network failures)
+            <input type="number" id="maxRetries" min="0" max="10" value="3">
+          </label>
+          <label>URL refresh attempts (expired direct links)
+            <input type="number" id="maxRefresh" min="0" max="10" value="2">
+          </label>
+        </div>
+      </div>
+
+      <div class="group">
+        <h3>Behavior</h3>
+        <div class="checks">
+          <label><input type="checkbox" id="autoProxy"> Auto proxy — pick fastest proxy per connection</label>
+          <label><input type="checkbox" id="saveHistory"> Save history (history.json in the download folder)</label>
+          <label><input type="checkbox" id="skipDuplicates"> Skip already-downloaded URLs (duplicate handling)</label>
+          <label><input type="checkbox" id="autoCloseTab"> Auto-close the browser tab + go to the next after a download</label>
+          <label><input type="checkbox" id="thumbnails"> Show video thumbnails in the list (requires ffmpeg)</label>
+        </div>
+      </div>
+
+      <div class="group">
+        <h3>Proxy</h3>
+        <div class="grid cols-2">
+          <label>Proxy list (one per line: http://…, https://…, socks5://…)
+            <textarea id="proxies" rows="5" placeholder="http://127.0.0.1:7890&#10;socks5://127.0.0.1:1080"></textarea>
+          </label>
+          <div>
+            <label>Proxy test target URL</label>
+            <input type="text" id="testUrl" value="https://www.google.com">
+            <div class="row">
+              <button id="testProxies" class="btn">Test proxies</button>
+              <button id="save" class="btn">Save settings</button>
+            </div>
+            <ul id="proxyResults"></ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Bandwidth</h2>
+        <span id="bwStats" class="hint"></span>
+      </div>
+      <canvas id="bwChart" width="900" height="120"></canvas>
+    </section>
+  </main>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

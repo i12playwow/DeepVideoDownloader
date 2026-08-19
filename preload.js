@@ -1,0 +1,33 @@
+const { contextBridge, ipcRenderer } = require("electron");
+
+contextBridge.exposeInMainWorld("api", {
+  getSettings: () => ipcRenderer.invoke("settings-get"),
+  saveSettings: (s) => ipcRenderer.invoke("settings-save", s),
+  list: () => ipcRenderer.invoke("downloads-list"),
+  history: () => ipcRenderer.invoke("downloads-history"),
+  bandwidthStats: () => ipcRenderer.invoke("bandwidth-stats"),
+  exportHistory: (format) => ipcRenderer.invoke("downloads-export", format),
+  clearHistory: () => ipcRenderer.invoke("downloads-clear-history"),
+  pause: (id) => ipcRenderer.invoke("download-pause", id),
+  resume: (id) => ipcRenderer.invoke("download-resume", id),
+  resumeLast: () => ipcRenderer.invoke("download-resume-last"),
+  cancel: (id) => ipcRenderer.invoke("download-cancel", id),
+  remove: (id) => ipcRenderer.invoke("download-remove", id),
+  forceDownload: (id) => ipcRenderer.invoke("downloads-force", id),
+  add: (url) => ipcRenderer.invoke("downloads-add", url),
+  addMany: (urls) => ipcRenderer.invoke("downloads-add-many", urls),
+  schedule: (data) => ipcRenderer.invoke("download-schedule", data),
+  testProxies: (url) => ipcRenderer.invoke("test-proxies", url),
+  openDir: () => ipcRenderer.invoke("open-dir"),
+  getActiveDir: () => ipcRenderer.invoke("get-active-dir"),
+  showInFolder: (p) => ipcRenderer.invoke("open-path", p),
+  openBrowser: (urls) => ipcRenderer.invoke("browser-open", urls),
+  browserNav: (url) => ipcRenderer.invoke("browser-nav", url),
+  openExternal: (url, browser) => ipcRenderer.invoke("browser-external", url, browser),
+  installExtension: (browser) => ipcRenderer.invoke("extension-install", browser),
+  onUpdate: (cb) => ipcRenderer.on("download-update", (e, item) => cb(item)),
+  wsClients: () => ipcRenderer.invoke("ws-state"),
+  onWsClients: (cb) => ipcRenderer.on("ws-clients", (e, d) => cb(d)),
+  onClipboardUrl: (cb) => ipcRenderer.on("clipboard-url", (e, data) => cb(data)),
+  onFileOpened: (cb) => ipcRenderer.on("file-opened", (e, data) => cb(data))
+});

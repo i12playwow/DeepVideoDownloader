@@ -1,0 +1,5 @@
+#!/bin/sh
+# Direct launcher for dev builds - avoids MSYS path translation issues
+basedir_win="C:/Users/SOKCHHORN PC/OneDrive/Desktop/Project WorkSpace/deep-video-downloader"
+PROG_EXE="$basedir_win/node_modules/electron/dist/electron.exe"
+exec "$PROG_EXE" "$basedir_win/main.js" "$@"

@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>DV Best-only test</title>
+</head>
+<body>
+  <h1>Best-only test</h1>
+  <p>Open with the Deep Grab extension loaded. Expect exactly one best MP4 (1080p) and no HLS entry. The video is real and downloads to the desktop app.</p>
+  <video controls>
+    <source src="http://127.0.0.1:8001/test-video.mp4?q=480" data-res="480">
+    <source src="http://127.0.0.1:8001/test-video.mp4?q=720" data-res="720">
+    <source src="http://127.0.0.1:8001/test-video.mp4?q=1080" data-res="1080">
+    <source src="http://127.0.0.1:8001/hls/master.m3u8" type="application/vnd.apple.mpegurl">
+  </video>
+</body>
+</html>

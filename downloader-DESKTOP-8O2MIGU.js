@@ -1,0 +1,1894 @@
+// Download engine: queue, segmented (multi-connection) downloads with proxy
+// rotation, pause / resume / cancel, and global speed limit.
+
+const fs = require("fs");
+const fsp = fs.promises;
+const path = require("path");
+const os = require("os");
+const { spawn, spawnSync } = require("child_process");
+const { pipeline } = require("stream/promises");
+const { createWriteStream, createReadStream } = fs;
+const { once } = require("events");
+const { URL } = require("url");
+const { transport } = require("./proxy");
+
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const MAX_REDIRECTS = 5;
+const PART_EXT = ".part";
+const PROGRESS_INTERVAL = 300;
+const RETRY_DELAY = 1000;
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_CONVERT_FORMAT = "mp4";
+const DEFAULT_CONVERT_PRESET = "fast";
+const MAX_SUBTITLE_FETCH_RETRIES = 2;
+const MAX_REFRESH = 2;
+
+const STRGV = /get_video\?id=([A-Za-z0-9]+)&expires=(\d+)&ip=([^&\s"'<>]+)&token=([^&\s"'<>]+)/i;
+
+const CNIFRAME = /(?:<iframe[^>]*src=["']|data-src=["'])([^"']*pornhub\.com\/embed\/[^"']+)["']/i;
+const CNVIDEO = /<video[^>]*>\s*<source[^>]+src=["']([^"']+\.mp4[^"']*)["']/i;
+const CNIFRAME2 = /src=["'](https?:\/\/[^"']*streamtape\.com\/[^"']+)["']/i;
+// cnporn's own embed iframe (lazy data-src, plain src, or data-server="/embed/<uuid>")
+// and the mp4/m3u8 "file" entries baked into the embed page's player setup.
+const CNEMBED = /(?:data-src|src|data-server)=["']([^"']*\/embed\/[^"']+)["']/i;
+const CNSOURCES = /"file"\s*:\s*"([^"]+\.(?:mp4|m3u8)[^"]*)"/i;
+
+const HLS_RE = /\.m3u8([?#]|$)/i;
+const HLS_MASTER_RE = /#EXT-X-STREAM-INF/i;
+const HLS_AES_RE = /#EXT-X-KEY:METHOD=AES-128/i;
+
+// supjav's player iframe (supjav.php?l=<OLID>) reverses the id and reloads
+// ?c=<reversed>, which emits a streamtape/fstape embed page OR (8/2026) a
+// turbovidhls.com/t/<id> JWPlayer page hosting HLS via turboviplay.com.
+const SJ_PLAYER_RE = /(?:supjav|supremejav)\.(?:com|ph|net)[^"'\s]*\bsupjav\.php/i;
+const SJ_OLID = /[?&]l=([0-9a-f]+)/i;
+
+// turbovidhls player page: the m3u8 playlist lives in the #video_player div's
+// data-hash attribute (a cdn2.turboviplay.com/data1/<hex>/<hex>.m3u8 URL).
+const TVH_EMBED_RE = /turbovidhls\.com\/t\//i;
+const TVH_HASH_RE = /<div[^>]*id=["']video_player["'][^>]*data-hash=["']([^"']+\.m3u8[^"']*)["']/i;
+
+function delay(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// True when a failure means the direct URL likely expired (signed token) and
+// re-resolving the original page may yield a fresh one.
+function isExpiredError(err) {
+  const status = err && err.status;
+  if (status === 403 || status === 404 || status === 410) return true;
+  return /expired|token|forbidden|access denied/i.test(String(err && err.message));
+}
+
+// Scan page HTML for a subtitle URL. Returns { url, ext } or null.
+// Tries a handful of common markup patterns: <link rel="subtitles">,
+// <a href="…srt">, data-src/src on .srt/.vtt/.ass links, and OpenSubtitles-
+// style embed iframe srcs. Relative URLs are resolved against baseUrl.
+const SUBTITLE_TAG_RE = /<(?:link|a|iframe|script)[^>]+(?:href|src|data-src|style|data-url)=["\']([^"\']*\.(?:srt|vtt|ass|ssa)(?:\?[^"\']*)?)["\'][^>]*>/i;
+const SUBTITLE_LINK_RE = /<link[^>]+rel=["\'](?:subtitles|caption|track)["\'][^>]+href=["\']([^"\']+)["\']/i;
+const OS_EMBED_RE = /opensubtitles[^"\']*\.(?:srt|vtt|ass|ssa)/i;
+
+function findSubtitleUrl(html, baseUrl) {
+  if (!html) return null;
+  const base = baseUrl || "";
+  // Pattern 1: explicit subtitles link/script/iframe.
+  let m = SUBTITLE_TAG_RE.exec(html);
+  if (m) {
+    try { const u = new URL(m[1], base); if (u.protocol === "http:" || u.protocol === "https:") return { url: u.href, ext: m[1].split("?")[0].split(".").pop().toLowerCase() }; } catch (e) {}
+  }
+  // Pattern 2: <link rel="subtitles|caption|track" href=…>.
+  m = SUBTITLE_LINK_RE.exec(html);
+  if (m) {
+    try { const u = new URL(m[1], base); if (u.protocol === "http:" || u.protocol === "https:") return { url: u.href, ext: m[1].split(".").pop().toLowerCase() || "srt" }; } catch (e) {}
+  }
+  // Pattern 3: OpenSubtitles-style embed (often a .srt inside an iframe src).
+  m = OS_EMBED_RE.exec(html);
+  if (m) {
+    try {
+      const candidate = m[0];
+      const u = new URL(candidate, base);
+      if (u.protocol === "http:" || u.protocol === "https:") return { url: u.href, ext: candidate.split(".").pop().toLowerCase() || "srt" };
+    } catch (e) {}
+  }
+  return null;
+}
+
+
+// Parse the start offset from a `Content-Range: bytes START-END/TOTAL` header.
+function contentRangeStart(header) {
+  if (!header) return null;
+  const m = /^bytes\s+(\d+)-/i.exec(String(header).trim());
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// Parse the TOTAL size from a `Content-Range: bytes START-END/TOTAL` header.
+// Range-answering servers report a partial content-length, so the total from
+// Content-Range is the only trustworthy size when a probe sends Range.
+function contentRangeTotal(header) {
+  if (!header) return null;
+  const m = /bytes\s+\d+-\d+\/(\d+)/i.exec(String(header).trim());
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// True when a failure is likely the proxy's fault (rotating to another proxy
+// may fix it). 403/404/410 are excluded — those mean the URL itself is stale.
+function isProxyFailure(err) {
+  if (!err) return false;
+  if (err.status && err.status >= 500) return true;
+  return /ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|EPROTO|socket hang up|proxy/i.test(
+    String(err.code || "") + " " + String(err.message)
+  );
+}
+
+// HTTP 429 or a Cloudflare challenge body means we're being rate-limited /
+// bot-blocked, NOT that the video is dead. Retry with backoff + a different
+// proxy rather than re-resolving (the source page is likely blocked too).
+function isRateLimited(err) {
+  return !!(err && err.status === 429);
+}
+function isCloudflareBlocked(err) {
+  if (!err) return false;
+  return /cf-chl|challenge-platform|turnstile|just a moment|attention required|cf-ray|cloudflare/i.test(String(err.message));
+}
+
+function categorizeError(err) {
+  if (!err) return "unknown";
+  if (err.category) return err.category;
+  if (err.aborted) return "aborted";
+  if (isRateLimited(err)) return "rate-limited";
+  if (isCloudflareBlocked(err)) return "blocked";
+  if (err.status) return "http";
+  if (/ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|socket/i.test(String(err.code || "") + " " + String(err.message))) return "network";
+  if (isExpiredError(err)) return "expired";
+  if (/size mismatch/i.test(String(err.message))) return "size";
+  return "unknown";
+}
+
+async function resolveStreamtape(videoPageUrl, { proxyManager, config, paceHost }, baseHeaders = {}) {
+  // Already a signed direct link (get_video?id=..&expires=..&ip=..&token=..):
+  // normalize &stream=1 and pass through. Fetching it would download the video
+  // file itself — STRGV targets the embed page's HTML, not this.
+  if (/get_video\?/i.test(videoPageUrl)) {
+    const norm = /stream=1/i.test(videoPageUrl) ? videoPageUrl : videoPageUrl + "&stream=1";
+    return { resolvedUrl: norm, proxy: null, agent: null };
+  }
+  const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const proxy = config.autoProxy ? await proxyManager.pickBest(videoPageUrl, 6000) : null;
+  const agent = proxy ? proxyManager.agentFor(proxy, videoPageUrl) : null;
+  if (paceHost) await paceHost(videoPageUrl);
+  let html;
+  try {
+    html = await fetchHtml(videoPageUrl, agent, baseHeaders, 0, maxRetries);
+  } catch (err) {
+    throw new Error("Streamtape: failed to fetch page - " + err.message);
+  }
+
+  // The embed page bakes the signed direct URL into the HTML
+  // (get_video?id=..&expires=..&ip=..&token=..); the player builds it from
+  // #botlink and appends &stream=1. Returning the /e/ page itself would
+  // download the player HTML as the "video", so fail instead of falling back.
+  const gv = html.match(STRGV);
+  if (!gv) {
+    // Since 8/2026 modern streamtape embeds no longer inline get_video — the
+    // signed URL comes from a /stat/<token>?a=0&rc=<recaptcha> POST that only a
+    // real browser (recaptcha + click) can drive. Surface this distinctly so it
+    // isn't mistaken for a dead video and the user is pointed at the built-in
+    // browser / extension.
+    if (/\/stat\//i.test(html)) {
+      const err = new Error("Streamtape requires browser capture (recaptcha/stat gate) — open it in the built-in browser.");
+      err.category = "requires-browser";
+      throw err;
+    }
+    throw new Error("Could not find video source on Streamtape page.");
+  }
+  // fstape is a streamtape clone — same embed/HTML/get_video structure
+  const host = /fstape\.com/i.test(videoPageUrl) ? "fstape.com" : "streamtape.com";
+  const apiUrl =
+    "https://" + host + "/get_video?id=" + gv[1] +
+    "&expires=" + gv[2] +
+    "&ip=" + gv[3] +
+    "&token=" + gv[4] +
+    "&stream=1";
+  return { resolvedUrl: apiUrl, proxy, agent };
+}
+
+async function fetchHtml(url, agent, headers = {}, retries = 0, maxRetries = DEFAULT_MAX_RETRIES) {
+  const mod = transport(url);
+  try {
+    return await new Promise((resolve, reject) => {
+      const req = mod.request(url, {
+        method: "GET",
+        agent,
+        headers: { "User-Agent": UA, ...headers }
+      }, (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => body += c);
+        res.on("end", () => resolve(body));
+      });
+      req.on("error", reject);
+      req.setTimeout(30000, () => req.destroy(new Error("HTML fetch timeout")));
+      req.end();
+    });
+  } catch (err) {
+    if (retries < maxRetries) {
+      await delay(RETRY_DELAY * (retries + 1));
+      return fetchHtml(url, agent, headers, retries + 1, maxRetries);
+    }
+    throw new Error("Failed to fetch page after " + maxRetries + " retries: " + err.message);
+  }
+}
+
+// Drain a Node.js response stream into a Buffer. Used by subtitle download
+// (and any future best-effort small-file fetches) where we need the full
+// body as a Buffer, not as text.
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+// supjav's player iframe: the app receives supjav.php?l=<OLID> from the
+// userscript (its frame.src/defaultSrc), never the Cloudflare-403'd page.
+// The player reverses the id and loads ?c=<reversed>, which 302s straight to a
+// streamtape/fstape embed, or (since 8/2026) a turbovidhls.com/t/<id> player
+// page hosting HLS. Resolve streamtape/fstape to the signed direct URL; fetch
+// the turbovidhls page and pull the m3u8 from #video_player[data-hash] so the
+// HLS engine can download it.
+async function resolveSupjav(videoPageUrl, { proxyManager, config, paceHost }, baseHeaders = {}) {
+  const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const proxy = config.autoProxy ? await proxyManager.pickBest(videoPageUrl, 6000) : null;
+  const agent = proxy ? proxyManager.agentFor(proxy, videoPageUrl) : null;
+  const olid = SJ_OLID.exec(videoPageUrl);
+  if (!olid) throw new Error("Supjav: no player id (supjav.php?l=...) in URL");
+  const rev = olid[1].split("").reverse().join("");
+  const cUrl = new URL("?c=" + rev, videoPageUrl).href;
+  if (paceHost) await paceHost(cUrl);
+  let result;
+  try {
+    result = await requestWithRedirects(cUrl, {
+      method: "GET",
+      headers: { ...baseHeaders, Referer: baseHeaders.Referer || videoPageUrl },
+      agent,
+      maxRetries
+    });
+  } catch (err) {
+    throw new Error("Supjav: failed to fetch player - " + err.message);
+  }
+  result.res.resume();
+  const embed = result.finalUrl;
+  if (/streamtape|fstape\.com\/e\//i.test(embed)) {
+    return { resolvedUrl: embed, proxy, agent, origin: "supjav-player" };
+  }
+  if (TVH_EMBED_RE.test(embed)) {
+    let html;
+    try {
+      if (paceHost) await paceHost(embed);
+      html = await fetchHtml(embed, agent, baseHeaders, 0, maxRetries);
+    } catch (err) {
+      throw new Error("Supjav: failed to fetch turbovidhls player - " + err.message);
+    }
+    const h = html.match(TVH_HASH_RE);
+    if (!h) throw new Error("Supjav: no m3u8 (data-hash) on turbovidhls player page");
+    return { resolvedUrl: h[1].trim(), proxy, agent, origin: "supjav-turbovid-hls" };
+  }
+  throw new Error("Supjav: player did not redirect to a streamtape/fstape embed or turbovidhls player");
+}
+
+async function resolveCnPorn(videoPageUrl, { proxyManager, config, paceHost }, baseHeaders = {}) {
+  const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const proxy = config.autoProxy ? await proxyManager.pickBest(videoPageUrl, 6000) : null;
+  const agent = proxy ? proxyManager.agentFor(proxy, videoPageUrl) : null;
+  if (paceHost) await paceHost(videoPageUrl);
+  let html;
+  try {
+    html = await fetchHtml(videoPageUrl, agent, baseHeaders, 0, maxRetries);
+  } catch (err) {
+    throw new Error("CnPorn: failed to fetch page - " + err.message);
+  }
+
+  let iframeMatch = html.match(CNIFRAME) || html.match(CNIFRAME2);
+  let embedUrl = iframeMatch ? iframeMatch[1].trim() : null;
+
+  if (!embedUrl) {
+    const ce = html.match(CNEMBED);
+    if (ce) {
+      const raw = ce[1].trim();
+      embedUrl = /^https?:\/\//i.test(raw) ? raw : new URL(raw, videoPageUrl).href;
+    }
+  }
+
+  if (!embedUrl) {
+    const mv = html.match(CNVIDEO);
+    if (mv) {
+      return { resolvedUrl: mv[1].trim(), proxy, agent, origin: "cnporn-direct" };
+    }
+    throw new Error("CnPorn: no embed/iframe/video source found");
+  }
+
+  // cnporn's own /embed/<uuid> page: fetch it and pull the player's sources
+  // array (an m3u8 playlist, or a direct mp4 when the site offers one).
+  if (/cnporn\.org\/embed\//i.test(embedUrl)) {
+    let embedHtml;
+    try {
+      if (paceHost) await paceHost(embedUrl);
+      embedHtml = await fetchHtml(embedUrl, agent, baseHeaders, 0, maxRetries);
+    } catch (err) {
+      throw new Error("CnPorn: failed to fetch embed - " + err.message);
+    }
+    const s = embedHtml.match(CNSOURCES);
+    if (!s) throw new Error("CnPorn: no video source on embed page");
+    const src = s[1].trim().replace(/\\\//g, "/"); // JSON-escaped slashes
+    return { resolvedUrl: src, proxy, agent, origin: /\.mp4([?#]|$)/i.test(src) ? "cnporn-direct" : "cnporn-hls" };
+  }
+
+  if (/pornhub\.com\/embed\//i.test(embedUrl)) {
+    return { resolvedUrl: embedUrl, proxy, agent, origin: "pornhub-embed" };
+  }
+  if (/streamtape\.com/i.test(embedUrl)) {
+    return { resolvedUrl: embedUrl, proxy, agent, origin: "streamtape-embed" };
+  }
+   return { resolvedUrl: embedUrl, proxy, agent, origin: "generic-embed" };
+ }
+
+const XVEMBED = /(?:<iframe[^>]*src=["']|data-src=["'])([^"']*xvideos\.com\/embedframe[^"']+)["']/i;
+const XVDIRECT = /<video[^>]*>\s*<source[^>]+src=["']([^"']+\.mp4[^"']*)["']/i;
+
+async function resolveXVideos(videoPageUrl, { proxyManager, config, paceHost }, baseHeaders = {}) {
+  const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const proxy = config.autoProxy ? await proxyManager.pickBest(videoPageUrl, 6000) : null;
+  const agent = proxy ? proxyManager.agentFor(proxy, videoPageUrl) : null;
+  if (paceHost) await paceHost(videoPageUrl);
+  let html;
+  try {
+    html = await fetchHtml(videoPageUrl, agent, baseHeaders, 0, maxRetries);
+  } catch (err) {
+    throw new Error("XVideos: failed to fetch page - " + err.message);
+  }
+
+  let embedMatch = html.match(XVEMBED);
+  let embedUrl = embedMatch ? embedMatch[1].trim() : null;
+
+  if (!embedUrl) {
+    const direct = html.match(XVDIRECT);
+    if (direct) {
+      return { resolvedUrl: direct[1].trim(), proxy, agent, origin: "xvideos-direct" };
+    }
+    throw new Error("XVideos: no embed/iframe/video source found");
+  }
+
+  return { resolvedUrl: embedUrl, proxy, agent, origin: "xvideos-embed" };
+}
+
+const XHEMBED = /src=["'](https?:\/\/[^"']*xhamster\.com\/xembed[^"']+)["']/i;
+const XHPLAY = /<a\b(?=[^>]*class=["'][^"']*ht-prev[^"']*["'])[^>]*href=["']([^"']*xhamster\.com\/videos\/[^"']+)["']/i;
+const XHMP4 = /<source[^>]+src=["']([^"']+\.mp4[^"']*)["']/i;
+
+async function resolveXHamster(videoPageUrl, { proxyManager, config, paceHost }, baseHeaders = {}) {
+  const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const proxy = config.autoProxy ? await proxyManager.pickBest(videoPageUrl, 6000) : null;
+  const agent = proxy ? proxyManager.agentFor(proxy, videoPageUrl) : null;
+  if (paceHost) await paceHost(videoPageUrl);
+  let html;
+  try {
+    html = await fetchHtml(videoPageUrl, agent, baseHeaders, 0, maxRetries);
+  } catch (err) {
+    throw new Error("XHamster: failed to fetch page - " + err.message);
+  }
+
+  const direct = html.match(XHMP4);
+  if (direct) {
+    return { resolvedUrl: direct[1].trim(), proxy, agent, origin: "xhamster-direct" };
+  }
+
+  let embedMatch = html.match(XHEMBED);
+  let embedUrl = embedMatch ? embedMatch[1].trim() : null;
+
+  if (!embedUrl) {
+    const playMatch = html.match(XHPLAY);
+    if (playMatch) {
+      return { resolvedUrl: playMatch[1].trim(), proxy, agent, origin: "xhamster-play" };
+    }
+    throw new Error("XHamster: no embed/video source found");
+  }
+
+  return { resolvedUrl: embedUrl, proxy, agent, origin: "xhamster-embed" };
+}
+
+// Detect the site and follow the re-resolution chain to a final direct URL.
+// Returns null for URLs with no resolver (generic mp4 pass through untouched).
+async function resolveUrl(url, { proxyManager, config, paceHost }, baseHeaders = {}) {
+  const ctx = { proxyManager, config, paceHost };
+  if (/(?:streamtape|fstape)\.com/i.test(url)) {
+    const r = await resolveStreamtape(url, ctx, baseHeaders);
+    return r.resolvedUrl;
+  }
+  if (SJ_PLAYER_RE.test(url)) {
+    const r = await resolveSupjav(url, ctx, baseHeaders);
+    if (/streamtape|fstape\.com/i.test(r.resolvedUrl)) {
+      const r2 = await resolveStreamtape(r.resolvedUrl, ctx, { ...baseHeaders, Referer: r.resolvedUrl });
+      return r2.resolvedUrl;
+    }
+    if (HLS_RE.test(r.resolvedUrl)) return r.resolvedUrl;
+    return r.resolvedUrl;
+  }
+  if (/cnporn\.org/i.test(url)) {
+    const r = await resolveCnPorn(url, ctx, baseHeaders);
+    if (/streamtape\.com/i.test(r.resolvedUrl) || r.origin === "streamtape-embed") {
+      const r2 = await resolveStreamtape(r.resolvedUrl, ctx, baseHeaders);
+      return r2.resolvedUrl;
+    }
+    return r.resolvedUrl;
+  }
+  if (/xvideos\.com/i.test(url)) {
+    const r = await resolveXVideos(url, ctx, baseHeaders);
+    if (/streamtape\.com/i.test(r.resolvedUrl)) {
+      const r2 = await resolveStreamtape(r.resolvedUrl, ctx, baseHeaders);
+      return r2.resolvedUrl;
+    }
+    return r.resolvedUrl;
+  }
+  if (/xhamster\.com/i.test(url)) {
+    const r = await resolveXHamster(url, ctx, baseHeaders);
+    if (/xvideos\.com/i.test(r.resolvedUrl)) {
+      const r2 = await resolveXVideos(r.resolvedUrl, ctx, baseHeaders);
+      if (/streamtape\.com/i.test(r2.resolvedUrl)) {
+        const r3 = await resolveStreamtape(r2.resolvedUrl, ctx, baseHeaders);
+        return r3.resolvedUrl;
+      }
+      return r2.resolvedUrl;
+    }
+    return r.resolvedUrl;
+  }
+  return null;
+}
+
+function sanitizeName(name) {
+  const clean = String(name || "video").replace(/[\\/:*?"<>|\r\n\t]+/g, "_").trim().slice(0, 180) || "video";
+  return clean.replace(/\.(mp4|m4v|webm|mov|mkv|flv|m3u8)$/i, "");
+}
+
+function isHlsUrl(u) {
+  return HLS_RE.test(String(u || ""));
+}
+
+// Some CDNs prepend a fake 1x1 PNG (anti-bot decoy) to the real MPEG-TS
+// segment. Strip anything up to the end of the PNG IEND chunk so ffmpeg
+// muxes actual video, not a png stream. Returns the stripped buffer.
+function stripPngPrefix(buf) {
+  if (buf.length < 8 || buf.readUInt32BE(0) !== 0x89504e47) return buf;
+  let pos = 8;
+  while (pos + 8 <= buf.length) {
+    const len = buf.readUInt32BE(pos);
+    const type = buf.toString("ascii", pos + 4, pos + 8);
+    const next = pos + 12 + len;
+    if (next > buf.length) return buf;
+    if (type === "IEND") return buf.slice(next);
+    pos = next;
+  }
+  return buf;
+}
+
+// Turn an HLS playlist body into segment URLs. Relative URIs resolve against
+// the playlist's own URL. AES-128 keys aren't supported (segments would be
+// encrypted garbage).
+function parseHlsPlaylist(text, baseUrl) {
+  if (HLS_AES_RE.test(String(text))) throw new Error("HLS: AES-128 encrypted playlists are not supported");
+  const segs = [];
+  const lines = String(text).split(/\r?\n/);
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    segs.push(new URL(t, baseUrl).href);
+  }
+  return segs;
+}
+
+// Pick the highest-quality variant from a master playlist.
+function pickHlsVariant(text, baseUrl) {
+  let best = null;
+  let bestScore = -1;
+  const blocks = String(text).split(/#EXT-X-STREAM-INF/i).slice(1);
+  for (const block of blocks) {
+    const tagEnd = block.indexOf("\n");
+    const tag = (tagEnd === -1 ? block : block.slice(0, tagEnd)).trim();
+    const uriLine = (tagEnd === -1 ? "" : block.slice(tagEnd + 1).trim());
+    if (!uriLine) continue;
+    const res = /RESOLUTION=\s*(\d+)x(\d+)/i.exec(tag);
+    const bw = /BANDWIDTH=\s*(\d+)/i.exec(tag);
+    const score = (res ? parseInt(res[2], 10) : 0) * 1000000 + (bw ? parseInt(bw[1], 10) : 0);
+    if (score > bestScore) {
+      bestScore = score;
+      best = new URL(uriLine, baseUrl).href;
+    }
+  }
+  return best;
+}
+
+// A signed get_video link (streamtape/fstape) bakes an expiry+token into the
+// embed page HTML and dies with 403/410 when it lapses. The only way to get a
+// fresh one is to re-fetch the embed page, so refresh against the referer.
+// The same applies to cnporn m3u8 playlists (their .ts segments are signed
+// tiktokcdn URLs that lapse) and supjav/turbovidhls m3u8 (also signed
+// tiktokcdn segments): re-resolve the source page for a fresh playlist.
+function isSignedRefreshable(item) {
+  const u = item.url || "";
+  const ref = item.referer || "";
+  return (
+    /get_video\?/i.test(u) && /(?:streamtape|fstape)\.com/i.test(ref)
+  ) || (
+    /\.m3u8([?#]|$)/i.test(u) && /cnporn\.org/i.test(ref)
+  ) || (
+    /\.m3u8([?#]|$)/i.test(u) && SJ_PLAYER_RE.test(ref)
+  );
+}
+
+function refreshSourceUrl(item) {
+  return isSignedRefreshable(item) ? item.referer : item.url;
+}
+
+// streamtape/fstape embed URLs carry the video name as a slug
+// (/v/<id>/My-Video-Name); use it when the sender gave no title so files
+// aren't just "video.mp4".
+function titleFromReferer(referer) {
+  try {
+    const u = new URL(referer);
+    if (!/streamtape\.com|fstape\.com/i.test(u.hostname)) return "";
+    const parts = u.pathname.split("/").filter(Boolean);
+    let name = "";
+    if (parts.length >= 3 && /^[ev]$/i.test(parts[0])) name = parts.slice(2).join(" ");
+    else if (parts.length >= 2) name = parts[parts.length - 1];
+    if (!name || /^[ev]$/i.test(name)) return "";
+    return decodeURIComponent(name).replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+  } catch (e) {
+    return "";
+  }
+}
+
+async function requestWithRedirects(targetUrl, { method = "GET", headers = {}, agent = null, retries = 0, maxRetries = DEFAULT_MAX_RETRIES, onReq = null } = {}) {
+  let current = targetUrl;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    let urlObj;
+    try {
+      urlObj = new URL(current);
+    } catch (e) {
+      throw new Error("Invalid URL: " + current);
+    }
+    try {
+      const mod = transport(current);
+      const result = await new Promise((resolve, reject) => {
+        const req = mod.request(urlObj, {
+          method,
+          agent,
+          headers: { "User-Agent": UA, ...headers }
+        }, (res) => {
+          if (onReq) onReq(req, false);
+          resolve({ status: res.statusCode, headers: res.headers, res, finalUrl: current });
+        });
+        if (onReq) onReq(req, true);
+        req.on("error", (err) => {
+          if (onReq) onReq(req, false);
+          reject(err);
+        });
+        req.setTimeout(45000, () => {
+          const err = new Error("Request timeout");
+          err.code = "ETIMEDOUT";
+          req.destroy(err);
+        });
+        req.end();
+      });
+
+      const code = result.status;
+      if (code >= 300 && code < 400 && result.headers.location) {
+        result.res.resume();
+        const loc = new URL(result.headers.location, current).href;
+        const nextOrigin = new URL(loc).origin;
+        if (headers.Range && nextOrigin !== new URL(current).origin) {
+          delete headers.Range;
+        }
+        current = loc;
+        continue;
+      }
+      return result;
+    } catch (err) {
+      if (retries < maxRetries && (err.code === "ECONNRESET" || err.code === "ETIMEDOUT" || err.code === "ECONNREFUSED")) {
+        await delay(RETRY_DELAY * (retries + 1));
+        return requestWithRedirects(targetUrl, { method, headers, agent, retries: retries + 1, maxRetries, onReq });
+      }
+      throw err;
+    }
+  }
+  throw new Error("Too many redirects");
+}
+
+class DownloadManager {
+  constructor({ config, proxyManager, onUpdate }) {
+    this.config = config;
+    this.proxyManager = proxyManager;
+    this.onUpdate = onUpdate || (() => {});
+    this.items = new Map();
+    this.active = 0;
+    this._id = 0;
+    this.history = [];
+    this._pending = [];       // bulk-import URLs waiting to be loaded into items
+    this._downloaded = new Set(); // URLs that reached "done" (for duplicate handling)
+    this._hostLast = new Map();   // hostname -> last request time (per-host pacing)
+    this._paceChains = new Map(); // hostname -> promise chain serializing _paceHost callers
+    this._persistTimer = null;    // debounced writer for history/downloaded.json
+    this._speedBytes = 0;
+    this._speedStart = Date.now();
+    this._connBusy = 0;           // in-flight segmented connections
+    this._connWaiters = [];       // semaphore waiters for the global conn cap
+    this._loadHistory();
+    this._loadDownloaded();
+    this._sweepOrphanTempDirs();
+  }
+
+   list() {
+     return Array.from(this.items.values()).map((i) => i.public());
+   }
+
+   listHistory() {
+     return this.history.map((i) => ({
+       ...i,
+       status: i.status,
+       timestamp: i.timestamp
+     }));
+   }
+
+   exportHistory(format = "json") {
+     if (format === "csv") {
+       const csv = [
+         "ID,File,Size,Status,Started,Completed,Duration(s)",
+         ...this.history.map((h) =>
+           [h.id, `"${h.fileName}"`, h.total, h.status,
+            new Date(h.timestamp).toISOString(),
+            h.endTime ? new Date(h.endTime).toISOString() : "",
+            h.endTime ? Math.round((h.endTime - h.timestamp) / 1000) : ""
+           ].join(",")
+         )
+       ];
+       return csv.join("\n");
+     }
+     return JSON.stringify(this.history, null, 2);
+   }
+
+   _loadHistory() {
+     try {
+       const data = fs.readFileSync(this.historyPath, "utf8");
+       this.history = JSON.parse(data);
+     } catch (e) {
+       this.history = [];
+     }
+   }
+
+   // Remove orphaned segmented/HLS temp dirs (dl-*) left behind when the app was
+   // killed mid-run (taskkill /F, crash). Paused state doesn't survive a restart,
+   // so any pre-existing dl-* dir is dead weight; only ids still in the active
+   // map are protected (impossible at startup, but the guard keeps a re-run safe).
+   async _sweepOrphanTempDirs() {
+     try {
+       const root = this.dir;
+       const entries = await fsp.readdir(root, { withFileTypes: true });
+       for (const e of entries) {
+         if (!e.isDirectory() || !/^dl-\d+-\d+$/.test(e.name)) continue;
+         if (this.items.has(e.name)) continue;
+         await fsp.rm(path.join(root, e.name), { recursive: true, force: true }).catch(() => {});
+       }
+     } catch (e) { /* sweep is best-effort */ }
+   }
+
+    _saveHistoryNow() {
+      if (this.config.saveHistory === false) return; // history persistence toggle
+      try {
+        fsp.writeFile(this.historyPath, JSON.stringify(this.history, null, 2), "utf8").catch(() => {});
+      } catch (e) { /* ignore */ }
+    }
+
+    _saveDownloadedNow() {
+      try {
+        fsp.writeFile(this.downloadedPath, JSON.stringify(Array.from(this._downloaded), null, 0), "utf8").catch(() => {});
+      } catch (e) { /* ignore */ }
+    }
+
+    // Debounced persistence: coalesce the many per-completion history/downloaded
+    // writes during a bulk run into one disk write every ~500ms.
+    _persistSoon() {
+      if (this._persistTimer) return;
+      this._persistTimer = setTimeout(() => {
+        this._persistTimer = null;
+        this._saveHistoryNow();
+        this._saveDownloadedNow();
+      }, 500);
+    }
+
+    _saveHistory() {
+      this._persistSoon();
+    }
+
+    getBandwidthStats() {
+      const allItems = Array.from(this.items.values()).concat(this.history);
+      const speeds = allItems
+        .filter((i) => i._samples && i._samples.length > 0)
+        .flatMap((i) => i._samples);
+
+      if (!speeds.length) {
+        return { current: 0, avg: 0, peak: 0, count: 0, samples: [] };
+      }
+
+      const valid = speeds.filter((s) => s.speed > 0);
+      const latest = valid.length ? valid.reduce((a, b) => (b.time > a.time ? b : a)) : null;
+      const current = latest ? latest.speed : 0;
+      const avg = Math.round(valid.reduce((a, s) => a + s.speed, 0) / valid.length);
+      const peak = Math.max(...valid.map((s) => s.speed));
+
+      return {
+        current,
+        avg,
+        peak,
+        count: valid.length,
+        samples: valid.slice(-60).map((s) => ({ time: s.time, speed: s.speed }))
+      };
+    }
+
+    // Fallback chain: primary -> downloadDir2 -> downloadDir3. Walks the folders
+    // in order and uses the first whose drive has >= minFreeMB free (or the last
+    // one regardless), so downloads (and their history/downloaded.json) land in
+    // the first folder that can take them.
+    _activeDirSync() {
+      const primary = this.config.downloadDir || path.join(os.homedir(), "Downloads", "DeepGrab");
+      const dirs = [primary, this.config.downloadDir2, this.config.downloadDir3].filter(Boolean);
+      for (let i = 0; i < dirs.length; i++) {
+        const dir = dirs[i];
+        let free = Infinity;
+        try { const s = fs.statfsSync(dir); free = (s.bavail * s.bsize) / (1024 * 1024); } catch (e) { free = Infinity; }
+        const isLast = i === dirs.length - 1;
+        if (isLast || free >= (this.config.minFreeMB || 500)) {
+          try { fs.mkdirSync(dir, { recursive: true }); return dir; } catch (e) { /* try next */ }
+        }
+      }
+      return primary;
+    }
+
+    get dir() {
+      return this._activeDirSync();
+    }
+
+    get historyPath() {
+      return path.join(this.dir, "history.json");
+    }
+
+    get downloadedPath() {
+      return path.join(this.dir, "downloaded.json");
+    }
+
+    _loadDownloaded() {
+      try {
+        const data = JSON.parse(fs.readFileSync(this.downloadedPath, "utf8"));
+        if (Array.isArray(data)) this._downloaded = new Set(data);
+      } catch (e) {
+        this._downloaded = new Set();
+      }
+    }
+
+    _saveDownloaded() {
+      this._persistSoon();
+    }
+
+    // Write any pending history/downloaded changes immediately (e.g. on quit).
+    // Synchronous so a graceful quit deterministically persists the latest
+    // state before teardown (a pending debounce timer otherwise loses <500ms).
+    flush() {
+      if (this._persistTimer) { clearTimeout(this._persistTimer); this._persistTimer = null; }
+      try {
+        if (this.config.saveHistory !== false) {
+          fs.writeFileSync(this.historyPath, JSON.stringify(this.history, null, 2), "utf8");
+        }
+      } catch (e) { /* ignore */ }
+      try {
+        fs.writeFileSync(this.downloadedPath, JSON.stringify(Array.from(this._downloaded), null, 0), "utf8");
+      } catch (e) { /* ignore */ }
+    }
+
+    isDownloaded(url) {
+      return this._downloaded.has(String(url || ""));
+    }
+
+    _markDownloaded(url) {
+      this._downloaded.add(String(url || ""));
+      this._saveDownloaded();
+    }
+
+    // Move a terminal item to history (frees its slot for the windowed loader).
+    _toHistory(item) {
+      const histEntry = {
+        id: item.id,
+        url: item.url,
+        title: item.title,
+        referer: item.referer,
+        fileName: item.fileName,
+        total: item.total,
+        received: item.received,
+        status: item.status,
+        error: item.error,
+        finalPath: item.finalPath || "",
+        thumb: item.thumb || "",
+        timestamp: Date.now(),
+        endTime: Date.now(),
+        _samples: item._samples.slice(-120)
+      };
+      this.history.push(histEntry);
+      const cap = this.config.maxHistory || 500;
+      if (this.history.length > cap) this.history = this.history.slice(-cap);
+      this._saveHistory();
+      this.items.delete(item.id);
+      if (item.tempDir) fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+      this.onUpdate({ _removed: item.id });
+      this.refill();
+    }
+
+    // On a terminal state: record dedupe, auto-move to history when running a
+    // bulk/windowed import (or when the active map grows large), then refill.
+    _maybeFinalize(item) {
+      if (!item) return;
+      if (item.status === "done") this._markDownloaded(item.url);
+      const trim =
+        (this._pending && this._pending.length > 0) ||
+        this.items.size > (this.config.autoTrimAt || 500);
+      if (trim) this._toHistory(item);
+      else this.refill();
+    }
+
+    // Windowed loader: pull queued URLs from the pending list into the active
+    // map up to the live cap, so bulk imports stay memory-bounded.
+    refill() {
+      if (!this._pending || !this._pending.length) return;
+      const cap = this.config.liveWindow || (this.config.concurrency || 3) * 4;
+      while (this._pending.length && this.items.size < cap) {
+        const u = this._pending.shift();
+        if (!u) continue;
+        // Bulk imports skip already-downloaded URLs silently (no duplicate rows).
+        this.enqueue({ url: u, title: "", referer: "", markDuplicate: false }).catch(() => {});
+      }
+    }
+
+    // Re-download a "duplicate" entry the user explicitly wants anyway.
+    forceDownload(id) {
+      const item = this.items.get(id);
+      if (!item) return false;
+      if (item.status === "duplicate") {
+        item.duplicate = false;
+        item.status = "queued";
+        item.error = "";
+        item.speed = 0;
+        item.lastEmit = Date.now();
+        item._lastBytes = item.received;
+        this.emit(item);
+        this.pump();
+        return true;
+      }
+      return false;
+    }
+
+    // Enqueue a whole batch without materializing all of them at once.
+    addPending(urls) {
+      let added = 0;
+      for (const u of urls) {
+        const s = typeof u === "string" ? u.trim() : "";
+        if (!s) continue;
+        this._pending.push(s);
+        added++;
+      }
+      this.refill();
+      return added;
+    }
+
+    _hostOf(url) {
+      try { return new URL(url).hostname; } catch (e) { return null; }
+    }
+
+    // Per-host pacing: keep a minimum interval between requests to the same host
+    // so bulk downloads don't trip Cloudflare rate limits / IP bans. Serialized
+    // per host via _paceChains: concurrent callers chain onto the previous
+    // caller's granted slot (which sets _hostLast before releasing), so they fire
+    // in sequence instead of reading a stale _hostLast and bursting together.
+    async _paceHost(url, cooldownMs) {
+      const host = this._hostOf(url);
+      if (!host) return;
+      const min = cooldownMs || this.config.hostDelayMs || 120;
+      const prev = this._paceChains.get(host) || Promise.resolve();
+      let grant;
+      const slot = new Promise((r) => { grant = r; });
+      // The chain always resolves so a (never-rejecting) failure can't poison it.
+      this._paceChains.set(host, prev.then(() => slot, () => slot));
+      await prev.catch(() => {});
+      const last = this._hostLast.get(host) || 0;
+      const wait = min - (Date.now() - last);
+      if (wait > 0) await delay(wait);
+      this._hostLast.set(host, Date.now());
+      grant();
+    }
+
+   async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", force = false, markDuplicate = true }) {
+    // Duplicate handling: an already-downloaded URL becomes a "duplicate" list
+    // entry (so the user can "Download anyway"), unless the bulk/windowed path
+    // opts out with markDuplicate:false (skip silently — no item to avoid bloat).
+    const isDup = !force && this.config.skipDuplicates !== false && this.isDownloaded(url);
+    if (isDup && markDuplicate === false) return null;
+    const id = "dl-" + (++this._id) + "-" + Date.now();
+    // Normalize schedule times to numeric ms so the Date.now() comparisons
+    // below work whether callers pass an ISO string ("YYYY-MM-DDTHH:MM"), a
+    // Date object, or raw ms; invalid values are treated as unset.
+    const ts = (v) => { if (!v) return null; const t = new Date(v).getTime(); return Number.isFinite(t) ? t : null; };
+    const sStart = ts(scheduledStart);
+    const sStop = ts(scheduledStop);
+    // Fall back to the streamtape/fstape URL slug when the sender gave no title.
+    const effectiveTitle = title || titleFromReferer(referer);
+    const hls = isHlsUrl(url) || (resolvedUrl && isHlsUrl(resolvedUrl));
+    // Resolution is deferred to _runOnce so callers get an id immediately and
+    // the WS `accepted` reply never blocks on slow resolver page fetches.
+    const item = {
+      _resolvedUrl: resolvedUrl,
+      id,
+      url,
+      title: effectiveTitle,
+      referer,
+      label,
+      kind: hls ? "hls" : "mp4",
+      fileName: sanitizeName(effectiveTitle) + (label ? "[" + sanitizeName(label) + "]" : "") + ".mp4",
+      status: "queued",
+      total: 0,
+      received: 0,
+      speed: 0,
+      proxy: "",
+      error: "",
+      tempDir: "",
+      finalPath: "",
+      scheduledStart: sStart,
+      scheduledStop: sStop,
+      lastEmit: 0,
+      _lastBytes: 0,
+      _pathCreated: false, // true once finalPath was created this run (dedupe-rename guard)
+      _proxy: null,
+      refreshCount: 0,
+      errorCategory: "",
+      duplicate: false,
+      _activeRes: new Set(),
+      _samples: [],
+      public() {
+        return {
+          id: this.id,
+          url: this.url,
+          referer: this.referer,
+          title: this.title,
+          label: this.label || "",
+          kind: this.kind || "mp4",
+          fileName: this.fileName,
+          status: this.status,
+          duplicate: !!this.duplicate,
+          total: this.total,
+          received: this.received,
+          speed: this.speed,
+          proxy: this.proxy,
+          error: this.error,
+          errorCategory: this.errorCategory,
+          refreshCount: this.refreshCount,
+          finalPath: this.finalPath,
+          thumb: this.thumb || "",
+          subtitlePath: this.subtitlePath || "",
+          subtitleLang: this.subtitleLang || "",
+          scheduledStart: this.scheduledStart,
+          scheduledStop: this.scheduledStop,
+          samples: this._samples.slice(-120).map((s) => ({ time: s.time, speed: s.speed }))
+        };
+      }
+    };
+     this.items.set(id, item);
+     this.emit(item);
+     if (isDup) {
+       // Already downloaded — show it in the list but don't auto-download.
+       item.status = "duplicate";
+       item.duplicate = true;
+       this.emit(item);
+       return id;
+     }
+     if (item.scheduledStart && Date.now() < item.scheduledStart) {
+       item.status = "scheduled";
+       this.emit(item);
+     }
+     this.pump();
+     if (item.scheduledStart || item.scheduledStop) {
+       this.checkScheduled();
+     }
+     return id;
+  }
+
+   async pump() {
+     while (this.active < (this.config.concurrency || 3)) {
+       const next = Array.from(this.items.values()).find((i) => i.status === "queued" && !i._running);
+       if (!next) break;
+       if (next.scheduledStart && Date.now() < next.scheduledStart) {
+         next.status = "scheduled";
+         this.emit(next);
+         continue;
+       }
+       next.status = "running";
+      this.active++;
+      this.emit(next);
+      this.run(next)
+        .catch((err) => {
+          if (err.aborted || next.status === "paused" || next.status === "cancelled") return;
+          next.status = "error";
+          next.error = err.message || String(err);
+          next.errorCategory = categorizeError(err);
+          next.speed = 0;
+          this.emit(next);
+          this._maybeFinalize(next);
+        })
+        .finally(() => {
+          this.active--;
+          this.pump();
+        });
+    }
+   }
+
+   checkScheduled() {
+     const now = Date.now();
+     const due = Array.from(this.items.values()).filter((i) => i.status === "scheduled" && now >= (i.scheduledStart || 0));
+     if (due.length) {
+       due.forEach((i) => {
+         // Whole start..stop window already elapsed — pause instead of starting.
+         if (i.scheduledStop && now >= i.scheduledStop) { this.pause(i.id); return; }
+         i.status = "queued"; this.emit(i);
+       });
+       this.pump();
+     }
+     // Stop-time enforcement: pause running/queued downloads whose stop time passed.
+     const stopDue = Array.from(this.items.values()).filter(
+       (i) => i.scheduledStop && now >= i.scheduledStop && (i.status === "running" || i.status === "queued")
+     );
+     if (stopDue.length) stopDue.forEach((i) => this.pause(i.id));
+     // Keep a sweep alive while anything is still scheduled or has a future
+     // start/stop time — wake just before the earliest event so both fire on time.
+     const scheduledStarts = Array.from(this.items.values())
+       .filter((i) => i.status === "scheduled" && (i.scheduledStart || 0) > now)
+       .map((i) => i.scheduledStart);
+     const nextStart = scheduledStarts.reduce((a, b) => Math.min(a, b), Infinity);
+     const nextStop = Array.from(this.items.values())
+       .filter((i) => i.scheduledStop && i.scheduledStop > now && ["running", "queued", "scheduled"].includes(i.status))
+       .map((i) => i.scheduledStop)
+       .reduce((a, b) => Math.min(a, b), Infinity);
+     const nextEvent = Math.min(nextStart, nextStop);
+     clearTimeout(this._scheduleTimer);
+     this._scheduleTimer = null;
+     if (Number.isFinite(nextEvent)) {
+       const wait = Math.min(30000, Math.max(500, nextEvent - now));
+       this._scheduleTimer = setTimeout(() => this.checkScheduled(), wait);
+     }
+   }
+
+   async throttle(bytes) {
+    const rate = (this.config.speedLimitKB || 0) * 1024;
+    if (!rate) return;
+    this._speedBytes += bytes;
+    const now = Date.now();
+    const expectedMs = (this._speedBytes / rate) * 1000;
+    const sleep = Math.max(0, expectedMs - (now - this._speedStart));
+    if (sleep > 0) await delay(Math.min(sleep, 500));
+    if (now - this._speedStart >= 1000) {
+      this._speedBytes = 0;
+      this._speedStart = Date.now();
+    }
+  }
+
+   tick(item, chunkLen) {
+     item.received += chunkLen;
+     const now = Date.now();
+     if (now - item.lastEmit >= PROGRESS_INTERVAL) {
+       const dt = (now - item.lastEmit) / 1000 || 0.3;
+       item.speed = Math.max(0, Math.round((item.received - item._lastBytes) / dt));
+       item._lastBytes = item.received;
+       item.lastEmit = now;
+       if (item.speed > 0) {
+         item._samples.push({ time: now, speed: item.speed });
+         if (item._samples.length > 120) item._samples = item._samples.slice(-120);
+       }
+       this.emit(item);
+     }
+   }
+
+  emit(item) {
+    this.onUpdate(item.public());
+  }
+
+  // ---------------- main flow ----------------
+  async run(item) {
+    if (item._running) return; // already being processed (guards resume-during-probe)
+    item._running = true;
+    try {
+      await this._runGuarded(item);
+    } finally {
+      item._running = false;
+    }
+  }
+
+  async _runGuarded(item) {
+    const baseHeaders = item.referer ? { Referer: item.referer } : {};
+    const maxRefresh = this.config.maxRefresh ?? MAX_REFRESH;
+
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this._runOnce(item, baseHeaders);
+        break;
+      } catch (err) {
+        if (err.aborted || attempt >= maxRefresh) throw err;
+        // Rate-limited / Cloudflare-blocked: rotate proxy, back off, and retry
+        // the same URL — the video isn't dead and re-resolving the (also blocked)
+        // source page would just waste requests.
+        if (isRateLimited(err) || isCloudflareBlocked(err)) {
+          if (this.proxyManager && item._proxy) this.proxyManager.markBad(item._proxy);
+          item._proxy = null;
+          await delay(1500 * (attempt + 1));
+          item.error = "";
+          item.status = "running";
+          this.emit(item);
+          continue;
+        }
+        // Expired direct URL (e.g. streamtape signed token) — re-resolve the
+        // original page and retry from scratch with the fresh URL.
+        if (!isExpiredError(err)) throw err;
+        // A bare HTTP 403/404/410 can mean the *proxy* is Cloudflare-blocked
+        // (no cf-chl text in the message) rather than a dead URL. Rotate + clear
+        // so the retry re-picks instead of hammering the same blocked proxy
+        // through every refresh cycle. A genuinely expired URL fails regardless.
+        if (item._proxy && this.proxyManager) this.proxyManager.markBad(item._proxy);
+        item._proxy = null;
+        // get_video links are passed through (resolved === original), so the
+        // usual "resolved differs from url" test can't gate them; a signed link
+        // with a streamtape/fstape referer is still refreshable — from the page.
+        const refreshable =
+          (item._resolvedUrl && item._resolvedUrl !== item.url) || isSignedRefreshable(item);
+        if (!refreshable) throw err;
+        let fresh = null;
+        try {
+          fresh = await resolveUrl(refreshSourceUrl(item), { proxyManager: this.proxyManager, config: this.config, paceHost: (u) => this._paceHost(u) }, baseHeaders);
+        } catch (e) { /* re-resolution failed — keep original error */ }
+        if (!fresh || fresh === item._resolvedUrl) throw err;
+        item._resolvedUrl = fresh;
+        await fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+        await fsp.rm(item.finalPath, { force: true }).catch(() => {});
+        item.received = 0;
+        item._lastBytes = 0;
+        item.error = "";
+        item.errorCategory = "";
+        item.refreshCount = (item.refreshCount || 0) + 1;
+        item.status = "running";
+        this.emit(item);
+      }
+    }
+  }
+
+  async _runOnce(item, baseHeaders) {
+    if (item.status !== "running") {
+      const err = new Error("Aborted");
+      err.aborted = true;
+      throw err;
+    }
+
+    // resolve lazily (deferred from enqueue); can take seconds via proxies
+    if (!item._resolvedUrl) {
+      const r = await resolveUrl(item.url, { proxyManager: this.proxyManager, config: this.config, paceHost: (u) => this._paceHost(u) }, baseHeaders);
+      if (r) item._resolvedUrl = r;
+      if (item.status !== "running") {
+        const err = new Error("Aborted");
+        err.aborted = true;
+        throw err;
+      }
+    }
+
+    await fsp.mkdir(this.dir, { recursive: true });
+    item.tempDir = path.join(this.dir, item.id);
+    await fsp.mkdir(item.tempDir, { recursive: true });
+    item.finalPath = path.join(this.dir, item.fileName);
+    if (fs.existsSync(item.finalPath) && !item.received) {
+      const now = new Date();
+      item.fileName = sanitizeName(item.title) + (item.label ? "[" + sanitizeName(item.label) + "]" : "") + "_" + now.getTime() + ".mp4";
+      item.finalPath = path.join(this.dir, item.fileName);
+    }
+
+    const actualUrl = item._resolvedUrl || item.url;
+
+    // Cloudflare/anti-bot pacing: don't hammer a single host with back-to-back requests.
+    await this._paceHost(actualUrl);
+
+    if (item.kind === "hls" || isHlsUrl(actualUrl)) {
+      item.kind = "hls";
+      item.total = 0; // playlist has no byte size — indeterminate progress
+      this.emit(item);
+      await this.runHls(item, baseHeaders, actualUrl);
+    } else {
+      const info = await this.probe(item, baseHeaders, actualUrl);
+      item.total = info.length;
+      this.emit(item);
+
+      // probe can take seconds (proxy latency tests); bail if paused/cancelled meanwhile
+      if (item.status !== "running") {
+        const err = new Error("Aborted");
+        err.aborted = true;
+        throw err;
+      }
+
+      if (item.total > 2 * 1024 * 1024 && info.acceptRanges && (this.config.segments || 1) > 1) {
+        try {
+          await this.runSegmented(item, info, baseHeaders);
+        } catch (err) {
+          if (err.category !== "norange") throw err;
+          // Server ignored Range (HTTP 200 full body); a truncated part merge
+          // would be corrupt. Kill in-flight segments, drop the partials, and
+          // fall back to a single stream from byte 0.
+          this.abort(item);
+          await fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+          await fsp.rm(item.finalPath, { force: true }).catch(() => {});
+          item.received = 0;
+          item._lastBytes = 0;
+          await this.runSingle(item, info, baseHeaders);
+        }
+      } else {
+        await this.runSingle(item, info, baseHeaders);
+      }
+    }
+
+    const stat = await fsp.stat(item.finalPath);
+    if (item.total && stat.size !== item.total) {
+      throw new Error(`Size mismatch: got ${stat.size}, expected ${item.total}`);
+    }
+    await fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+    item.status = "done";
+    item.speed = 0;
+    this.emit(item);
+    // Best-effort preview frame (needs ffmpeg; never fails the download).
+    try {
+      item.thumb = await this.makeThumb(item);
+      if (item.thumb) this.emit(item);
+    } catch (e) { /* thumbnails are optional */ }
+    // Best-effort post-processing: convert format + fetch subtitle. Never
+    // fails the download — a broken convert/subtitle step leaves the original
+    // file intact and just logs the error into item.errorCategory.
+    try {
+      await this._postProcess(item);
+      if (item.status === "done") this.emit(item); // status/progress may have changed
+    } catch (e) { /* post-processing failures are non-fatal */ }
+    this._maybeFinalize(item);
+  }
+
+   async probe(item, baseHeaders, actualUrl) {
+    let proxy = null;
+    if (this.config.autoProxy) {
+      proxy = item._proxy || null;
+      if (!proxy) {
+        proxy = await this.proxyManager.pickBest(actualUrl, 6000);
+        item._proxy = proxy;
+      }
+    }
+    item.proxy = proxy ? proxy.url : "direct";
+    const agent = proxy ? this.proxyManager.agentFor(proxy, actualUrl) : null;
+    let result = await requestWithRedirects(actualUrl || item.url, {
+      method: "HEAD",
+      headers: { ...baseHeaders, Range: "bytes=0-0" },
+      agent,
+      onReq: (req, on) => this._trackReq(item, req, on)
+    });
+    // Some servers reject HEAD outright (405/501). Fall back to a ranged GET and
+    // read only the headers — the tiny body is destroyed, never written to disk.
+    if (result.status === 405 || result.status === 501) {
+      try { result.res.resume(); } catch (e) { /* ignore */ }
+      result = await requestWithRedirects(actualUrl || item.url, {
+        method: "GET",
+        headers: { ...baseHeaders, Range: "bytes=0-0" },
+        agent,
+        onReq: (req, on) => this._trackReq(item, req, on)
+      });
+      try { result.res.destroy(); } catch (e) { /* ignore */ }
+    }
+    const cr = contentRangeTotal(result.headers["content-range"]);
+    const length = cr != null ? cr : parseInt(result.headers["content-length"] || "0", 10);
+    return {
+      finalUrl: result.finalUrl,
+      length: Number.isFinite(length) ? length : 0,
+      acceptRanges: (result.headers["accept-ranges"] || "").toLowerCase() === "bytes"
+    };
+  }
+
+  // ---------------- segmented ----------------
+  async runSegmented(item, info, baseHeaders) {
+    const n = Math.max(2, this.config.segments || 4);
+    const partSize = Math.ceil(info.length / n);
+    const segments = [];
+    for (let i = 0; i < n; i++) {
+      const start = i * partSize;
+      const end = Math.min(info.length - 1, start + partSize - 1);
+      if (start > info.length - 1) break;
+      segments.push({ start, end, partPath: path.join(item.tempDir, `part${i}` + PART_EXT) });
+    }
+
+    const queue = [...segments];
+    const limit = Math.max(1, Math.min(segments.length, this.config.concurrency || 3));
+    const workers = Array.from({ length: limit }, async () => {
+      while (queue.length) {
+        const seg = queue.shift();
+        // Global cap across *all* active downloads: a 3-download × 4-segment
+        // run must not open 12 connections at once. Semaphore limit is the max
+        // of concurrency and per-file segment count so one file's workers don't
+        // deadlock waiting on slots another file holds.
+        await this._withConnSlot(() => this.downloadSegment(item, seg, baseHeaders));
+      }
+    });
+    try {
+      await Promise.all(workers);
+    } catch (err) {
+      // A segment failed terminally — abort sibling workers so they don't keep
+      // streaming into the temp dir while the item is retried or finalized.
+      this.abort(item);
+      throw err;
+    }
+
+    const out = createWriteStream(item.finalPath);
+    for (const seg of segments) {
+      await pipeline(createReadStream(seg.partPath), out, { end: false });
+    }
+    await new Promise((resolve, reject) => {
+      out.end((err) => (err ? reject(err) : resolve()));
+    });
+  }
+
+   async downloadSegment(item, seg, baseHeaders, attempt = 0) {
+     const maxRetries = this.config.maxRetries ?? DEFAULT_MAX_RETRIES;
+     const actualUrl = item._resolvedUrl || item.url;
+     let proxy = item._proxy || null;
+     if (this.config.autoProxy && !proxy) {
+       proxy = await this.proxyManager.pickBest(actualUrl, 5000);
+       item._proxy = proxy;
+     }
+     const agent = proxy ? this.proxyManager.agentFor(proxy, actualUrl) : null;
+     try {
+       const existing = await fsp.stat(seg.partPath).catch(() => null);
+       const resumeStart = seg.start + (existing ? existing.size : 0);
+       const headers = { ...baseHeaders, Range: `bytes=${resumeStart}-${seg.end}` };
+
+       const result = await requestWithRedirects(actualUrl, { method: "GET", headers, agent, maxRetries, onReq: (req, on) => this._trackReq(item, req, on) });
+       const res = result.res;
+       const status = result.status;
+       if (status !== 206 && status !== 200) {
+         res.resume();
+         const err = new Error("Segment failed: HTTP " + status);
+         err.status = status;
+         err.category = "http";
+         throw err;
+       }
+       if (status === 200) {
+         // Server ignored Range and restarted at byte 0 — a truncated part would
+         // silently corrupt the merge. Signal the fallback to a single stream.
+         res.resume();
+         const err = new Error("Server ignored Range (HTTP 200) — falling back to single stream");
+         err.category = "norange";
+         throw err;
+       }
+
+       let mode = "w";
+       if (resumeStart > seg.start) {
+         const start = contentRangeStart(result.headers["content-range"]);
+         if (start != null && start !== resumeStart) {
+           res.resume();
+           await fsp.rm(seg.partPath, { force: true }).catch(() => {});
+           const err = new Error("Segment range mismatch: server sent " + start + ", expected " + resumeStart);
+           err.category = "resume";
+           throw err;
+         }
+         mode = "a";
+       }
+       await this.streamToFile(item, res, seg.partPath, mode);
+     } catch (err) {
+       if (attempt < 1) {
+         if (isProxyFailure(err) && proxy) {
+           this.proxyManager.markBad(proxy);
+           item._proxy = null;
+           return this.downloadSegment(item, seg, baseHeaders, attempt + 1);
+         }
+         if (err.category === "resume") {
+           return this.downloadSegment(item, seg, baseHeaders, attempt + 1);
+         }
+       }
+       throw err;
+     }
+   }
+
+    // ---------------- single stream ----------------
+    // Global cap on concurrent segment connections across ALL active downloads
+    // (see runSegmented). Semaphore limit keeps one file's workers from
+    // deadlocking on slots another file holds.
+    async _withConnSlot(fn) {
+      const limit = Math.max(this.config.concurrency || 3, this.config.segments || 4);
+      while (this._connBusy >= limit) {
+        await new Promise((resolve) => this._connWaiters.push(resolve));
+      }
+      this._connBusy++;
+      try {
+        return await fn();
+      } finally {
+        this._connBusy--;
+        const w = this._connWaiters.shift();
+        if (w) w();
+      }
+    }
+
+    async runSingle(item, info, baseHeaders, attempt = 0) {
+    const actualUrl = item._resolvedUrl || item.url;
+    let proxy = item._proxy || null;
+    if (this.config.autoProxy && !proxy) {
+      proxy = await this.proxyManager.pickBest(actualUrl, 6000);
+      item._proxy = proxy;
+    }
+    item.proxy = proxy ? proxy.url : "direct";
+    const agent = proxy ? this.proxyManager.agentFor(proxy, actualUrl) : null;
+    try {
+      const existing = await fsp.stat(item.finalPath).catch(() => null);
+      const resumeStart = existing ? existing.size : 0;
+      const headers = resumeStart > 0
+        ? { ...baseHeaders, Range: `bytes=${resumeStart}-` }
+        : baseHeaders;
+
+      const maxRetries = this.config.maxRetries ?? DEFAULT_MAX_RETRIES;
+      const result = await requestWithRedirects(actualUrl, { method: "GET", headers, agent, maxRetries, onReq: (req, on) => this._trackReq(item, req, on) });
+      const res = result.res;
+      const status = result.status;
+
+      let mode = "w";
+      if (status === 200) {
+        // server ignored the range and restarted; discard partial file
+        item.received = 0;
+        item._lastBytes = 0;
+      } else if (status === 206) {
+        const start = contentRangeStart(result.headers["content-range"]);
+        if (resumeStart > 0 && start != null && start !== resumeStart) {
+          res.resume();
+          await fsp.rm(item.finalPath, { force: true }).catch(() => {});
+          item.received = 0;
+          item._lastBytes = 0;
+          const err = new Error("Resume range mismatch: server sent " + start + ", expected " + resumeStart);
+          err.category = "resume";
+          throw err;
+        }
+        if (resumeStart > 0) {
+          mode = "a";
+          item.received = resumeStart;
+          item._lastBytes = resumeStart;
+        } else {
+          item.received = 0;
+          item._lastBytes = 0;
+        }
+      } else {
+        res.resume();
+        const err = new Error("Download failed: HTTP " + status);
+        err.status = status;
+        err.category = "http";
+        throw err;
+      }
+      await this.streamToFile(item, res, item.finalPath, mode);
+    } catch (err) {
+      if (attempt < 1) {
+        if (isProxyFailure(err) && proxy) {
+          this.proxyManager.markBad(proxy);
+          item._proxy = null;
+          return this.runSingle(item, info, baseHeaders, attempt + 1);
+        }
+        if (err.category === "resume") {
+          return this.runSingle(item, info, baseHeaders, attempt + 1);
+        }
+      }
+      throw err;
+    }
+  }
+
+  // ---------------- HLS ----------------
+  async runHls(item, baseHeaders, m3u8Url, attempt = 0) {
+    // Fail fast when ffmpeg (needed for the .mp4 remux) isn't available.
+    const ffmpeg = this.config.ffmpegPath || "ffmpeg";
+    const ver = spawnSync(ffmpeg, ["-version"], { stdio: "ignore" });
+    if (ver.error) throw new Error("ffmpeg not found (set ffmpegPath in config.json)");
+    if (ver.status !== 0) throw new Error("ffmpeg check failed (" + ver.status + ")");
+
+    const maxRetries = this.config.maxRetries ?? DEFAULT_MAX_RETRIES;
+    let proxy = item._proxy || null;
+    if (this.config.autoProxy && !proxy) {
+      proxy = await this.proxyManager.pickBest(m3u8Url, 6000);
+      item._proxy = proxy;
+    }
+    const agent = proxy ? this.proxyManager.agentFor(proxy, m3u8Url) : null;
+    item.proxy = proxy ? proxy.url : "direct";
+    this.emit(item);
+
+    let playlistUrl = m3u8Url;
+    await this._paceHost(playlistUrl);
+    let body = await fetchHtml(playlistUrl, agent, baseHeaders, 0, maxRetries);
+    if (item.status !== "running") this.throwAborted();
+
+    // Master playlist -> pick the best variant and fetch its media playlist.
+    if (HLS_MASTER_RE.test(body)) {
+      const variant = pickHlsVariant(body, playlistUrl);
+      if (!variant) throw new Error("HLS: no usable variant in master playlist");
+      await this._paceHost(variant);
+      body = await fetchHtml(variant, agent, baseHeaders, 0, maxRetries);
+      playlistUrl = variant;
+      if (item.status !== "running") this.throwAborted();
+    }
+
+    const segs = parseHlsPlaylist(body, playlistUrl);
+    if (!segs.length) throw new Error("HLS: no segments in playlist");
+
+    await fsp.mkdir(item.tempDir, { recursive: true });
+    item.finalPath = path.join(this.dir, item.fileName);
+
+    for (let i = 0; i < segs.length; i++) {
+      if (item.status !== "running") this.throwAborted();
+      const segPath = path.join(item.tempDir, "seg" + i + PART_EXT);
+      const existing = await fsp.stat(segPath).catch(() => null);
+      if (existing && existing.size > 0) continue; // resume: skip done segments
+      await this.downloadHlsSegment(item, segs[i], segPath, baseHeaders);
+    }
+
+    if (item.status !== "running") this.throwAborted();
+    await this.remuxToMp4(item, segs.length, ffmpeg);
+    if (item.status !== "running") this.throwAborted(); // pause/cancel during ffmpeg
+  }
+
+  throwAborted() {
+    const err = new Error("Aborted");
+    err.aborted = true;
+    throw err;
+  }
+
+  async downloadHlsSegment(item, segUrl, filePath, baseHeaders, attempt = 0) {
+    const maxRetries = this.config.maxRetries ?? DEFAULT_MAX_RETRIES;
+    let proxy = item._proxy || null;
+    if (this.config.autoProxy && !proxy) {
+      proxy = await this.proxyManager.pickBest(segUrl, 5000);
+      item._proxy = proxy;
+    }
+    const agent = proxy ? this.proxyManager.agentFor(proxy, segUrl) : null;
+    try {
+      const result = await requestWithRedirects(segUrl, { method: "GET", headers: baseHeaders, agent, maxRetries, onReq: (req, on) => this._trackReq(item, req, on) });
+      const res = result.res;
+      const status = result.status;
+      if (status !== 200) {
+        res.resume();
+        const err = new Error("HLS segment failed: HTTP " + status);
+        err.status = status;
+        err.category = "http";
+        throw err;
+      }
+      await this.streamToFile(item, res, filePath, "w");
+      const raw = await fsp.readFile(filePath);
+      const stripped = stripPngPrefix(raw);
+      if (stripped.length !== raw.length) await fsp.writeFile(filePath, stripped);
+    } catch (err) {
+      if (attempt < 1) {
+        if (isProxyFailure(err) && proxy) {
+          this.proxyManager.markBad(proxy);
+          item._proxy = null;
+          return this.downloadHlsSegment(item, segUrl, filePath, baseHeaders, attempt + 1);
+        }
+      }
+      throw err;
+    }
+  }
+
+  // Concatenate the .ts segments in order and let ffmpeg copy-remux to .mp4.
+  async remuxToMp4(item, segCount, ffmpeg) {
+    const listPath = path.join(item.tempDir, "concat.txt");
+    const lines = [];
+    for (let i = 0; i < segCount; i++) {
+      const p = path.join(item.tempDir, "seg" + i + PART_EXT);
+      lines.push("file '" + String(p).replace(/'/g, "'\\''") + "'");
+    }
+    await fsp.writeFile(listPath, lines.join("\n"), "utf8");
+    const tmpOut = item.finalPath + ".part";
+    // Output is <final>.part so ffmpeg can't infer the muxer from the extension — force mp4.
+    await this.runFfmpeg(ffmpeg, ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", "-f", "mp4", tmpOut], item);
+    await fsp.rm(item.finalPath, { force: true }).catch(() => {});
+    await fsp.rename(tmpOut, item.finalPath);
+    await fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+
+  runFfmpeg(ffmpeg, args, track) {
+    return new Promise((resolve, reject) => {
+      const cp = spawn(ffmpeg, args, { stdio: ["ignore", "ignore", "pipe"] });
+      // Track the child so abort()/pause()/cancel() can kill a mid-remux ffmpeg.
+      if (track) track._activeRes.add(cp);
+      let errOut = "";
+      cp.stderr.on("data", (c) => {
+        errOut += c;
+        if (errOut.length > 4000) errOut = errOut.slice(-4000);
+      });
+      cp.on("error", (e) => {
+        if (track) track._activeRes.delete(cp);
+        reject(new Error("ffmpeg failed to start: " + e.message));
+      });
+      cp.on("close", (code) => {
+        if (track) track._activeRes.delete(cp);
+        if (code === 0) resolve();
+        else reject(new Error("ffmpeg remux failed (" + code + "): " + errOut.split("\n").slice(-3).join("\n")));
+      });
+    });
+  }
+
+  // Best-effort small preview frame extracted from the finished video with
+  // ffmpeg (same binary the HLS remux uses). Returns the .thumb.jpg path or ""
+  // when thumbnails are disabled, ffmpeg is missing, or extraction fails.
+  async makeThumb(item) {
+    if (this.config.thumbnails === false) return "";
+    if (!item.finalPath || item.status !== "done") return "";
+    const thumb = item.finalPath + ".thumb.jpg";
+    if (fs.existsSync(thumb)) return thumb;
+    const ffmpeg = this.config.ffmpegPath || "ffmpeg";
+    const attempt = async (args) => {
+      try {
+        await this.runFfmpeg(ffmpeg, args);
+        return fs.existsSync(thumb) ? thumb : "";
+      } catch (e) {
+        return "";
+      }
+    };
+    // Fast-seek to ~3s for a representative frame; fall back to the first frame
+    // for clips shorter than the seek point.
+    return await attempt(["-y", "-ss", "3", "-i", item.finalPath, "-frames:v", "1", "-vf", "scale=96:-1", "-f", "image2", thumb])
+      || await attempt(["-y", "-i", item.finalPath, "-frames:v", "1", "-vf", "scale=96:-1", "-f", "image2", thumb]);
+  }
+
+  // Best-effort post-download processing: convert the file to the configured
+  // format via ffmpeg, and fetch a subtitle from the source page when auto-
+  // subtitle is enabled. Never fails the download itself — a broken convert
+  // leaves the original file intact and just sets item.error.
+  async _postProcess(item) {
+    if (!item.finalPath || !fs.existsSync(item.finalPath)) return;
+    const ffmpeg = this.config.ffmpegPath || "ffmpeg";
+    // Convert non-HLS files when autoConvert is on and the file isn't already
+    // in the target format. HLS remux already produced an mp4, so skip convert
+    // for kind === "hls" unless the user explicitly wants another container.
+    if (this.config.autoConvert !== false && item.kind !== "hls") {
+      const targetExt = String(this.config.convertFormat || DEFAULT_CONVERT_FORMAT || "mp4").replace(/^\.+/, "").toLowerCase();
+      const curExt = path.extname(item.finalPath).replace(/^\.+/, "").toLowerCase();
+      if (curExt !== targetExt) {
+        try {
+          await this._convert(item, ffmpeg, targetExt, this.config.convertPreset || DEFAULT_CONVERT_PRESET || "fast");
+        } catch (e) {
+          item.error = (item.error ? item.error + " | " : "") + "convert failed: " + e.message;
+          item.errorCategory = (item.errorCategory || "convert") + ":convert";
+          this.emit(item);
+        }
+      }
+    }
+    // Subtitle fetch is independent of convert — run it even if convert was
+    // skipped or failed. Uses the source page (url or referer) to locate a
+    // subtitle link; best-effort only.
+    if (this.config.autoSubtitle !== false) {
+      const lang = this.config.subtitleLang || "en";
+      try {
+        await this._fetchSubtitle(item, ffmpeg, lang);
+      } catch (e) {
+        // subtitle fetch failure is silent — don't pollute item.error
+        // unless there's no other error already.
+        if (!item.error) {
+          item.error = "subtitle fetch failed: " + e.message;
+          item.errorCategory = "subtitle";
+          this.emit(item);
+        }
+      }
+    }
+  }
+
+  // Convert item.finalPath to the target container/codec via ffmpeg, then
+  // replace the original file with the converted output. The output name keeps
+  // the same base name with the new extension.
+  async _convert(item, ffmpeg, targetExt, preset) {
+    const inPath = item.finalPath;
+    const base = path.basename(inPath, path.extname(inPath));
+    const outPath = path.join(path.dirname(inPath), base + "." + targetExt);
+    if (outPath === inPath) return; // same extension — nothing to do
+    // Guard: don't clobber an existing converted file from a previous run.
+    if (fs.existsSync(outPath)) {
+      item.finalPath = outPath;
+      item.fileName = path.basename(outPath);
+      return;
+    }
+    const args = [
+      "-y",
+      "-i", inPath,
+      "-c:v", "libx264",
+      "-preset", String(preset || "fast"),
+      "-crf", "23",
+      "-c:a", "aac",
+      "-b:a", "128k",
+      "-movflags", "+faststart",
+      "-f", targetExt === "mp4" ? "mp4" : "matroska",
+      outPath
+    ];
+    // matroska/mkv doesn't need the movflags faststart; strip it for clarity.
+    if (targetExt === "mkv" || targetExt === "webm") {
+      args.splice(args.indexOf("-movflags"), 2);
+      args[args.indexOf("-f")] = targetExt === "webm" ? "webm" : "matroska";
+    }
+    await this.runFfmpeg(ffmpeg, args, item);
+    if (!fs.existsSync(outPath)) throw new Error("ffmpeg convert produced no output");
+    // Replace the original: remove old file, rename converted output.
+    await fsp.rm(inPath, { force: true }).catch(() => {});
+    await fsp.rename(outPath, inPath);
+    item.finalPath = inPath;
+    item.fileName = path.basename(inPath);
+    item._converted = true;
+    this.emit(item);
+  }
+
+  // Fetch a subtitle for the downloaded video. Strategy:
+  // 1. Resolve the source page (item.url, falling back to item.referer) via
+  //    fetchHtml with proxy support.
+  // 2. Scan the page HTML for common subtitle URLs / embedded data (see
+  //    SUBTITLE_PATTERNS below).
+  // 3. Download the first matching subtitle and save it next to the video
+  //    (same base name, .srt / .vtt / .ass extension).
+  // Subtitle fetch is best-effort and non-fatal — failures are swallowed.
+  async _fetchSubtitle(item, ffmpeg, lang) {
+    if (!item.url) return;
+    const pageUrl = item.url;
+    const baseHeaders = { "User-Agent": UA };
+    const maxRetries = MAX_SUBTITLE_FETCH_RETRIES;
+    let html;
+    try {
+      html = await fetchHtml(pageUrl, null, baseHeaders, 0, maxRetries);
+    } catch (e) {
+      // If the direct page fails, try the referer as a fallback source.
+      if (item.referer) {
+        try {
+          html = await fetchHtml(item.referer, null, baseHeaders, 0, maxRetries);
+        } catch (e2) {
+          return; // nothing to do — both page and referer unreachable
+        }
+      } else {
+        return;
+      }
+    }
+    const sub = findSubtitleUrl(html, pageUrl);
+    if (!sub) return;
+    // Download the subtitle file (best-effort, no proxy).
+    try {
+      const subRes = await requestWithRedirects(sub.url, {
+        method: "GET",
+        headers: { "User-Agent": UA, Accept: "text/plain, application/octet-stream, */*" },
+        maxRetries: 1
+      });
+      if (subRes.status !== 200) return;
+      const subBody = await streamToBuffer(subRes.res);
+      if (!subBody || subBody.length < 50) return;
+      const subExt = sub.ext || (subBody[0] === 0xef && subBody[1] === 0xbb && subBody[2] === 0xbf ? "srt" : "srt");
+      const base = path.basename(item.finalPath, path.extname(item.finalPath));
+      const subPath = path.join(path.dirname(item.finalPath), base + "." + subExt);
+      await fsp.writeFile(subPath, subBody, "utf8");
+      item.subtitlePath = subPath;
+      item.subtitleLang = lang;
+      this.emit(item);
+    } catch (e) { /* subtitle download failure is non-fatal */ }
+  }
+
+  async streamToFile(item, res, filePath, flags) {
+    item._activeRes.add(res);
+    const out = createWriteStream(filePath, { flags });
+    const errP = new Promise((_, reject) => out.once("error", reject));
+    errP.catch(() => {});
+    try {
+      for await (const chunk of res) {
+        this.tick(item, chunk.length);
+        await this.throttle(chunk.length);
+        if (!out.write(chunk)) await Promise.race([once(out, "drain"), errP]);
+      }
+      out.end();
+      await Promise.race([once(out, "finish"), errP]);
+    } catch (e) {
+      out.destroy();
+      try { res.destroy(); } catch (e2) { /* ignore */ }
+      if (e.name === "AbortError") {
+        const err = new Error("Aborted by user");
+        err.aborted = true;
+        throw err;
+      }
+      throw e;
+    } finally {
+      item._activeRes.delete(res);
+    }
+  }
+
+  // ---------------- controls ----------------
+  // Track in-flight requests/responses so abort() can interrupt both phases.
+  _trackReq(item, req, on) {
+    if (on) item._activeRes.add(req);
+    else item._activeRes.delete(req);
+  }
+
+  abort(item) {
+    const err = new Error("Aborted by user");
+    err.name = "AbortError";
+    err.aborted = true;
+    for (const res of item._activeRes) {
+      try {
+        // ChildProcess (ffmpeg remux) has kill(), not destroy().
+        if (typeof res.kill === "function") res.kill();
+        else res.destroy(err);
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+   pause(id) {
+     const item = this.items.get(id);
+     if (!item || (item.status !== "running" && item.status !== "scheduled" && item.status !== "queued")) return;
+     item.status = "paused";
+     this.abort(item);
+     this.emit(item);
+   }
+
+   resume(id) {
+     const item = this.items.get(id);
+     if (!item) return;
+     if (item.status === "paused" || item.status === "error" || item.status === "scheduled") {
+       item.status = "queued";
+       item.error = "";
+       item.speed = 0;
+       this.emit(item);
+       this.pump();
+       // A scheduled-stop item that was paused can lose its sweep timer (the
+       // sweep ignores paused items); re-arm so the stop is still enforced.
+       if (item.scheduledStart || item.scheduledStop) this.checkScheduled();
+     }
+   }
+
+   // Re-queue the most recent finished download (active list or history), using
+   // its saved URL/title/referer. Handles interrupted/failed links without the
+   // extension. Returns the new id or null when there's nothing to resume.
+   async resumeLast() {
+     const candidates = [];
+     for (const it of this.items.values()) {
+       if (["done", "error", "cancelled"].includes(it.status)) candidates.push(it);
+     }
+      candidates.push(...this.history);
+      if (!candidates.length) return null;
+      const time = (c) => c.timestamp || (parseInt(String(c.id).split("-")[2], 10) || 0);
+      const last = candidates.reduce((a, b) => (time(b) > time(a) ? b : a));
+      // force:true so resuming a finished download re-downloads it rather than
+      // creating a "duplicate" entry.
+      return this.enqueue({ url: last.url, title: last.title, referer: last.referer || "", force: true });
+    }
+
+   cancel(id) {
+     const item = this.items.get(id);
+     if (!item) return;
+     if (item.status === "running") {
+       item.status = "cancelled";
+       this.abort(item);
+    } else if (item.status === "queued" || item.status === "paused") {
+      item.status = "cancelled";
+    }
+      fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
+    if (item.finalPath) fsp.rm(item.finalPath, { force: true }).catch(() => {});
+    this.emit(item);
+    this._maybeFinalize(item);
+  }
+
+   remove(id) {
+     const item = this.items.get(id);
+     if (!item) return;
+     if (["done", "error", "cancelled"].includes(item.status)) {
+       this._toHistory(item);
+     }
+   }
+ }
+
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, pickHlsVariant };

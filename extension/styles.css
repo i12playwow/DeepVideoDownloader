@@ -1,0 +1,359 @@
+/* Deep Grab toolbar — matches the desktop app's dark theme. */
+
+#dv-toolbar-host {
+  all: initial;
+}
+
+#dv-toolbar {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 2147483646;
+  width: 300px;
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
+  font-family: "Segoe UI", system-ui, -apple-system, Arial, sans-serif;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #e2e8f0;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+#dv-toolbar * {
+  box-sizing: border-box;
+}
+
+.dv-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+  cursor: move;
+  user-select: none;
+}
+
+.dv-logo {
+  font-weight: 700;
+  color: #38bdf8;
+  letter-spacing: 0.3px;
+  background: #2ecc71;
+  box-shadow: 0 0 6px #2ecc71;
+}
+#dv-toolbar .dv-status {
+  font-size: 11px;
+  color: #9a9aa3;
+}
+#dv-toolbar .dv-collapse {
+  cursor: pointer;
+  color: #9a9aa3;
+  padding: 0 4px;
+  user-select: none;
+}
+#dv-toolbar .dv-collapse:hover {
+  color: #e8e8ea;
+}
+#dv-toolbar .dv-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+#dv-toolbar .dv-count {
+  padding: 7px 12px;
+  font-size: 12px;
+  color: #9a9aa3;
+  border-bottom: 1px solid #22232a;
+}
+#dv-toolbar .dv-rules {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #22232a;
+}
+#dv-toolbar .dv-select,
+#dv-toolbar .dv-minsize {
+  background: #202127;
+  color: #e8e8ea;
+  border: 1px solid #3a3b41;
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+#dv-toolbar .dv-minsize {
+  width: 64px;
+}
+#dv-toolbar .dv-list {
+  overflow-y: auto;
+  max-height: 52vh;
+  flex: 1;
+}
+#dv-toolbar .dv-empty {
+  padding: 14px 12px;
+  color: #6b6b73;
+  font-size: 12px;
+  text-align: center;
+}
+#dv-toolbar .dv-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid #22232a;
+}
+#dv-toolbar .dv-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+#dv-toolbar .dv-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #2c2d33;
+  color: #a9a9b2;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+#dv-toolbar .dv-badge.hls {
+  color: #f1c40f;
+}
+#dv-toolbar .dv-badge.mp4 {
+  color: #3498db;
+}
+#dv-toolbar .dv-size {
+  font-size: 11px;
+  color: #9a9aa3;
+  flex-shrink: 0;
+}
+#dv-toolbar .dv-btn {
+  background: #2f6fed;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  flex-shrink: 0;
+}
+#dv-toolbar .dv-btn:hover {
+  background: #3b7bf7;
+}
+#dv-toolbar .dv-btn.dv-added {
+.dv-rules {
+  gap: 6px;
+}
+
+.dv-select {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 6px;
+  font-size: 11px;
+  color: #e2e8f0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  outline: none;
+}
+
+.dv-select:focus {
+  border-color: #38bdf8;
+}
+
+.dv-minsize {
+  width: 72px;
+  padding: 5px 6px;
+  font-size: 11px;
+  color: #e2e8f0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  outline: none;
+}
+
+.dv-minsize:focus {
+  border-color: #38bdf8;
+}
+
+.dv-minsize::placeholder {
+  color: #64748b;
+}
+
+.dv-qty-label {
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.dv-qty {
+  width: 46px;
+  padding: 5px 6px;
+  font-size: 11px;
+  color: #e2e8f0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  outline: none;
+}
+
+.dv-qty:focus {
+  border-color: #38bdf8;
+}
+
+.dv-counts {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.dv-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  font-size: 0;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+.dv-item-meta {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.dv-item-meta.dv-err {
+  color: #f87171;
+  font-weight: 600;
+}
+
+.dv-mini {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  font-size: 10px;
+  color: #e2e8f0;
+  background: #334155;
+  border: 1px solid #475569;
+  border-radius: 5px;
+  cursor: pointer;

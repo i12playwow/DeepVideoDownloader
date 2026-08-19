@@ -1,0 +1,10 @@
+node_modules/
+config.json
+ws-debug.log
+build/
+dist/
+extension.crx
+extension.pem
+*.user.js
+test-video.mp4
+* - Copy*
