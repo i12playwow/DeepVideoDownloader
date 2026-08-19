@@ -27,8 +27,9 @@
           <option value="brave">Brave</option>
           <option value="default">System default</option>
         </select>
-        <textarea id="browserUrl" class="browser-url" rows="2" placeholder="Type one or more URLs (one per line) and press Ctrl+Enter or Open"></textarea>
+        <textarea id="browserUrl" class="browser-url" rows="2" placeholder="Type URLs (one per line), paste text with links, or click Extract to pull URLs from clipboard text"></textarea>
         <div class="capture-actions">
+          <button id="extractLinks" class="btn ghost" title="Paste any text and extract all URLs from it (forum post, chat, HTML, etc.)">Extract</button>
           <button id="browserGo" class="btn">Open</button>
           <button id="openBrowser" class="btn ghost">🌐 Open browser</button>
           <button id="downloadAll" class="btn ghost" title="Directly enqueue every URL as a download">&#8681; Download all</button>

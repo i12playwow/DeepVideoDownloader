@@ -902,7 +902,6 @@ class DownloadManager {
       scheduledStop: sStop,
       lastEmit: 0,
       _lastBytes: 0,
-      _pathCreated: false, // true once finalPath was created this run (dedupe-rename guard)
       _proxy: null,
       refreshCount: 0,
       errorCategory: "",

@@ -24,7 +24,8 @@
     minSizeMB: 0,
     bestOnly: true,
     autoCloseTab: true,
-    pipelineQty: 0
+    pipelineQty: 0,
+    autoPlayCapture: false
   };
 
   let config = { ...DEFAULT_CONFIG };
@@ -393,6 +394,20 @@
     }, true);
   }
 
+  // ---------- auto-play to capture ----------
+  // Many sites only load the real video URL when the user clicks play (the
+  // page initially serves a small preview.mp4).  Sends a message to the
+  // background service worker which activates each tab one by one, signals
+  // the content script to play its videos, waits for sources to load, then
+  // moves to the next tab.
+  function autoPlayToCapture() {
+    chrome.runtime.sendMessage({ type: "autoplay-scan-start" }, (resp) => {
+      if (resp && resp.ok) toast("Auto-play scan started (" + resp.total + " tabs)");
+      else if (resp && resp.error) toast(resp.error);
+      else toast("Auto-play: desktop app offline or no tabs found");
+    });
+  }
+
   // ---------- infinite scroll ----------
   function autoScrollTick() {
     if (!state.autoScroll) return;
@@ -637,6 +652,7 @@
             <button id="dv-tab" class="dv-tbtn" title="Open links in a new tab">↗ New tab</button>
             <button id="dv-best" class="dv-tbtn" title="Show only the single best-quality MP4 and auto-download it (skips HLS playlists)">↥ Best only</button>
             <button id="dv-close" class="dv-tbtn" title="After the video is sent to the desktop app, close its streamtape/fstape tab (cascades through pre-opened tabs)">⟳ Auto-close</button>
+            <button id="dv-autoplay" class="dv-tbtn" title="Play all video elements muted to trigger real video loading (captures sources from sites that hide them behind play-click)">▶ Auto-play</button>
             <label class="dv-all" title="All keywords must match"><input type="checkbox" id="dv-all"> ALL</label>
           </div>
           <div class="dv-row dv-meta">
@@ -723,6 +739,29 @@
         config.autoCloseTab = !config.autoCloseTab;
         closeBtn.classList.toggle("dv-on", config.autoCloseTab);
         saveConfig();
+      });
+    }
+    const autoplayBtn = document.getElementById("dv-autoplay");
+    if (autoplayBtn) {
+      autoplayBtn.classList.toggle("dv-on", config.autoPlayCapture);
+      autoplayBtn.addEventListener("click", () => {
+        config.autoPlayCapture = !config.autoPlayCapture;
+        autoplayBtn.classList.toggle("dv-on", config.autoPlayCapture);
+        saveConfig();
+        if (config.autoPlayCapture) autoPlayToCapture();
+        else chrome.runtime.sendMessage({ type: "autoplay-scan-stop" });
+      });
+      chrome.runtime.onMessage.addListener((msg) => {
+        if (msg && msg.type === "autoplay-scan-state") {
+          const running = !!msg.running;
+          if (running) {
+            autoplayBtn.textContent = "⏹ Scan " + (msg.total - msg.pending) + "/" + msg.total;
+            autoplayBtn.classList.add("dv-on");
+          } else {
+            autoplayBtn.textContent = "▶ Auto-play";
+            autoplayBtn.classList.toggle("dv-on", config.autoPlayCapture);
+          }
+        }
       });
     }
     const runBtn = document.getElementById("dv-run");
@@ -854,6 +893,10 @@
     if (config.bestOnly) {
       bestBtn.classList.add("dv-on");
       reevaluateBest();
+    }
+    if (config.autoPlayCapture) {
+      if (autoplayBtn) autoplayBtn.classList.add("dv-on");
+      setTimeout(autoPlayToCapture, 1500);
     }
     if (config.deepSearch) {
       search.value = config.deepSearch;
@@ -1027,7 +1070,8 @@
         minSizeMB: config.minSizeMB,
         bestOnly: config.bestOnly,
         autoCloseTab: config.autoCloseTab,
-        pipelineQty: config.pipelineQty
+        pipelineQty: config.pipelineQty,
+        autoPlayCapture: config.autoPlayCapture
       }
     }).catch(() => {});
   }
@@ -1095,8 +1139,24 @@
       sendResponse({ ok: true, count: found.size });
       return false;
     }
+    if (msg && msg.type === "dv-autoplay-capture") {
+      // background tells us to play all <video> elements on this page
+      const videos = document.querySelectorAll("video");
+      let triggered = 0;
+      videos.forEach((v) => {
+        const src = v.currentSrc || v.getAttribute("src") || "";
+        if (!src || src.startsWith("blob:")) return;
+        if (v.paused && !v.ended) { v.muted = true; v.play().catch(() => {}); triggered++; }
+      });
+      scanVideoElements();
+      sendResponse({ ok: true, triggered });
+      return false;
+    }
+    if (msg && msg.type === "dv-toast") {
+      if (msg.text) toast(msg.text);
+      return false;
+    }
     if (msg && msg.type === "dv-found-updated") {
-      // background learned a new video / size from any tab — update now
       refreshFromBackground(true);
     }
     return false;

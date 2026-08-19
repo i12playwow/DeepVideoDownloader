@@ -550,8 +550,108 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       stopPipeline();
       sendResponse({ running: false, pending: 0 });
       break;
+
+    case "autoplay-scan-start":
+      if (autoPlayScanRunning) {
+        sendResponse({ ok: true, total: autoPlayScanQueue.length, running: true });
+        break;
+      }
+      startAutoPlayScan().then((r) => sendResponse(r)).catch(() => sendResponse({ ok: false, error: "Scan failed" }));
+      return true;
+
+    case "autoplay-scan-stop":
+      stopAutoPlayScan();
+      sendResponse({ ok: true });
+      break;
   }
 });
+
+// ----- auto-play scan: activate each tab, play its videos, wait, next -----
+const AUTOPLAY_TAB_DELAY = 4000; // ms to wait on each tab for videos to load
+let autoPlayScanRunning = false;
+let autoPlayScanQueue = [];
+let autoPlayScanTabId = null;
+let autoPlayScanTimer = null;
+let autoPlayScanTotal = 0;
+
+function broadcastAutoPlayScanState() {
+  chrome.runtime.sendMessage({
+    type: "autoplay-scan-state",
+    running: autoPlayScanRunning,
+    pending: autoPlayScanQueue.length,
+    total: autoPlayScanTotal
+  }).catch(() => {});
+}
+
+async function startAutoPlayScan() {
+  if (autoPlayScanRunning) return { ok: true, total: autoPlayScanQueue.length, running: true };
+  const tabs = await chrome.tabs.query({});
+  // exclude chrome:// / edge:// internal pages and already-captured streamtape tabs
+  const eligible = tabs.filter((t) => t.url && !/^chrome?:\/\//i.test(t.url) && t.id != null);
+  if (!eligible.length) return { ok: false, error: "No scannable tabs found" };
+  autoPlayScanRunning = true;
+  autoPlayScanQueue = eligible.map((t) => t.id);
+  autoPlayScanTotal = autoPlayScanQueue.length;
+  broadcastAutoPlayScanState();
+  processNextAutoPlayTab();
+  return { ok: true, total: autoPlayScanTotal };
+}
+
+function processNextAutoPlayTab() {
+  if (!autoPlayScanRunning || !autoPlayScanQueue.length) {
+    autoPlayScanRunning = false;
+    autoPlayScanTabId = null;
+    autoPlayScanTotal = 0;
+    broadcastAutoPlayScanState();
+    toastAll("Auto-play scan complete");
+    return;
+  }
+  const tabId = autoPlayScanQueue.shift();
+  autoPlayScanTabId = tabId;
+  broadcastAutoPlayScanState();
+  chrome.tabs.get(tabId).then((tab) => {
+    if (!tab) { processNextAutoPlayTab(); return; }
+    // activate the tab so content scripts run
+    if (tab.windowId != null) chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    chrome.tabs.update(tabId, { active: true }).then(() => {
+      // tell content.js to play all <video> elements
+      chrome.tabs.sendMessage(tabId, { type: "dv-autoplay-capture" }, (resp) => {
+        // wait for videos to load their real sources, then check & close
+        autoPlayScanTimer = setTimeout(() => {
+          scanVideoElementsInTab(tabId);
+          const captured = found.some((x) => x.tabId === tabId);
+          if (captured) closeAutoPlayTab(tabId);
+          processNextAutoPlayTab();
+        }, AUTOPLAY_TAB_DELAY);
+      });
+      // if content script not ready, skip after timeout
+    }).catch(() => processNextAutoPlayTab());
+  }).catch(() => processNextAutoPlayTab());
+}
+
+function scanVideoElementsInTab(tabId) {
+  chrome.tabs.sendMessage(tabId, { type: "dv-rescan" }).catch(() => {});
+}
+
+function closeAutoPlayTab(tabId) {
+  chrome.storage.local.get({ dv: {} }).then((data) => {
+    if ((data.dv || {}).autoCloseTab === false) return;
+    chrome.tabs.remove(tabId).catch(() => {});
+  }).catch(() => {});
+}
+
+function stopAutoPlayScan() {
+  autoPlayScanRunning = false;
+  if (autoPlayScanTimer) { clearTimeout(autoPlayScanTimer); autoPlayScanTimer = null; }
+  autoPlayScanQueue = [];
+  autoPlayScanTabId = null;
+  autoPlayScanTotal = 0;
+  broadcastAutoPlayScanState();
+}
+
+function toastAll(msg) {
+  chrome.runtime.sendMessage({ type: "dv-toast", text: msg }).catch(() => {});
+}
 
 chrome.runtime.onInstalled.addListener(() => { connect(); });
 chrome.runtime.onStartup.addListener(() => { connect(); });

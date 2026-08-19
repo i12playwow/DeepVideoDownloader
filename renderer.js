@@ -399,6 +399,25 @@ const browserGo = () => {
 };
 $("browserGo").addEventListener("click", browserGo);
 $("browserUrl").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) browserGo(); });
+// Extract links from any text — opens the browser with a built-in extractor overlay
+$("extractLinks").addEventListener("click", () => {
+  const text = $("browserUrl").value.trim();
+  if (!text) { window.api.openBrowser(); return; }
+  const target = $("browserTarget").value;
+  if (target === "builtin") {
+    // open browser first, then send the text for extraction
+    window.api.openBrowser().then(() => {
+      // small delay to let the browser window load, then send text
+      setTimeout(() => {
+        const urls = text.split(/[\n,;\s]+/).map(s => s.trim()).filter(Boolean)
+          .map(u => (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u) ? u : "https://" + u));
+        if (urls.length) window.api.openBrowser(urls);
+      }, 500);
+    });
+  } else {
+    browserGo();
+  }
+});
 $("downloadAll").addEventListener("click", async () => {
   const urls = parseUrls();
   if (!urls.length) return;

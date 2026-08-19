@@ -15,12 +15,32 @@
     #tabbar { display: flex; align-items: center; gap: 4px; padding: 4px 8px; background: #16233b; overflow-x: auto; flex: 0 0 auto; border-bottom: 1px solid #1e293b; }
     .tab { display: inline-flex; align-items: center; gap: 6px; max-width: 180px; padding: 4px 8px; border-radius: 6px 6px 0 0; background: #1e293b; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; }
     .tab.active { background: #334155; }
+    .tab.pending { opacity: .6; }
     .tab .t { overflow: hidden; text-overflow: ellipsis; }
     .tab .x { padding: 0 2px; opacity: .7; }
     .tab .x:hover { opacity: 1; }
+    .tab .badge { background: #f59e0b; color: #000; border-radius: 8px; padding: 0 5px; font-size: 10px; font-weight: bold; }
     .tab-new { background: transparent; color: #94a3b8; padding: 2px 8px; font-size: 16px; }
+    .tab-actions { display: flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
+    .tab-actions button { font-size: 11px; padding: 3px 8px; }
+    .tab-actions .load-all { background: #059669; }
+    .tab-actions .load-all:hover { background: #10b981; }
+    .tab-actions .load-sel { background: #2563eb; }
+    .tab-actions .load-sel:hover { background: #3b82f6; }
     #content { flex: 1 1 0%; min-height: 0; position: relative; }
     webview { width: 100%; height: 100%; border: none; position: absolute; top: 0; left: 0; }
+
+    /* Extract overlay */
+    #extractOverlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.6); z-index: 100; align-items: center; justify-content: center; }
+    #extractOverlay.open { display: flex; }
+    #extractPanel { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; width: 600px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; gap: 10px; }
+    #extractPanel h3 { font-size: 15px; color: #94a3b8; }
+    #extractPanel textarea { width: 100%; height: 200px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 8px; font-size: 13px; resize: vertical; font-family: monospace; }
+    #extractList { max-height: 150px; overflow-y: auto; font-size: 12px; }
+    #extractList label { display: block; padding: 3px 0; cursor: pointer; }
+    #extractList label:hover { color: #60a5fa; }
+    #extractPanel .actions { display: flex; gap: 8px; justify-content: flex-end; }
+    #extractPanel .actions .confirm { background: #059669; }
   </style>
 </head>
 <body>
@@ -30,11 +50,30 @@
     <button id="reload" title="Reload">&#8635;</button>
     <input id="url" type="text" placeholder="Enter a URL and press Enter">
     <button id="go">Go</button>
+    <button id="extractBtn" title="Paste text and extract all URLs from it">Extract</button>
   </div>
   <div id="tabbar">
     <button class="tab-new" id="newtab" title="New tab">+</button>
+    <div class="tab-actions">
+      <button class="load-all" id="loadAll" title="Load all pending tabs at once">Load all</button>
+      <button class="load-sel" id="loadSel" title="Load selected pending tabs" disabled>Load sel</button>
+    </div>
   </div>
   <div id="content"></div>
+
+  <!-- Extract links overlay -->
+  <div id="extractOverlay">
+    <div id="extractPanel">
+      <h3>Paste text below — all URLs will be extracted</h3>
+      <textarea id="extractInput" placeholder="Paste any text here — forum post, chat log, webpage HTML, a list of links...&#10;&#10;The extractor finds all http/https URLs automatically."></textarea>
+      <div id="extractList"></div>
+      <div class="actions">
+        <button id="extractCancel">Cancel</button>
+        <button class="confirm" id="extractConfirm">Open as tabs</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const urlInput = document.getElementById("url");
     const backBtn = document.getElementById("back");
@@ -47,9 +86,7 @@
     let tabs = [];
     let activeId = null;
 
-    // Electron webviews (OOPIF) don't reliably follow % sizing inside flex
-    // containers and can sit at the 300x150 default; force explicit pixel size
-    // on every webview whenever the content area changes size or a tab is shown.
+    // ===== Deferred loading: webviews created but src not set until loadTab() =====
     function sizeWebviews() {
       const w = content.clientWidth;
       const h = content.clientHeight;
@@ -66,14 +103,18 @@
       activeId = id;
       tabs.forEach(t => {
         const on = t.id === id;
-        // visibility (not display:none) keeps inactive tabs in the layout so
-        // their OOPIF guests keep their size; display:none collapses them.
         t.wv.style.visibility = on ? "visible" : "hidden";
         t.btn.classList.toggle("active", on);
       });
       sizeWebviews();
       const a = activeTab();
-      if (a) { urlInput.value = a.url; refreshNav(); }
+      if (a) {
+        urlInput.value = a.url;
+        refreshNav();
+        // auto-load on first click
+        if (!a.loaded && a.url) loadTab(a.id);
+      }
+      updateLoadButtons();
     }
 
     function refreshNav() {
@@ -86,37 +127,61 @@
     }
 
     function bind(wv, btn, t) {
-      wv.addEventListener("did-navigate", (e) => { t.url = e.url; btn.querySelector(".t").textContent = host(e.url); if (t.id === activeId) urlInput.value = e.url; refreshNav(); });
+      wv.addEventListener("did-navigate", (e) => { t.url = e.url; t.loaded = true; btn.classList.remove("pending"); const b = btn.querySelector(".badge"); if (b) b.remove(); btn.querySelector(".t").textContent = host(e.url); if (t.id === activeId) urlInput.value = e.url; refreshNav(); });
       wv.addEventListener("did-navigate-in-page", (e) => { t.url = e.url; if (t.id === activeId) urlInput.value = e.url; });
       wv.addEventListener("did-start-loading", () => { if (t.id === activeId) { try { backBtn.disabled = !wv.canGoBack(); } catch (e) {} } });
       wv.addEventListener("did-stop-loading", () => { t.url = wv.getURL(); if (t.id === activeId) refreshNav(); });
     }
 
-    function addTab(url) {
+    function addTab(url, opts) {
+      opts = opts || {};
+      const deferred = opts.defer && url;
       const id = "t" + (++seq);
       const wv = document.createElement("webview");
       wv.setAttribute("partition", "persist:deepgrab-browser");
       wv.setAttribute("allowpopups", "");
-      // A webview created while display:none initializes its OOPIF guest at the
-      // 300x150 default and never resizes with the element (only the top ~1/5 of
-      // the page shows). Attach it laid out (visible) with explicit px so the
-      // guest viewport matches #content from the start.
       wv.style.width = content.clientWidth + "px";
       wv.style.height = content.clientHeight + "px";
-      wv.setAttribute("src", url || "https://www.google.com");
+      // deferred: create the webview but don't set src yet
+      if (!deferred) {
+        wv.setAttribute("src", url || "https://www.google.com");
+      }
       content.appendChild(wv);
 
       const btn = document.createElement("div");
-      btn.className = "tab";
-      btn.innerHTML = '<span class="t">' + host(url || "https://www.google.com") + '</span><span class="x" title="Close">&#10005;</span>';
+      btn.className = "tab" + (deferred ? " pending" : "");
+      const badge = deferred ? '<span class="badge">pending</span>' : '';
+      btn.innerHTML = '<span class="t">' + host(url || "https://www.google.com") + '</span>' + badge + '<span class="x" title="Close">&#10005;</span>';
       btn.addEventListener("click", (e) => { if (!e.target.classList.contains("x")) activate(id); });
       btn.querySelector(".x").addEventListener("click", () => closeTab(id));
-      tabbar.appendChild(btn);
+      // checkbox for batch selection
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.className = "tab-cb";
+      cb.title = "Select for batch load";
+      cb.style.cssText = "margin-left:4px;flex-shrink:0;";
+      if (deferred) cb.checked = true;
+      cb.addEventListener("change", updateLoadButtons);
+      btn.insertBefore(cb, btn.querySelector(".x"));
+      tabbar.insertBefore(btn, tabbar.querySelector(".tab-actions"));
 
-      const t = { id, wv, btn, url: url || "https://www.google.com" };
+      const t = { id, wv, btn, url: url || "", loaded: !deferred, cb };
       tabs.push(t);
-      bind(wv, btn, t);
+      if (!deferred) bind(wv, btn, t);
       activate(id);
+      updateTabCount();
+      return t;
+    }
+
+    function loadTab(id) {
+      const t = tabs.find(x => x.id === id);
+      if (!t || t.loaded) return;
+      t.wv.setAttribute("src", t.url);
+      bind(t.wv, t.btn, t);
+      t.loaded = true;
+      t.btn.classList.remove("pending");
+      const b = t.btn.querySelector(".badge");
+      if (b) b.remove();
     }
 
     function closeTab(id) {
@@ -130,6 +195,24 @@
         if (tabs.length) activate(tabs[Math.max(0, idx - 1)].id);
         else addTab("https://www.google.com");
       }
+      updateTabCount();
+      updateLoadButtons();
+    }
+
+    function updateTabCount() {
+      const pending = tabs.filter(t => !t.loaded).length;
+      const total = tabs.length;
+      const logo = document.querySelector(".dv-logo") || tabbar.querySelector(".tab-count");
+      // show pending count in title
+      document.title = pending ? "Deep Grab Browser (" + pending + " pending)" : "Deep Grab Browser";
+    }
+
+    function updateLoadButtons() {
+      const pending = tabs.filter(t => !t.loaded);
+      const selected = pending.filter(t => t.cb && t.cb.checked);
+      document.getElementById("loadAll").disabled = !pending.length;
+      document.getElementById("loadSel").disabled = !selected.length;
+      document.getElementById("loadSel").textContent = selected.length ? "Load sel (" + selected.length + ")" : "Load sel";
     }
 
     function go() {
@@ -137,33 +220,95 @@
       if (!u) return;
       if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) u = "https://" + u;
       const a = activeTab();
-      if (a) a.wv.loadURL(u);
+      if (a && a.loaded) a.wv.loadURL(u);
+      else if (a) { a.url = u; a.btn.querySelector(".t").textContent = host(u); loadTab(a.id); }
     }
 
     goBtn.addEventListener("click", go);
     urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
-    reloadBtn.addEventListener("click", () => { const a = activeTab(); if (a) a.wv.reload(); });
-    backBtn.addEventListener("click", () => { const a = activeTab(); if (a) a.wv.goBack(); });
-    fwdBtn.addEventListener("click", () => { const a = activeTab(); if (a) a.wv.goForward(); });
+    reloadBtn.addEventListener("click", () => { const a = activeTab(); if (a && a.loaded) a.wv.reload(); });
+    backBtn.addEventListener("click", () => { const a = activeTab(); if (a && a.loaded) a.wv.goBack(); });
+    fwdBtn.addEventListener("click", () => { const a = activeTab(); if (a && a.loaded) a.wv.goForward(); });
     document.getElementById("newtab").addEventListener("click", () => addTab("https://www.google.com"));
 
+    // Batch load buttons
+    document.getElementById("loadAll").addEventListener("click", () => {
+      tabs.filter(t => !t.loaded).forEach(t => loadTab(t.id));
+      updateLoadButtons();
+    });
+    document.getElementById("loadSel").addEventListener("click", () => {
+      tabs.filter(t => !t.loaded && t.cb && t.cb.checked).forEach(t => loadTab(t.id));
+      updateLoadButtons();
+    });
+
+    // ===== Extract links from text =====
+    const URL_RE = /https?:\/\/[^\s<>"')\]]+/gi;
+    function extractUrls(text) {
+      const found = [];
+      const seen = new Set();
+      let m;
+      while ((m = URL_RE.exec(text))) {
+        let u = m[0].replace(/[.,;:!?)}\]]+$/, ""); // strip trailing punctuation
+        if (!seen.has(u)) { seen.add(u); found.push(u); }
+      }
+      return found;
+    }
+
+    const overlay = document.getElementById("extractOverlay");
+    const extractInput = document.getElementById("extractInput");
+    const extractList = document.getElementById("extractList");
+
+    document.getElementById("extractBtn").addEventListener("click", () => {
+      extractInput.value = "";
+      extractList.innerHTML = "";
+      overlay.classList.add("open");
+      setTimeout(() => extractInput.focus(), 100);
+    });
+    document.getElementById("extractCancel").addEventListener("click", () => overlay.classList.remove("open"));
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.classList.remove("open"); });
+
+    extractInput.addEventListener("input", () => {
+      const urls = extractUrls(extractInput.value);
+      extractList.innerHTML = "";
+      if (!urls.length) { extractList.innerHTML = '<span style="color:#64748b">No URLs found</span>'; return; }
+      urls.forEach((u, i) => {
+        const label = document.createElement("label");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = true;
+        cb.dataset.url = u;
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(" " + host(u) + " — " + u.substring(0, 100)));
+        extractList.appendChild(label);
+      });
+    });
+
+    document.getElementById("extractConfirm").addEventListener("click", () => {
+      const urls = Array.from(extractList.querySelectorAll("input:checked")).map(cb => cb.dataset.url).filter(Boolean);
+      overlay.classList.remove("open");
+      if (!urls.length) return;
+      // add all as deferred tabs
+      urls.forEach(u => addTab(u, { defer: true }));
+    });
+
+    // ===== Initial tabs from main process =====
     window.api.getInitialTabs().then((urls) => {
       const list = (urls || []).filter(Boolean);
-      if (list.length) list.forEach((u) => addTab(u));
+      if (list.length) list.forEach((u) => addTab(u, { defer: true }));
       else addTab("https://www.google.com");
     });
 
-    // Auto-close the tab whose page produced a finished download (and go to next).
+    // Auto-close the tab whose page produced a finished download
     window.api.onCloseTabForUrl((url) => {
       const idx = tabs.findIndex((t) => t.url === url);
       if (idx !== -1) closeTab(tabs[idx].id);
     });
 
-    // The main window already had a browser open and wants more URLs opened here.
+    // The main window wants more URLs opened here
     const addTabs = (urls) => {
       const list = (urls || []).filter(Boolean);
       if (!list.length) return;
-      list.forEach((u) => addTab(u));
+      list.forEach((u) => addTab(u, { defer: true }));
     };
     window.api.onAddTabs(addTabs);
     window.api.onOpenTabs(addTabs);

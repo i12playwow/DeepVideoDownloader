@@ -74,6 +74,9 @@ async function probeUrl(url) {
       retries: 0,
       maxRetries: 1
     });
+    // Drain the response body to release the socket immediately.
+    // Even for HEAD requests, some servers send a body or hold the connection.
+    if (result.res) result.res.resume();
     const cr = /bytes\s+\d+-\d+\/(\d+)/i.exec(result.headers["content-range"] || "");
     const size = cr ? parseInt(cr[1], 10) : parseInt(result.headers["content-length"] || "0", 10);
     const mime = (result.headers["content-type"] || "").split(";")[0].trim();
