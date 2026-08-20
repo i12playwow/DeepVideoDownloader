@@ -11,6 +11,12 @@ for (const f of ["main.js", "downloader.js", "proxy.js", "preload.js", "renderer
   const p = path.join(__dirname, f);
   if (fs.existsSync(p)) files.push(p);
 }
+const libDir = path.join(__dirname, "lib");
+if (fs.existsSync(libDir)) {
+  for (const f of fs.readdirSync(libDir)) {
+    if (f.endsWith(".js")) files.push(path.join(libDir, f));
+  }
+}
 for (const d of ["extension", "extension-firefox"]) {
   const dir = path.join(__dirname, d);
   if (!fs.existsSync(dir)) continue;
