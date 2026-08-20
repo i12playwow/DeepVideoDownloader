@@ -362,6 +362,10 @@ class DownloadManager {
     const isDup = !force && this.config.skipDuplicates !== false && this.isDownloaded(url);
     if (isDup && markDuplicate === false) return null;
     const id = "dl-" + (++this._id) + "-" + Date.now();
+    // Schedule times arrive as ISO strings / Date objects / ms numbers
+    // (renderer, WS, tests). Normalize to numeric ms so the pump() and
+    // checkScheduled() `Date.now() >= item.scheduledX` comparisons work.
+    const normTs = (v) => (v == null || v === "" ? null : new Date(v).getTime());
     // Fall back to the streamtape/fstape URL slug when the sender gave no title.
     const effectiveTitle = title || titleFromReferer(referer);
     const hls = isHlsUrl(url) || (resolvedUrl && isHlsUrl(resolvedUrl));
@@ -384,8 +388,8 @@ class DownloadManager {
       error: "",
       tempDir: "",
       finalPath: "",
-      scheduledStart: scheduledStart || null,
-      scheduledStop: scheduledStop || null,
+      scheduledStart: normTs(scheduledStart),
+      scheduledStop: normTs(scheduledStop),
       lastEmit: 0,
       _lastBytes: 0,
       _pathCreated: false, // true once finalPath was created this run (dedupe-rename guard)
