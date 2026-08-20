@@ -1,0 +1,401 @@
+/* Deep Grab toolbar — matches the desktop app's dark theme. */
+
+#dv-toolbar-host {
+  all: initial;
+}
+
+#dv-toolbar {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 2147483646;
+  width: 300px;
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
+  font-family: "Segoe UI", system-ui, -apple-system, Arial, sans-serif;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #e2e8f0;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+#dv-toolbar * {
+  box-sizing: border-box;
+}
+
+.dv-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+  cursor: move;
+  user-select: none;
+}
+
+.dv-logo {
+  font-weight: 700;
+  color: #38bdf8;
+  letter-spacing: 0.3px;
+}
+
+.dv-minbtn {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.dv-minbtn:hover {
+  color: #e2e8f0;
+  background: #334155;
+}
+
+.dv-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.dv-body.dv-hidden {
+  display: none;
+}
+
+.dv-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#dv-search {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: #e2e8f0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  outline: none;
+}
+
+#dv-search:focus {
+  border-color: #38bdf8;
+}
+
+#dv-clear {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+#dv-clear:hover {
+  color: #f87171;
+  background: #1e293b;
+}
+
+.dv-toggles {
+  flex-wrap: wrap;
+}
+
+.dv-tbtn {
+  padding: 5px 9px;
+  font-size: 11px;
+  color: #94a3b8;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.dv-tbtn:hover {
+  color: #e2e8f0;
+  border-color: #475569;
+}
+
+.dv-tbtn.dv-on {
+  color: #0f172a;
+  background: #38bdf8;
+  border-color: #38bdf8;
+  font-weight: 600;
+}
+
+.dv-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #94a3b8;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.dv-meta {
+  justify-content: space-between;
+}
+
+.dv-rules {
+  gap: 6px;
+}
+
+.dv-select {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 6px;
+  font-size: 11px;
+  color: #e2e8f0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  outline: none;
+}
+
+.dv-select:focus {
+  border-color: #38bdf8;
+}
+
+.dv-minsize {
+  width: 72px;
+  padding: 5px 6px;
+  font-size: 11px;
+  color: #e2e8f0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  outline: none;
+}
+
+.dv-minsize:focus {
+  border-color: #38bdf8;
+}
+
+.dv-minsize::placeholder {
+  color: #64748b;
+}
+
+.dv-qty-label {
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.dv-qty {
+  width: 46px;
+  padding: 5px 6px;
+  font-size: 11px;
+  color: #e2e8f0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  outline: none;
+}
+
+.dv-qty:focus {
+  border-color: #38bdf8;
+}
+
+.dv-counts {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.dv-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  font-size: 0;
+  cursor: default;
+}
+
+.dv-dot.dv-ok {
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.7);
+}
+
+.dv-dot.dv-off {
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+}
+
+.dv-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #e2e8f0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.dv-btn:hover {
+  border-color: #38bdf8;
+  color: #38bdf8;
+}
+
+.dv-found-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 2px 0;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 600;
+  border-top: 1px solid #1e293b;
+}
+
+.dv-batch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 2px 0;
+}
+
+#dv-selall,
+#dv-found input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: #38bdf8;
+  cursor: pointer;
+}
+
+#dv-addsel:disabled,
+#dv-removesel:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#dv-found {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dv-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  background: #1e293b;
+  border: 1px solid #1e293b;
+  border-radius: 6px;
+}
+
+.dv-item:hover {
+  border-color: #334155;
+}
+
+.dv-item-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dv-kind {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  letter-spacing: 0.4px;
+}
+
+.dv-kind.mp4 {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.dv-kind.hls {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+}
+
+.dv-item-meta {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.dv-item-meta.dv-err {
+  color: #f87171;
+  font-weight: 600;
+}
+
+.dv-mini {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  font-size: 10px;
+  color: #e2e8f0;
+  background: #334155;
+  border: 1px solid #475569;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.dv-mini:hover:not(:disabled) {
+  border-color: #38bdf8;
+  color: #38bdf8;
+}
+
+.dv-mini.dv-added {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.1);
+  border-color: #22c55e;
+  cursor: default;
+}
+
+.dv-mini:disabled {
+  opacity: 0.75;
+}
+
+.dv-empty {
+  color: #64748b;
+  font-size: 11px;
+  padding: 8px 4px;
+  text-align: center;
+  font-style: italic;
+}
+
+#dv-toast {
+  all: initial;
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 2147483647;
+  padding: 8px 14px;
+  font-family: "Segoe UI", system-ui, Arial, sans-serif;
+  font-size: 12px;
+  color: #e2e8f0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}

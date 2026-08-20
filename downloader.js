@@ -632,10 +632,15 @@ class DownloadManager {
     item.tempDir = path.join(this.dir, item.id);
     await fsp.mkdir(item.tempDir, { recursive: true });
     item.finalPath = path.join(this.dir, item.fileName);
-    if (fs.existsSync(item.finalPath) && !item.received) {
+    // Dedupe-rename once per run: if a same-named file already exists, give this
+    // download a timestamped name. _pathCreated keeps the rename stable across
+    // _runOnce re-entries (refresh / norange fallback / error->resume), so the
+    // filename doesn't pick a new timestamp each retry.
+    if (!item._pathCreated && fs.existsSync(item.finalPath) && !item.received) {
       const now = new Date();
       item.fileName = sanitizeName(item.title) + (item.label ? "[" + sanitizeName(item.label) + "]" : "") + "_" + now.getTime() + ".mp4";
       item.finalPath = path.join(this.dir, item.fileName);
+      item._pathCreated = true;
     }
 
     const actualUrl = item._resolvedUrl || item.url;
