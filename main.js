@@ -12,6 +12,7 @@ const { execFile } = require("child_process");
 const { WebSocketServer } = require("ws");
 const { DownloadManager, requestWithRedirects } = require("./downloader");
 const { ProxyManager } = require("./proxy");
+const { DEFAULT_CONFIG, loadConfig, saveConfig, validateConfig } = require("./config");
 
 // Dev builds read/write config.json next to main.js (gitignored). Packaged
 // apps must NOT write into the read-only app.asar — use the writable userData
@@ -19,48 +20,10 @@ const { ProxyManager } = require("./proxy");
 const CONFIG_PATH = app.isPackaged
   ? path.join(app.getPath("userData"), "config.json")
   : path.join(__dirname, "config.json");
-const DEFAULT_CONFIG = {
-  port: 8765,
-  downloadDir: path.join(os.homedir(), "Downloads", "DeepGrab"),
-  downloadDir2: "",
-  downloadDir3: "",
-  minFreeMB: 500,
-  concurrency: 8,
-  segments: 4,
-  speedLimitKB: 0,
-  maxRetries: 3,
-  maxRefresh: 2,
-  hostDelayMs: 120,
-  autoProxy: true,
-  ffmpegPath: "ffmpeg",
-  theme: "dark",
-  saveHistory: true,
-  skipDuplicates: true,
-  autoCloseTab: true,
-  thumbnails: true,
-  maxHistory: 2000,
-  liveWindow: 0,
-  autoTrimAt: 500,
-  proxies: [
-    "http://127.0.0.1:7890",
-    "socks5://127.0.0.1:1080"
-  ]
-};
+// Config defaults + (de)serialization/validation live in ./config (unit-tested via `node test-config.js`).
 
-function loadConfig() {
-  try {
-    const raw = fs.readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, "");
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
-  } catch (e) {
-    return { ...DEFAULT_CONFIG };
-  }
-}
 
-function saveConfig(config) {
-  try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
-  } catch (e) { /* ignore */ }
-}
+
 
 // HEAD the URL to learn its size + content type for the extension's rules.
 async function probeUrl(url) {
@@ -83,7 +46,7 @@ async function probeUrl(url) {
   }
 }
 
-let config = loadConfig();
+let config = loadConfig(CONFIG_PATH);
 let proxyManager = new ProxyManager(config);
 let dm = new DownloadManager({ config, proxyManager, onUpdate: pushUpdate });
 let mainWindow = null;
@@ -414,8 +377,8 @@ ipcMain.handle("settings-save", (e, next) => {
   if (next && typeof next === "object") {
     for (const k of Object.keys(next)) if (allowed.has(k)) clean[k] = next[k];
   }
-  config = { ...config, ...clean };
-  saveConfig(config);
+  config = validateConfig({ ...config, ...clean });
+  saveConfig(CONFIG_PATH, config);
   proxyManager = new ProxyManager(config);
   dm.config = config;
   dm.proxyManager = proxyManager; // drop stale bad/latency proxy state

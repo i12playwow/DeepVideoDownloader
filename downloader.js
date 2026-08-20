@@ -18,6 +18,7 @@ const PART_EXT = ".part";
 const PROGRESS_INTERVAL = 300;
 const RETRY_DELAY = 1000;
 const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_HLS_CONCURRENCY = 4;
 const MAX_REFRESH = 2;
 
 const STRGV = /get_video\?id=([A-Za-z0-9]+)&expires=(\d+)&ip=([^&\s"'<>]+)&token=([^&\s"'<>]+)/i;
@@ -1467,12 +1468,28 @@ class DownloadManager {
     await fsp.mkdir(item.tempDir, { recursive: true });
     item.finalPath = path.join(this.dir, item.fileName);
 
+    const queue = [];
     for (let i = 0; i < segs.length; i++) {
-      if (item.status !== "running") this.throwAborted();
       const segPath = path.join(item.tempDir, "seg" + i + PART_EXT);
       const existing = await fsp.stat(segPath).catch(() => null);
-      if (existing && existing.size > 0) continue; // resume: skip done segments
-      await this.downloadHlsSegment(item, segs[i], segPath, baseHeaders);
+      if (existing && existing.size > 0) continue;
+      queue.push({ url: segs[i], path: segPath });
+    }
+
+    const limit = Math.max(1, Math.min(queue.length || 1, this.config.hlsConcurrency || DEFAULT_HLS_CONCURRENCY));
+    const workers = Array.from({ length: limit }, async () => {
+      while (queue.length && item.status === "running") {
+        const job = queue.shift();
+        if (!job) return;
+        await this._withConnSlot(() => this.downloadHlsSegment(item, job.url, job.path, baseHeaders));
+        if (item.status !== "running") return;
+      }
+    });
+    try {
+      await Promise.all(workers);
+    } catch (err) {
+      this.abort(item);
+      throw err;
     }
 
     if (item.status !== "running") this.throwAborted();
@@ -1694,4 +1711,4 @@ class DownloadManager {
    }
  }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, pickHlsVariant };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant };
