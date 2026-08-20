@@ -4,7 +4,7 @@ Electron desktop downloader ("Deep Video Downloader") + companion Chrome MV3 ext
 
 ## Commands
 - Run: `npm.cmd start` (never `npm` — PowerShell can't run `npm.ps1`). Do **not** use `run.bat` — it hardcodes the OneDrive copy path (launches stale code even from Desktop); `npm.cmd start` uses the current dir.
-- Package: `npm.cmd run dist` → `dist/DeepVideoDownloader Setup 1.0.0.exe` + `dist/win-unpacked/`.
+- Package: `npm.cmd run dist` → `dist/DeepVideoDownloader Setup 1.1.0.exe` + `dist/win-unpacked/`.
 - No lint/test/typecheck. Syntax check all JS: `npm.cmd run check` (runs `node --check` on root + extension + test files). Individual file: `node -c <file>.js`.
 
 ## Architecture
