@@ -66,8 +66,8 @@ Each `resolve*()` returns `{resolvedUrl, proxy, agent, origin?}` and re-resolves
 - Install in Tampermonkey; edits don't hot-reload — re-import.
 
 ## Extension files
-- `extension/` — self-contained MV3. Edit → **must reload at `chrome://extensions`**. `webRequest` + `*://*/*` perms, `all_frames:true`. Also loaded into built-in browser session.
-- `extension-firefox/` — same JS copied verbatim, Firefox manifest (event page + gecko id). Edit → **must reload at `about:debugging#/runtime/this-firefox`**. **Missing vs Chrome**: no popup UI (popup.html/popup.js/icons/).
+- `extension/` — self-contained MV3, **tracked in git** (`manifest.json`, `background.js`, `content.js`, `styles.css`; `- Copy*`/`.user.js` files stay ignored). Edit → **must reload at `chrome://extensions`**. `webRequest` + `*://*/*` perms, `all_frames:true`. Also loaded into built-in browser session. No popup UI — only `action.default_title`.
+- `extension-firefox/` — **untracked** (gitignored) verbatim copy of the same JS with a Firefox manifest (event page `scripts` array, `browser_specific_settings.gecko` id, extra `ws://*`/`wss://*` host perms). Edit → **must reload at `about:debugging#/runtime/this-firefox`**. Regenerable from `extension/`.
 - `content.js` and `background.js` must stay identical between `extension/` and `extension-firefox/` for `AD_DOMAINS` and capture logic.
 
 ## Verification (no test suite)
@@ -86,6 +86,7 @@ Each `resolve*()` returns `{resolvedUrl, proxy, agent, origin?}` and re-resolves
 - Item `_activeRes` is a Set of live responses + in-flight requests; `abort()` interrupts request phase too. `abort()` errors carry `name:"AbortError"` + `aborted:true`.
 - `pump()`'s `.catch` **must keep ignoring `err.aborted`** — a `pause()` immediately followed by `resume()` re-queues before the stale AbortError lands; without the guard the resumed item wrongly flips to error.
 - `cancel()` **must remove the empty `finalPath`** it created mid-flight, not just `tempDir`.
+- `_pathCreated` is the once-per-run dedupe-rename guard in `_runOnce`: set it `true` whenever `finalPath` is timestamp-renamed so refresh/norange/error→resume re-entries don't pick a new name each retry.
 - **Orphaned `dl-*` temp dirs**: `_sweepOrphanTempDirs()` runs at `DownloadManager` construction, removes every `dl-<n>-<ts>` dir not in active map.
 - Speed limit is manager-wide, not per download.
 - `new URL(p).origin` returns `"null"` for non-http(s) schemes — `parseProxyUrl` must use `u.href`.

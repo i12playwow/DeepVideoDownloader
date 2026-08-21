@@ -2,10 +2,10 @@ node_modules/
 config.json
 ws-debug.log
 
-# Desktop-copy artifacts — canonical copy lives on the Desktop; keep this repo a core-JS-only subset
+# Desktop-copy artifacts — extension/ is tracked; keep the Firefox copy, packed
+# artifacts, and signing key ignored
 build/
 dist/
-extension/
 extension-firefox/
 run.bat
 extension.crx
