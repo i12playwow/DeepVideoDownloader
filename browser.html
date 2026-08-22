@@ -50,13 +50,19 @@
     // Electron webviews (OOPIF) don't reliably follow % sizing inside flex
     // containers and can sit at the 300x150 default; force explicit pixel size
     // on every webview whenever the content area changes size or a tab is shown.
+    // Measure via getBoundingClientRect (covers borders) and defer to the next
+    // frame so layout has settled — otherwise a too-early measurement leaves the
+    // webview a fraction of the real height (only the top slice visible).
     function sizeWebviews() {
-      const w = content.clientWidth;
-      const h = content.clientHeight;
+      const r = content.getBoundingClientRect();
+      const w = Math.floor(r.width);
+      const h = Math.floor(r.height);
+      if (!w || !h) return;
       tabs.forEach((t) => { t.wv.style.width = w + "px"; t.wv.style.height = h + "px"; });
     }
-    new ResizeObserver(sizeWebviews).observe(content);
-    window.addEventListener("resize", sizeWebviews);
+    const scheduleSize = () => requestAnimationFrame(sizeWebviews);
+    new ResizeObserver(scheduleSize).observe(content);
+    window.addEventListener("resize", scheduleSize);
 
     const host = (u) => { try { return new URL(u).hostname; } catch (e) { return u; } };
 
@@ -69,7 +75,7 @@
         t.wv.style.display = on ? "block" : "none";
         t.btn.classList.toggle("active", on);
       });
-      sizeWebviews();
+      scheduleSize();
       const a = activeTab();
       if (a) { urlInput.value = a.url; refreshNav(); }
     }
@@ -88,6 +94,7 @@
       wv.addEventListener("did-navigate-in-page", (e) => { t.url = e.url; if (t.id === activeId) urlInput.value = e.url; });
       wv.addEventListener("did-start-loading", () => { if (t.id === activeId) { try { backBtn.disabled = !wv.canGoBack(); } catch (e) {} } });
       wv.addEventListener("did-stop-loading", () => { t.url = wv.getURL(); if (t.id === activeId) refreshNav(); });
+      wv.addEventListener("dom-ready", sizeWebviews);
     }
 
     function addTab(url) {
@@ -110,6 +117,7 @@
       tabs.push(t);
       bind(wv, btn, t);
       activate(id);
+      requestAnimationFrame(sizeWebviews);
     }
 
     function closeTab(id) {

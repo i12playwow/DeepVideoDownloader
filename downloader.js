@@ -48,10 +48,11 @@ function refreshSourceUrl(item) {
 }
 
 class DownloadManager {
-  constructor({ config, proxyManager, onUpdate }) {
+  constructor({ config, proxyManager, onUpdate, cookieProvider }) {
     this.config = config;
     this.proxyManager = proxyManager;
     this.onUpdate = onUpdate || (() => {});
+    this.cookieProvider = cookieProvider || null;
     this.items = new Map();
     this.active = 0;
     this._id = 0;
@@ -68,6 +69,27 @@ class DownloadManager {
     this._loadHistory();
     this._loadDownloaded();
     this._sweepOrphanTempDirs();
+  }
+
+  // Pick the cookie header for a specific request URL. Prefer a live lookup from
+  // the injected cookieProvider (captures per-host session cookies, e.g. a
+  // separate Cloudflare CDN serving HLS segments), falling back to the static
+  // item.cookieHeader captured at enqueue time (or none).
+  async _cookieFor(item, url) {
+    if (this.cookieProvider) {
+      try {
+        const dyn = await this.cookieProvider(url);
+        if (dyn) return dyn;
+      } catch (e) { /* fall back to static */ }
+    }
+    return item.cookieHeader || "";
+  }
+
+  // Build request headers for a URL: base headers (Referer) plus the cookie
+  // header resolved for that exact host. `extra` carries Range/etc.
+  async _reqHeaders(item, baseHeaders, url, extra = {}) {
+    const cookie = await this._cookieFor(item, url);
+    return { ...baseHeaders, ...(cookie ? { Cookie: cookie } : {}), ...extra };
   }
 
   list() {
@@ -355,7 +377,7 @@ class DownloadManager {
     grant();
   }
 
-  async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", force = false, markDuplicate = true }) {
+  async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", cookieHeader = null, force = false, markDuplicate = true }) {
     // Duplicate handling: an already-downloaded URL becomes a "duplicate" list
     // entry (so the user can "Download anyway"), unless the bulk/windowed path
     // opts out with markDuplicate:false (skip silently — no item to avoid bloat).
@@ -378,6 +400,7 @@ class DownloadManager {
       title: effectiveTitle,
       referer,
       label,
+      cookieHeader: cookieHeader || null,
       kind: hls ? "hls" : "mp4",
       fileName: sanitizeName(effectiveTitle) + (label ? "[" + sanitizeName(label) + "]" : "") + ".mp4",
       status: "queued",
@@ -712,9 +735,10 @@ class DownloadManager {
     }
     item.proxy = proxy ? proxy.url : "direct";
     const agent = proxy ? this.proxyManager.agentFor(proxy, actualUrl) : null;
+    const probeHeaders = await this._reqHeaders(item, baseHeaders, actualUrl || item.url, { Range: "bytes=0-0" });
     let result = await requestWithRedirects(actualUrl || item.url, {
       method: "HEAD",
-      headers: { ...baseHeaders, Range: "bytes=0-0" },
+      headers: probeHeaders,
       agent,
       onReq: (req, on) => this._trackReq(item, req, on)
     });
@@ -724,7 +748,7 @@ class DownloadManager {
       try { result.res.resume(); } catch (e) { /* ignore */ }
       result = await requestWithRedirects(actualUrl || item.url, {
         method: "GET",
-        headers: { ...baseHeaders, Range: "bytes=0-0" },
+        headers: await this._reqHeaders(item, baseHeaders, actualUrl || item.url, { Range: "bytes=0-0" }),
         agent,
         onReq: (req, on) => this._trackReq(item, req, on)
       });
@@ -793,7 +817,7 @@ class DownloadManager {
     try {
       const existing = await fsp.stat(seg.partPath).catch(() => null);
       const resumeStart = seg.start + (existing ? existing.size : 0);
-      const headers = { ...baseHeaders, Range: `bytes=${resumeStart}-${seg.end}` };
+      const headers = await this._reqHeaders(item, baseHeaders, actualUrl, { Range: `bytes=${resumeStart}-${seg.end}` });
 
       const result = await requestWithRedirects(actualUrl, { method: "GET", headers, agent, maxRetries, onReq: (req, on) => this._trackReq(item, req, on) });
       const res = result.res;
@@ -874,8 +898,8 @@ class DownloadManager {
       const existing = await fsp.stat(item.finalPath).catch(() => null);
       const resumeStart = existing ? existing.size : 0;
       const headers = resumeStart > 0
-        ? { ...baseHeaders, Range: `bytes=${resumeStart}-` }
-        : baseHeaders;
+        ? await this._reqHeaders(item, baseHeaders, actualUrl, { Range: `bytes=${resumeStart}-` })
+        : await this._reqHeaders(item, baseHeaders, actualUrl, {});
 
       const maxRetries = this.config.maxRetries ?? DEFAULT_MAX_RETRIES;
       const result = await requestWithRedirects(actualUrl, { method: "GET", headers, agent, maxRetries, onReq: (req, on) => this._trackReq(item, req, on) });
@@ -949,7 +973,7 @@ class DownloadManager {
 
     let playlistUrl = m3u8Url;
     await this._paceHost(playlistUrl);
-    let body = await fetchHtml(playlistUrl, agent, baseHeaders, 0, maxRetries);
+    let body = await fetchHtml(playlistUrl, agent, await this._reqHeaders(item, baseHeaders, playlistUrl, {}), 0, maxRetries);
     if (item.status !== "running") this.throwAborted();
 
     // Master playlist -> pick the best variant and fetch its media playlist.
@@ -957,7 +981,7 @@ class DownloadManager {
       const variant = pickHlsVariant(body, playlistUrl);
       if (!variant) throw new Error("HLS: no usable variant in master playlist");
       await this._paceHost(variant);
-      body = await fetchHtml(variant, agent, baseHeaders, 0, maxRetries);
+      body = await fetchHtml(variant, agent, await this._reqHeaders(item, baseHeaders, variant, {}), 0, maxRetries);
       playlistUrl = variant;
       if (item.status !== "running") this.throwAborted();
     }
@@ -1012,7 +1036,7 @@ class DownloadManager {
     }
     const agent = proxy ? this.proxyManager.agentFor(proxy, segUrl) : null;
     try {
-      const result = await requestWithRedirects(segUrl, { method: "GET", headers: baseHeaders, agent, maxRetries, onReq: (req, on) => this._trackReq(item, req, on) });
+      const result = await requestWithRedirects(segUrl, { method: "GET", headers: await this._reqHeaders(item, baseHeaders, segUrl, {}), agent, maxRetries, onReq: (req, on) => this._trackReq(item, req, on) });
       const res = result.res;
       const status = result.status;
       if (status !== 200) {

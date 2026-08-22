@@ -48,7 +48,7 @@ async function probeUrl(url) {
 
 let config = loadConfig(CONFIG_PATH);
 let proxyManager = new ProxyManager(config);
-let dm = new DownloadManager({ config, proxyManager, onUpdate: pushUpdate });
+let dm = new DownloadManager({ config, proxyManager, onUpdate: pushUpdate, cookieProvider: (url) => cookieHeaderFor(url) });
 let mainWindow = null;
 let wss = null;
 
@@ -98,6 +98,29 @@ function pushUpdate(item) {
   }
 }
 
+async function cookieHeaderFor(url) {
+  if (!url || !/^https?:/i.test(url)) return "";
+  try {
+    const sess = session.fromPartition("persist:deepgrab-browser");
+    const cs = await sess.cookies.get({ url });
+    return cs.map((c) => encodeURIComponent(c.name) + "=" + encodeURIComponent(c.value)).join("; ");
+  } catch (e) {
+    return "";
+  }
+}
+
+async function gatherCookieHeader(urls) {
+  const parts = [];
+  const seen = new Set();
+  for (const u of urls) {
+    const s = await cookieHeaderFor(u);
+    for (const pair of s.split("; ")) {
+      if (pair && !seen.has(pair)) { seen.add(pair); parts.push(pair); }
+    }
+  }
+  return parts.join("; ");
+}
+
 function startWsServer() {
   wss = new WebSocketServer({ host: "127.0.0.1", port: config.port });
 
@@ -128,17 +151,19 @@ function startWsServer() {
              return;
            }
            const ids = [];
-           for (const s of usable) {
-             const id = await dm.enqueue({
-               url: s.url,
-               title: msg.title,
-               referer: msg.referer,
-               label: s.label || "",
-               scheduledStart: msg.scheduledStart ? new Date(msg.scheduledStart).getTime() : null,
-               scheduledStop: msg.scheduledStop ? new Date(msg.scheduledStop).getTime() : null
-             });
-             ids.push(id);
-           }
+            for (const s of usable) {
+              const cookieHeader = await gatherCookieHeader([s.url, msg.referer]);
+              const id = await dm.enqueue({
+                url: s.url,
+                title: msg.title,
+                referer: msg.referer,
+                label: s.label || "",
+                cookieHeader,
+                scheduledStart: msg.scheduledStart ? new Date(msg.scheduledStart).getTime() : null,
+                scheduledStop: msg.scheduledStop ? new Date(msg.scheduledStop).getTime() : null
+              });
+              ids.push(id);
+            }
           ws.send(JSON.stringify({ type: "accepted", id: ids[0], ids, url: msg.url }));
         } catch (e) {
           ws.send(JSON.stringify({ type: "error", message: e.message, url: msg.url }));
@@ -184,8 +209,15 @@ function createWindow() {
 // ---------------- built-in browser (Deep Grab extension) ----------------
 let browserWindow = null;
 
+// Real browser UA for the built-in browser. Anti-bot/Cloudflare sites serve a
+// stripped or "verify you are human" partial page to the default Electron UA; a
+// normal Chrome UA lets the managed challenge complete and the page render fully.
+const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
+
 function browserSession() {
-  return session.fromPartition("persist:deepgrab-browser");
+  const ses = session.fromPartition("persist:deepgrab-browser");
+  try { ses.setUserAgent(BROWSER_UA); } catch (e) { /* session not ready yet */ }
+  return ses;
 }
 
 // Resolve the Deep Grab extension folder: honor config.extensionPath only if it
@@ -210,10 +242,18 @@ async function loadBrowserExtension() {
     console.warn("[browser] Deep Grab extension not found (checked config.extensionPath, asar.unpacked, __dirname/extension)");
     return;
   }
+  console.log("[browser] loading Deep Grab extension from:", extPath);
   try {
     const ses = browserSession();
     if (ses.getAllExtensions().length === 0) {
-      const info = await ses.loadExtension(extPath);
+      let info;
+      try {
+        info = await ses.loadExtension(extPath);
+      } catch (e1) {
+        // some Electron builds require explicit file access for unpacked ext
+        console.warn("[browser] loadExtension failed, retrying with allowFileAccess:", e1.message);
+        info = await ses.loadExtension(extPath, { allowFileAccess: true });
+      }
       console.log("[browser] loaded Deep Grab extension:", info && info.id);
     }
   } catch (e) {
@@ -332,7 +372,10 @@ const VIDEO_DOMAINS = [
   "xvideos.com",
   "xhamster.com",
   "pornhub.com",
-  "javhub.net"
+  "javhub.net",
+  "jable.tv",
+  "missav.ws",
+  "missav.ai"
 ];
 
 let lastClipboardContent = "";
