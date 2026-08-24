@@ -969,16 +969,22 @@
     if (/verify you are human|checking your browser|just a moment|attention required|enable javascript and cookies/i.test(t)) return true;
     return !!(document.getElementById("challenge-form") || document.getElementById("cf-challenge-running") || document.querySelector(".cf-turnstile, .cf-challenge, #challenge-stage, #cf-hcaptcha-container"));
   }
+  let cfLastClick = 0;
+  let cfTries = 0;
+  let cfGaveUp = false;
   function clickCloudflareWidget() {
+    const now = Date.now();
+    // Turnstile needs a single click, then a few seconds to verify on its own.
+    // Re-clicking every tick interrupts that verification, so enforce a cooldown.
+    if (now - cfLastClick < 6000) return false;
     if (!looksLikeCloudflareChallenge()) return false;
     const targets = [
       'input[type="checkbox"]',
+      '[role="checkbox"]',
       "#challenge-stage button",
       "#challenge-form button",
       "button[type=submit]",
-      ".cf-turnstile",
-      '[role="checkbox"]',
-      "#cf-hcaptcha-container"
+      ".cf-turnstile"
     ];
     let acted = false;
     for (const sel of targets) {
@@ -988,25 +994,33 @@
       });
       if (acted) break;
     }
-    if (acted) console.info("DeepVid: auto-clicked Cloudflare challenge in", location.href);
+    if (acted) {
+      cfLastClick = now;
+      cfTries++;
+      console.info("DeepVid: clicked Cloudflare challenge in", location.href, "(attempt " + cfTries + ")");
+      if (cfTries >= 6) {
+        cfGaveUp = true;
+        console.warn("DeepVid: Cloudflare challenge not auto-solving - please solve it manually, then the page will continue.");
+      }
+    }
     return acted;
   }
   let cfSolverTimer = 0;
   function startCloudflareSolver() {
     if (cfSolverTimer) return;
-    let tries = 0;
     cfSolverTimer = setInterval(() => {
-      tries++;
-      clickCloudflareWidget();
-      // stop once the challenge is gone or after ~45s
-      if (tries > 55 || !looksLikeCloudflareChallenge()) {
+      if (cfGaveUp) { clearInterval(cfSolverTimer); cfSolverTimer = 0; return; }
+      // only act while a challenge is present; stop once it clears
+      if (!looksLikeCloudflareChallenge()) {
         clearInterval(cfSolverTimer);
         cfSolverTimer = 0;
+        return;
       }
-    }, 800);
+      clickCloudflareWidget();
+    }, 2000);
   }
   function maybeStartCloudflareSolver() {
-    if (looksLikeCloudflareChallenge()) startCloudflareSolver();
+    if (!cfGaveUp && looksLikeCloudflareChallenge()) startCloudflareSolver();
   }
   setInterval(maybeStartCloudflareSolver, 1500);
 

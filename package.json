@@ -1,95 +1,14 @@
 {
   "name": "deep-video-downloader",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "description": "Desktop app: WebSocket server + MP4 download manager with advanced control and auto proxy boost.",
   "author": "DeepGrab",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "dist": "electron-builder --win",
     "check": "node check.js",
-    "dist": "electron-builder --win"
-  },
-  "build": {
-    "appId": "com.deepgrab.deepvideodownloader",
-    "productName": "DeepVideoDownloader",
-    "directories": {
-      "output": "dist"
-    },
-    "files": [
-      "main.js",
-      "preload.js",
-      "renderer.html",
-      "renderer.js",
-      "styles.css",
-      "downloader.js",
-      "proxy.js",
-      "browser.html",
-      "browser-preload.js",
-      "config.js",
-      "extension"
-    ],
-    "asarUnpack": [
-      "extension/**"
-    ],
-    "win": {
-      "target": [
-        "nsis"
-      ]
-    },
-    "fileAssociations": [
-      {
-        "ext": "mp4",
-        "name": "MP4 Video",
-        "description": "MP4 video file",
-        "mimeType": "video/mp4"
-      },
-      {
-        "ext": "m4v",
-        "name": "M4V Video",
-        "description": "M4V video file",
-        "mimeType": "video/x-m4v"
-      },
-      {
-        "ext": "webm",
-        "name": "WebM Video",
-        "description": "WebM video file",
-        "mimeType": "video/webm"
-      },
-      {
-        "ext": "mov",
-        "name": "QuickTime Movie",
-        "description": "QuickTime movie file",
-        "mimeType": "video/quicktime"
-      },
-      {
-        "ext": "mkv",
-        "name": "Matroska Video",
-        "description": "Matroska video file",
-        "mimeType": "video/x-matroska"
-      },
-      {
-        "ext": "flv",
-        "name": "Flash Video",
-        "description": "Flash video file",
-        "mimeType": "video/x-flv"
-      },
-      {
-        "ext": "m3u8",
-        "name": "HLS Playlist",
-        "description": "HLS playlist file",
-        "mimeType": "application/vnd.apple.mpegurl"
-      }
-    ],
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
-    }
-  },
-  "devDependencies": {
-    "electron": "^43.4.1",
-    "electron-builder": "^26.15.3"
+    "test": "node test-config.js && node test-hls.js"
   },
   "dependencies": {
     "follow-redirects": "^1.15.6",
@@ -97,5 +16,43 @@
     "https-proxy-agent": "^7.0.5",
     "socks-proxy-agent": "^8.0.4",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^43.4.1",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.deepgrab.downloader",
+    "productName": "DeepVideoDownloader",
+    "files": [
+      "main.js",
+      "preload.js",
+      "browser-preload.js",
+      "renderer.js",
+      "browser.html",
+      "renderer.html",
+      "styles.css",
+      "config.js",
+      "downloader.js",
+      "proxy.js",
+      "lib",
+      "extension"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "extension/**/*"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }

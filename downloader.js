@@ -1046,10 +1046,17 @@ class DownloadManager {
         err.category = "http";
         throw err;
       }
-      await this.streamToFile(item, res, filePath, "w");
-      const raw = await fsp.readFile(filePath);
+      // Write via a temp name so resume's "size > 0 means complete" skip can
+      // never pick up a segment that was killed mid-write.
+      const tmpPath = filePath + ".dltmp";
+      await this.streamToFile(item, res, tmpPath, "w");
+      const raw = await fsp.readFile(tmpPath);
       const stripped = stripPngPrefix(raw);
-      if (stripped.length !== raw.length) await fsp.writeFile(filePath, stripped);
+      if (stripped.length !== raw.length) await fsp.writeFile(tmpPath, stripped);
+      await fsp.rename(tmpPath, filePath).catch(async () => {
+        await fsp.copyFile(tmpPath, filePath);
+        await fsp.rm(tmpPath, { force: true }).catch(() => {});
+      });
     } catch (err) {
       if (attempt < 1) {
         if (isProxyFailure(err) && proxy) {

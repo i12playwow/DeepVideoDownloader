@@ -4,7 +4,7 @@ process.on("unhandledRejection", (err) => {
   console.error("[unhandledRejection]", err);
 });
 
-const { app, BrowserWindow, ipcMain, shell, clipboard, session } = require("electron");
+const { app, BrowserWindow, BrowserView, ipcMain, shell, clipboard, session } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -94,7 +94,7 @@ function pushUpdate(item) {
     (item.status === "done" || item.status === "error" || item.status === "cancelled")
   ) {
     const ref = item.referer || item.url;
-    try { browserWindow.webContents.send("browser-close-tab-for-url", ref); } catch (e) { /* ignore */ }
+    bvCloseTabForUrl(ref);
   }
 }
 
@@ -135,14 +135,16 @@ function startWsServer() {
       }
        if (msg.type === "download") {
          try {
-           // `sources` (array of {kind,url,label}) may accompany a download:
-           // enqueue every `kind:"link"` entry as its own download (label
-           // appended to the file name); fall back to plain `url` when no
-           // usable source exists. Non-`link` kinds (iframe, server) are
-           // ignored — they are player pages, not direct files.
-           const links = Array.isArray(msg.sources)
-             ? msg.sources.filter((s) => s && s.kind === "link" && typeof s.url === "string")
-             : [];
+            // `sources` (array of {kind,url,label}) may accompany a download:
+            // enqueue every `kind:"link"` entry AND every `kind:"iframe"` entry
+            // as its own download (label appended to the file name); fall back to
+            // plain `url` when no usable source exists. `iframe` carries the
+            // player page (e.g. supjav.php?l=<OLID>) which resolvers turn into a
+            // direct URL, so it must be enqueued — only `server` (often a
+            // `javascript:` pseudo-URL) is ignored.
+            const links = Array.isArray(msg.sources)
+              ? msg.sources.filter((s) => s && (s.kind === "link" || s.kind === "iframe") && typeof s.url === "string")
+              : [];
            const usable = links.length
              ? links
              : (typeof msg.url === "string" ? [{ kind: "link", url: msg.url, label: "" }] : []);
@@ -262,18 +264,111 @@ async function loadBrowserExtension() {
 }
 
 let pendingTabs = [];
+let browserTabs = new Map();   // id -> { id, view, url, title }
+let activeBrowserId = null;
+let browserSeq = 0;
+let browserContentRect = { x: 0, y: 86, width: 1200, height: 850 - 86 };
+
+function bvPositionActive() {
+  if (!browserWindow || browserWindow.isDestroyed() || !activeBrowserId) return;
+  const e = browserTabs.get(activeBrowserId);
+  if (!e) return;
+  try { e.view.setBounds(browserContentRect); } catch (e2) { /* ignore */ }
+}
+
+function bvPushTabs() {
+  if (!browserWindow || browserWindow.isDestroyed()) return;
+  const list = [];
+  browserTabs.forEach((e) => list.push({ id: e.id, title: e.title || e.url, url: e.url }));
+  try { browserWindow.webContents.send("browser-tabs-update", list, activeBrowserId); } catch (e) { /* ignore */ }
+}
+
+function bvPushNav() {
+  if (!browserWindow || browserWindow.isDestroyed() || !activeBrowserId) return;
+  const e = browserTabs.get(activeBrowserId);
+  if (!e) return;
+  const wc = e.view.webContents;
+  try {
+    browserWindow.webContents.send("browser-nav-state", {
+      canGoBack: wc.canGoBack(),
+      canGoForward: wc.canGoForward(),
+      url: wc.getURL()
+    });
+  } catch (e) { /* ignore */ }
+}
+
+function bvAddTab(url) {
+  if (!browserWindow || browserWindow.isDestroyed()) return null;
+  const id = "bv" + (++browserSeq);
+  const view = new BrowserView({
+    webPreferences: {
+      session: browserSession(),
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true
+    }
+  });
+  view.setBackgroundColor("#0f172a");
+  const entry = { id, view, url: url || "https://www.google.com", title: "" };
+  browserTabs.set(id, entry);
+
+  view.webContents.on("page-title-updated", (ev, title) => { entry.title = title; bvPushTabs(); });
+  view.webContents.on("did-navigate", (ev, u) => { entry.url = u; bvPushTabs(); bvPushNav(); });
+  view.webContents.on("did-navigate-in-page", (ev, u) => { entry.url = u; bvPushTabs(); });
+  view.webContents.on("did-start-loading", () => bvPushNav());
+  view.webContents.on("did-stop-loading", () => { entry.url = view.webContents.getURL(); bvPushTabs(); bvPushNav(); });
+
+  view.webContents.loadURL(entry.url).catch(() => {});
+  bvActivate(id);
+  return id;
+}
+
+function bvActivate(id) {
+  if (!browserWindow || browserWindow.isDestroyed()) return;
+  const e = browserTabs.get(id);
+  if (!e) return;
+  browserTabs.forEach((en) => { try { browserWindow.removeBrowserView(en.view); } catch (e2) { /* ignore */ } });
+  try { browserWindow.addBrowserView(e.view); } catch (e2) { /* ignore */ }
+  activeBrowserId = id;
+  bvPositionActive();
+  bvPushTabs();
+  bvPushNav();
+}
+
+function bvCloseTab(id) {
+  if (!browserWindow || browserWindow.isDestroyed()) return;
+  const e = browserTabs.get(id);
+  if (!e) return;
+  try { browserWindow.removeBrowserView(e.view); } catch (e2) { /* ignore */ }
+  try { e.view.webContents.destroy(); } catch (e2) { /* ignore */ }
+  browserTabs.delete(id);
+  if (activeBrowserId === id) {
+    const first = browserTabs.keys().next();
+    if (!first.done) bvActivate(first.value);
+    else bvAddTab("https://www.google.com");
+  } else {
+    bvPushTabs();
+  }
+}
+
+function bvCloseTabForUrl(url) {
+  if (!url) return;
+  let toClose = null;
+  browserTabs.forEach((e) => { if (!toClose && e.url === url) toClose = e.id; });
+  if (toClose) bvCloseTab(toClose);
+}
 
 function sendBrowserTabs(urls, kind) {
-  if (!browserWindow || browserWindow.isDestroyed()) return;
-  const channel = kind === "add" ? "browser-add-tabs" : "browser-open-tabs";
-  try { browserWindow.webContents.send(channel, urls); } catch (e) { /* ignore */ }
+  const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
+  if (!browserWindow || browserWindow.isDestroyed()) { pendingTabs = pendingTabs.concat(list); return; }
+  list.forEach((u) => bvAddTab(u));
 }
 
 function createBrowserWindow(urls) {
   const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
   if (browserWindow && !browserWindow.isDestroyed()) {
     browserWindow.show(); browserWindow.focus();
-    if (list.length) sendBrowserTabs(list, "add");
+    list.forEach((u) => bvAddTab(u));
     return;
   }
   pendingTabs = list;
@@ -284,12 +379,25 @@ function createBrowserWindow(urls) {
     backgroundColor: "#0f172a",
     webPreferences: {
       session: browserSession(),
-      webviewTag: true,
-      preload: path.join(__dirname, "browser-preload.js")
+      webviewTag: false,
+      preload: path.join(__dirname, "browser-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false
     }
   });
-  browserWindow.on("closed", () => { browserWindow = null; });
+  browserWindow.on("resize", () => bvPositionActive());
+  browserWindow.on("closed", () => {
+    browserTabs.forEach((e) => { try { e.view.webContents.destroy(); } catch (e2) { /* ignore */ } });
+    browserTabs.clear();
+    activeBrowserId = null;
+    browserWindow = null;
+  });
   browserWindow.loadFile(path.join(__dirname, "browser.html")).catch(() => {});
+  browserWindow.webContents.once("did-finish-load", () => {
+    const l = pendingTabs; pendingTabs = [];
+    if (l.length) l.forEach((u) => bvAddTab(u));
+    else bvAddTab("https://www.google.com");
+  });
 }
 
 // Locate an installed external browser executable (Chrome/Edge/Brave), or null.
@@ -368,6 +476,7 @@ function launchExtensionInBrowser(browser) {
 // ---------------- clipboard monitoring ----------------
 const VIDEO_DOMAINS = [
   "streamtape.com",
+  "fstape.com",
   "cnporn.org",
   "xvideos.com",
   "xhamster.com",
@@ -375,7 +484,12 @@ const VIDEO_DOMAINS = [
   "javhub.net",
   "jable.tv",
   "missav.ws",
-  "missav.ai"
+  "missav.ai",
+  "missav.com",
+  "missav.live",
+  "missav.xyz",
+  "supjav.com",
+  "supremejav.com"
 ];
 
 let lastClipboardContent = "";
@@ -390,7 +504,6 @@ function isValidVideoUrl(text) {
 function startClipboardMonitor() {
   if (clipboardMonitor) return;
   clipboardMonitor = setInterval(() => {
-    if (!config.autoProxy) return;
     try {
       const content = clipboard.readText();
       if (content !== lastClipboardContent && isValidVideoUrl(content)) {
@@ -620,6 +733,27 @@ if (gotLock) {
   ipcMain.handle("browser-open", (e, urls) => { createBrowserWindow(urls); });
   ipcMain.handle("browser-nav", (e, url) => { createBrowserWindow(url); });
   ipcMain.handle("browser-get-tabs", () => { const t = pendingTabs; pendingTabs = []; return t; });
+  ipcMain.on("bv-new-tab", () => { if (browserWindow && !browserWindow.isDestroyed()) bvAddTab("https://www.google.com"); });
+  ipcMain.on("bv-close", (e, id) => { bvCloseTab(id); });
+  ipcMain.on("bv-activate", (e, id) => { bvActivate(id); });
+  ipcMain.on("bv-navigate", (e, url) => {
+    if (!activeBrowserId) return;
+    const en = browserTabs.get(activeBrowserId);
+    if (!en) return;
+    let u = String(url || "").trim();
+    if (!u) return;
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) u = "https://" + u;
+    en.view.webContents.loadURL(u).catch(() => {});
+  });
+  ipcMain.on("bv-back", () => { if (activeBrowserId) { const en = browserTabs.get(activeBrowserId); if (en) en.view.webContents.goBack(); } });
+  ipcMain.on("bv-forward", () => { if (activeBrowserId) { const en = browserTabs.get(activeBrowserId); if (en) en.view.webContents.goForward(); } });
+  ipcMain.on("bv-reload", () => { if (activeBrowserId) { const en = browserTabs.get(activeBrowserId); if (en) en.view.webContents.reload(); } });
+  ipcMain.on("bv-content-rect", (e, rect) => {
+    if (rect && typeof rect.width === "number" && typeof rect.height === "number") {
+      browserContentRect = { x: rect.x || 0, y: rect.y || 0, width: rect.width, height: rect.height };
+      bvPositionActive();
+    }
+  });
   ipcMain.handle("browser-external", (e, url, browser) => openInExternalBrowser(url, browser));
   ipcMain.handle("extension-install", (e, browser) => launchExtensionInBrowser(browser));
 
