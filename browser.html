@@ -10,6 +10,7 @@
     #nav { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: #1e293b; border-bottom: 1px solid #334155; flex: 0 0 auto; height: 48px; }
     button { background: #334155; color: #e2e8f0; border: none; border-radius: 5px; padding: 6px 10px; cursor: pointer; font-size: 13px; }
     button:hover { background: #475569; }
+    button.on { background: #2563eb; color: #fff; }
     button:disabled { opacity: .4; cursor: default; }
     #url { flex: 1; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 5px; padding: 6px 10px; font-size: 13px; }
     #tabbar { display: flex; align-items: center; gap: 4px; padding: 4px 8px; background: #16233b; overflow-x: auto; flex: 0 0 auto; height: 38px; border-bottom: 1px solid #1e293b; }
@@ -27,6 +28,8 @@
     <button id="back" title="Back">&#8592;</button>
     <button id="fwd" title="Forward">&#8594;</button>
     <button id="reload" title="Reload">&#8635;</button>
+    <button id="ntmode" title="Links open in a new tab instead of navigating away">&#8674; New tab</button>
+    <button id="autoscroll" title="Unlimited scroll: keeps scrolling and clicking Load more until you stop it">&#8595; Auto</button>
     <input id="url" type="text" placeholder="Enter a URL and press Enter">
     <button id="go">Go</button>
   </div>
@@ -69,6 +72,13 @@
       urlInput.value = st.url || "";
       backBtn.disabled = !st.canGoBack;
       fwdBtn.disabled = !st.canGoForward;
+      asBtn.classList.toggle("on", !!st.autoscroll);
+      if (st.autoInfo) {
+        const i = st.autoInfo;
+        asBtn.title = `Auto ON — page h=${i.h}, idle ${i.still}/50` + (i.next ? `, next: ${i.next}` : ", no next found");
+      } else {
+        asBtn.title = "Unlimited scroll: keeps scrolling and turning pages until you stop it";
+      }
     });
 
     function go() {
@@ -82,6 +92,22 @@
     backBtn.addEventListener("click", () => window.api.back());
     fwdBtn.addEventListener("click", () => window.api.forward());
     document.getElementById("newtab").addEventListener("click", () => window.api.newTab());
+
+    const ntBtn = document.getElementById("ntmode");
+    let ntOn = localStorage.getItem("dvNewTabMode") !== "0";
+    const applyNtMode = () => {
+      ntBtn.classList.toggle("on", ntOn);
+      window.api.setNewTabMode(ntOn);
+    };
+    ntBtn.addEventListener("click", () => {
+      ntOn = !ntOn;
+      localStorage.setItem("dvNewTabMode", ntOn ? "1" : "0");
+      applyNtMode();
+    });
+    applyNtMode();
+
+    const asBtn = document.getElementById("autoscroll");
+    asBtn.addEventListener("click", () => window.api.toggleAutoScroll());
 
     reportRect();
   </script>

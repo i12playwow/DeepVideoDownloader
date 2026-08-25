@@ -1,15 +1,17 @@
 # AGENTS.md — Deep Video Downloader (Deep Grab)
 
-## Source of truth & the OneDrive wipe
-- The OneDrive project (`C:\Users\SOKCHHORN PC\OneDrive\Desktop\Project WorkSpace\deep-video-downloader`) keeps deleting its ROOT files (main.js, package.json, browser.html, …) and `node_modules`. The installed app at `C:\Program Files\DeepVideoDownloader` (outside OneDrive) survives.
-- **Canonical source: `C:\dvdbak`** (off-OneDrive, survives). Restore via `C:\dvdbak\sync-to-project.ps1`; build from there to dodge mid-build wipes.
+## Source of truth & locations (updated 2026-08-25)
+- **Canonical project: `C:\dev\deep-video-downloader`** — moved OUT of OneDrive; the old OneDrive folder is deleted. OneDrive kept corrupting files there (placeholder ghosts, conflict renames, wipes).
+- **Git layout**: `.git` in the project is a POINTER FILE to `C:\deep-video-git`, whose config `core.worktree` binds to `C:\dev\deep-video-downloader`. If the project moves again, update that `worktree =` line or every file shows as ` D ` in git status.
+- **Backup: `C:\dvdbak`** — mirror of the project (plus node_modules + dist). Refresh it after significant changes: `robocopy C:\dev\deep-video-downloader C:\dvdbak /E /XD node_modules dist`. Files copied around this machine may carry a `RECALL_ON_OPEN` attribute (524320) — git treats such files as deleted until replaced with real copies.
+- `C:\dvdbak\sync-to-project.ps1` is obsolete (OneDrive path gone); builds now run directly in `C:\dev\deep-video-downloader`.
 
 ## Commands
-- `npm run check` = `node --check` over the JS files (syntax only).
+- `npm run check` = syntax check over root JS, lib/, extension/, test files (`node check.js`).
 - `npm run dist` = `electron-builder --win` (nsis, oneClick:false, perMachine:false).
 - `npm.cmd start` launches dev GUI via `electron .` — only works in an interactive terminal, NOT from the agent shell.
 - Build + install: `npm run dist` → `dist\DeepVideoDownloader Setup X.Y.Z.exe`.
-- **Deploy to `C:\Program Files` via `C:\dvdbak\build-deploy.ps1`** — it builds then copies `dist\win-unpacked\*` into `C:\Program Files\DeepVideoDownloader` with elevation. A plain `/S` install silently FAILS to overwrite Program Files (no admin), leaving a stale build running.
+- **Deploy to `C:\Program Files` via `C:\dev\deep-video-downloader\build-deploy.ps1`** — it installs deps, checks, builds, then copies `dist\win-unpacked\*` into `C:\Program Files\DeepVideoDownloader` with elevation (UAC must be approved). A plain `/S` install silently FAILS to overwrite Program Files (no admin), leaving a stale build running.
 - User launches the installed **DeepVideoDownloader** from the Start menu.
 
 ## Packaging gotchas

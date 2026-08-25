@@ -425,8 +425,12 @@
     if (bestEntry && !bestEntry.added) maybeAutoDownload(bestEntry.url);
   }
 
+  // Master switch for automatic sending. Memory-only on purpose: a fresh page
+  // load always starts OFF — nothing is ever sent without pressing Start.
+  let grabOn = false;
+
   function maybeAutoDownload(url) {
-    if (!config.bestOnly) return;
+    if (!grabOn || !config.bestOnly) return;
     const v = found.get(url);
     if (!v || v.added || autoSending.has(url)) return;
     autoSending.add(url);
@@ -459,7 +463,22 @@
     lastRefresh = Date.now();
     chrome.runtime.sendMessage({ type: "get-found" }, (resp) => {
       if (!resp) return;
-      const runBtn = document.getElementById("dv-run");
+    const grabBtn = document.getElementById("dv-grab");
+    if (grabBtn) {
+      grabBtn.addEventListener("click", () => {
+        grabOn = !grabOn;
+        grabBtn.textContent = grabOn ? "■ Send" : "▶ Send";
+        grabBtn.classList.toggle("dv-on", grabOn);
+        toast(grabOn ? "Auto-send ON — new videos are sent automatically" : "Auto-send OFF");
+        if (grabOn) {
+          // send the current best immediately, then flush anything stashed offline
+          const cur = found.size ? found.values().next().value : null;
+          if (cur && !cur.added) maybeAutoDownload(cur.url);
+          flushAutoPending();
+        }
+      });
+    }
+    const runBtn = document.getElementById("dv-run");
       if (runBtn) {
         const running = !!resp.pipelineRunning;
         runBtn.textContent = running ? "■ Stop" : "▶ Start";
@@ -563,6 +582,7 @@
           <div class="dv-row dv-meta">
             <span id="dv-counts" class="dv-counts">0 found</span>
             <span id="dv-desktop" class="dv-dot" title="Desktop app connection">●</span>
+            <button id="dv-grab" class="dv-tbtn" title="Master switch for automatic sending: ON = Best-only videos are sent to the desktop app as they are found; OFF (default on every page) = nothing is sent automatically">▶ Send</button>
             <button id="dv-run" class="dv-tbtn" title="Process streamtape/fstape tabs one by one: autoplay → send → close → next (off by default)">▶ Start</button>
             <button id="dv-scan" class="dv-btn" title="Re-scan page">Scan</button>
           </div>
@@ -760,13 +780,8 @@
       });
     });
 
-    // initial state from config
-    if (config.autoScroll) {
-      state.autoScroll = true;
-      scrollBtn.classList.add("dv-on");
-      window.clearInterval(window.__DV_SCROLL_ID__);
-      window.__DV_SCROLL_ID__ = window.setInterval(autoScrollTick, 350);
-    }
+    // initial state from config — auto-scroll never resumes by itself; press
+    // ↓ Auto-scroll on each page where you want it
     if (config.openInNewTab) {
       state.newTabMode = true;
       tabBtn.classList.add("dv-on");
@@ -918,7 +933,7 @@
         dot.className = "dv-dot " + (on ? "dv-ok" : "dv-off");
         dot.title = on ? "Desktop app connected" : "Desktop app offline (run the app)";
       }
-      if (on) flushAutoPending();
+      if (on && grabOn) flushAutoPending();
     });
   }
   setInterval(refreshStatus, 3000);
@@ -1058,10 +1073,19 @@
   });
 
   // Periodic re-scan: catches videos whose src is set as a JS property
-  // (video.currentSrc) on elements that never start loading.
-  setInterval(() => { scanVideoElements(); extractCnPorn(); }, 3000);
+  // (video.currentSrc) on elements that never start loading. Skipped while the
+  // tab is hidden — with all_frames:true every background tab's iframes would
+  // otherwise keep scanning forever; the next visible tick catches up.
+  setInterval(() => {
+    if (document.hidden) return;
+    scanVideoElements();
+    extractCnPorn();
+  }, 3000);
 
-  setInterval(() => refreshFromBackground(false), 3000);
+  setInterval(() => {
+    if (document.hidden) return;
+    refreshFromBackground(false);
+  }, 3000);
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg && msg.type === "dv-rescan") {

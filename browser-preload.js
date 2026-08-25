@@ -12,5 +12,7 @@ contextBridge.exposeInMainWorld("api", {
   back: () => ipcRenderer.send("bv-back"),
   forward: () => ipcRenderer.send("bv-forward"),
   reload: () => ipcRenderer.send("bv-reload"),
+  setNewTabMode: (on) => ipcRenderer.send("bv-newtab-mode", on),
+  toggleAutoScroll: () => ipcRenderer.send("bv-autoscroll"),
   reportContentRect: (rect) => ipcRenderer.send("bv-content-rect", rect)
 });

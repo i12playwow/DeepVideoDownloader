@@ -556,6 +556,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 chrome.runtime.onInstalled.addListener(() => { connect(); });
 chrome.runtime.onStartup.addListener(() => { connect(); });
 
+// Toolbar icon: re-scan the active tab's page (content.js answers "dv-rescan").
+chrome.action.onClicked.addListener((tab) => {
+  if (tab && tab.id > 0) chrome.tabs.sendMessage(tab.id, { type: "dv-rescan" }).catch(() => {});
+});
+
 connect();
 loadPersisted();
 restorePipeline();

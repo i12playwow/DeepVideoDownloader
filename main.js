@@ -267,6 +267,144 @@ let pendingTabs = [];
 let browserTabs = new Map();   // id -> { id, view, url, title }
 let activeBrowserId = null;
 let browserSeq = 0;
+// When on, page-initiated navigations (link clicks, location.href) open a new
+// tab instead of replacing the current one. Address-bar Go / back / forward /
+// reload are unaffected (Electron doesn't fire will-navigate for them).
+let bvNewTabMode = true;
+// Per-tab infinite scroll loops: entry id -> setInterval handle. Each tick
+// scrolls ~85% of a viewport and, when already at the bottom, clicks any
+// common "load more" / next-page control before scrolling again.
+const autoScrollTimers = new Map();
+const autoScrollState = new Map(); // id -> { h, still, next } for UI diagnostics
+// Finds the element that actually scrolls (window OR an inner overflow div),
+// fires a wheel nudge for lazy-loaders, clicks non-anchor "load more" buttons,
+// and reports the next-page link so the main process can turn the page itself
+// (paginated sites like supjav have no infinite scroll — ?page=2 / › / Next).
+const LOAD_MORE_JS = `(function(){
+  function scroller() {
+    var se = document.scrollingElement || document.documentElement;
+    if (se && se.scrollHeight > se.clientHeight + 100) return se;
+    var best = null, bestH = 0;
+    var els = document.querySelectorAll('div, main, section, ul');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.scrollHeight > el.clientHeight + 200 && el.scrollHeight > bestH) {
+        var oy = getComputedStyle(el).overflowY;
+        if (oy === 'auto' || oy === 'scroll' || el === document.body) { best = el; bestH = el.scrollHeight; }
+      }
+    }
+    return best || se;
+  }
+  function nextPageUrl() {
+    var nx = document.querySelector('a[rel="next"], .pagination .next, .next.page-numbers');
+    if (nx && nx.href && /^https?:/.test(nx.href)) return nx.href;
+    var cands = document.querySelectorAll('[class*="pagination"] a, [class*="pager"] a, [class*="page-num"] a, nav a');
+    for (var i = 0; i < cands.length; i++) {
+      var a = cands[i];
+      var t = String(a.textContent || '').trim();
+      if ((t === '\u203a' || t === '>' || /^(next|\u4e0b\u4e00\u9875)$/i.test(t)) && a.href && /^https?:/.test(a.href)) return a.href;
+    }
+    return '';
+  }
+  var btnSels = ['button[class*="load-more"]','button[class*="show-more"]','button[class*="more"]','[role="button"][class*="more"]'];
+  var sc = scroller();
+  if (!sc) return { h: 0, next: '' };
+  var step = Math.max(300, (sc.clientHeight || window.innerHeight) * 0.85);
+  var atBottom = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 300;
+  var next = '';
+  if (atBottom) {
+    next = nextPageUrl();
+    for (var i = 0; !next && i < btnSels.length; i++) {
+      var el = document.querySelector(btnSels[i]);
+      if (el && el.offsetWidth > 0 && el.offsetHeight > 0) { el.click(); break; }
+    }
+  }
+  try { sc.dispatchEvent(new WheelEvent('wheel', { deltaY: step, bubbles: true, cancelable: true })); } catch (e2) {}
+  window.scrollBy(0, step);
+  if (sc !== document.documentElement && sc !== document.scrollingElement) sc.scrollBy(0, step);
+  try { window.dispatchEvent(new Event('scroll')); } catch (e3) {}
+  return { h: sc.scrollHeight, next: next };
+})()`;
+
+function stopAutoScroll(id) {
+  const t = autoScrollTimers.get(id);
+  if (t) clearInterval(t);
+  autoScrollState.delete(id);
+  if (!autoScrollTimers.delete(id)) return;
+  bvPushNav();
+}
+
+// Paginated listings (supjav/jable WordPress themes) use /page/N/ paths or
+// ?page=N — derive the next page from the URL when the DOM has no next link.
+function candidateNextPage(url) {
+  try {
+    const u = new URL(url);
+    const m = /^(.*\/page\/)(\d+)(\/?)$/.exec(u.pathname);
+    if (m) { u.pathname = m[1] + (parseInt(m[2], 10) + 1) + m[3]; return u.href; }
+    const q = u.searchParams.get("page");
+    if (q && /^\d+$/.test(q)) { u.searchParams.set("page", String(parseInt(q, 10) + 1)); return u.href; }
+    if (/\/\d+\/?$/.test(u.pathname) && !/\.\w+$/.test(u.pathname)) {
+      u.pathname = u.pathname.replace(/(\d+)(\/?)$/, (s, n, sl) => (parseInt(n, 10) + 1) + sl);
+      return u.href;
+    }
+  } catch (e) { /* not a paginated URL */ }
+  return "";
+}
+
+// HEAD-check a candidate page so we never navigate into a 404. 403 is allowed
+// optimistically: it usually means Cloudflare answers our HEAD but the browser
+// view already has clearance and renders fine.
+async function urlReachable(url) {
+  try {
+    const cookie = await cookieHeaderFor(url);
+    const res = await requestWithRedirects(url, {
+      method: "HEAD",
+      headers: cookie ? { Cookie: cookie } : {},
+      retries: 0,
+      maxRetries: 1
+    });
+    try { res.res.resume(); } catch (e) { /* ignore */ }
+    return res.status < 400 || res.status === 403;
+  } catch (e) {
+    return false;
+  }
+}
+
+function startAutoScroll(id) {
+  if (autoScrollTimers.has(id)) return;
+  let lastH = -1;
+  let stillTicks = 0;
+  let lastNav = "";
+  autoScrollState.set(id, { h: 0, still: 0, next: "" });
+  const timer = setInterval(() => {
+    const en = browserTabs.get(id);
+    if (!en || en.view.webContents.isDestroyed()) { stopAutoScroll(id); return; }
+    en.view.webContents.executeJavaScript(LOAD_MORE_JS, true).then(async (r) => {
+      const h = r ? r.h : 0;
+      let next = (r && r.next) || "";
+      // Stuck at bottom ~4s -> turn the page in THIS tab. Prefer a link found
+      // in the DOM; otherwise derive /page/N+1 / ?page=N from the URL.
+      if (stillTicks > 10 && !next && h > 0) next = candidateNextPage(en.view.webContents.getURL());
+      const st = autoScrollState.get(id) || { h: 0, still: 0, next: "" };
+      st.h = h; st.still = stillTicks; st.next = next;
+      autoScrollState.set(id, st);
+      bvPushNav();
+      if (next && next !== lastNav && stillTicks > 10) {
+        const cur = en.view.webContents.getURL().split("#")[0];
+        if (next.split("#")[0] !== cur && await urlReachable(next)) {
+          lastNav = next;
+          stillTicks = 0;
+          lastH = -1;
+          en.view.webContents.loadURL(next).catch(() => {});
+          return;
+        }
+      }
+      if (h === lastH) { if (++stillTicks > 50) stopAutoScroll(id); }
+      else { stillTicks = 0; lastH = h; }
+    }).catch(() => { /* mid-navigation — keep looping */ });
+  }, 400);
+  autoScrollTimers.set(id, timer);
+}
 let browserContentRect = { x: 0, y: 86, width: 1200, height: 850 - 86 };
 
 function bvPositionActive() {
@@ -292,12 +430,15 @@ function bvPushNav() {
     browserWindow.webContents.send("browser-nav-state", {
       canGoBack: wc.canGoBack(),
       canGoForward: wc.canGoForward(),
-      url: wc.getURL()
+      url: wc.getURL(),
+      autoscroll: autoScrollTimers.has(e.id),
+      autoInfo: autoScrollState.get(e.id) || null
     });
   } catch (e) { /* ignore */ }
 }
 
-function bvAddTab(url) {
+function bvAddTab(url, opts) {
+  const activate = !(opts && opts.activate === false);
   if (!browserWindow || browserWindow.isDestroyed()) return null;
   const id = "bv" + (++browserSeq);
   const view = new BrowserView({
@@ -318,8 +459,22 @@ function bvAddTab(url) {
   view.webContents.on("did-start-loading", () => bvPushNav());
   view.webContents.on("did-stop-loading", () => { entry.url = view.webContents.getURL(); bvPushTabs(); bvPushNav(); });
 
+  // target=_blank / window.open become tabs instead of popup windows.
+  // background-tab disposition (middle-click) lands without stealing focus.
+  view.webContents.setWindowOpenHandler(({ url: u, disposition }) => {
+    if (/^https?:/i.test(u)) bvAddTab(u, { activate: disposition !== "background-tab" });
+    return { action: "deny" };
+  });
+  // New-tab mode: intercept page-initiated navigations and spawn a tab instead
+  view.webContents.on("will-navigate", (ev, u) => {
+    if (!bvNewTabMode || !/^https?:/i.test(u)) return;
+    ev.preventDefault();
+    bvAddTab(u);
+  });
+
   view.webContents.loadURL(entry.url).catch(() => {});
-  bvActivate(id);
+  if (activate) bvActivate(id);
+  else bvPushTabs();
   return id;
 }
 
@@ -337,6 +492,7 @@ function bvActivate(id) {
 
 function bvCloseTab(id) {
   if (!browserWindow || browserWindow.isDestroyed()) return;
+  stopAutoScroll(id);
   const e = browserTabs.get(id);
   if (!e) return;
   try { browserWindow.removeBrowserView(e.view); } catch (e2) { /* ignore */ }
@@ -387,6 +543,8 @@ function createBrowserWindow(urls) {
   });
   browserWindow.on("resize", () => bvPositionActive());
   browserWindow.on("closed", () => {
+    autoScrollTimers.forEach((t) => clearInterval(t));
+    autoScrollTimers.clear();
     browserTabs.forEach((e) => { try { e.view.webContents.destroy(); } catch (e2) { /* ignore */ } });
     browserTabs.clear();
     activeBrowserId = null;
@@ -753,6 +911,13 @@ if (gotLock) {
       browserContentRect = { x: rect.x || 0, y: rect.y || 0, width: rect.width, height: rect.height };
       bvPositionActive();
     }
+  });
+  ipcMain.on("bv-newtab-mode", (e, on) => { bvNewTabMode = !!on; });
+  ipcMain.on("bv-autoscroll", () => {
+    if (!activeBrowserId) return;
+    if (autoScrollTimers.has(activeBrowserId)) stopAutoScroll(activeBrowserId);
+    else startAutoScroll(activeBrowserId);
+    bvPushNav();
   });
   ipcMain.handle("browser-external", (e, url, browser) => openInExternalBrowser(url, browser));
   ipcMain.handle("extension-install", (e, browser) => launchExtensionInBrowser(browser));

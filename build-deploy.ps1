@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-Set-Location C:\dvdbak
+Set-Location C:\dev\deep-video-downloader
 
 # 1. install deps (idempotent)
 npm install 2>&1 | Select-Object -Last 3
@@ -16,7 +16,7 @@ Start-Sleep -Seconds 1
 
 # 5. deploy built output to C:\Program Files WITH ELEVATION
 #    (a plain /S install silently fails to overwrite Program Files without admin)
-$src = "C:\dvdbak\dist\win-unpacked"
+$src = "C:\dev\deep-video-downloader\dist\win-unpacked"
 $dst = "C:\Program Files\DeepVideoDownloader"
 $cmd = "Copy-Item -Path '$src\*' -Destination '$dst\' -Recurse -Force"
 Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile", "-Command", $cmd -Wait
