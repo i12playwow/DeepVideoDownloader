@@ -32,6 +32,29 @@ function isJunkNavUrl(u) {
   }
 }
 
+// JAV tube site navigation pages masquerade as movie slugs (invite-ads, genres,
+// new-releases, dmca, ...). Real sextb/supjav movie pages always carry a numeric
+// code in the last slug segment, so a single-segment path without one is nav,
+// never media. Keeps the browser autoloop crawl from enqueueing nav churn.
+const JAV_NAV_SEG = /^(?:feed|rss|atom|sitemap|robots|genre|genres|actor|actress|category|categories|tag|tags|search|page|top|latest|popular|model|free-cams|user|terms|privacy|contact|faq|about|login|register|stream|watch|studio|studios|series|playlist|invite-ads|private|new-releases|dmca|download|slut|hot|best|most|censored|uncensored|api|ajax|wp-json|wp-content|wp-admin|wp-includes|trackback|xmlrpc|author|date|embed|oembed)$/i;
+
+function isJavNavPage(u) {
+  try {
+    const url = new URL(u);
+    const host = url.hostname.toLowerCase().replace(/^(?:www\.|m\.)/, "");
+    if (!/(?:^|\.)(?:sextb|supjav|supremejav)\.(?:com|net|ph|live|ai|ws|xyz|cc)$/i.test(host)) return false;
+    if (/\.html?$/i.test(url.pathname)) return false;
+    const p = url.pathname.toLowerCase().replace(/\/+$/, "");
+    if (!p || p === "/") return true;
+    const seg = p.split("/").pop() || "";
+    if (!seg || seg.includes(".")) return false;
+    if (JAV_NAV_SEG.test(seg)) return true;
+    return !/\d/.test(seg);
+  } catch (e) {
+    return false;
+  }
+}
+
 // A source URL is only downloadable if it has a fetchable scheme. chrome- and
 // moz-extension wrappers (suspended/lazy-load tabs) are unwrapped to their
 // inner http(s) target first; anything else unsupported is rejected early so
@@ -424,7 +447,7 @@ class DownloadManager {
     let added = 0;
     for (const u of urls) {
       const s = unwrapExtensionUrl(typeof u === "string" ? u.trim() : "");
-      if (!isFetchableUrl(s) || isJunkNavUrl(s)) continue;
+      if (!isFetchableUrl(s) || isJunkNavUrl(s) || isJavNavPage(s)) continue;
       this._pending.push(dirOverride ? { url: s, dirOverride } : s);
       added++;
     }
@@ -464,7 +487,7 @@ class DownloadManager {
     url = unwrapExtensionUrl(url);
     referer = unwrapExtensionUrl(typeof referer === "string" ? referer : "") || "";
     if (!isFetchableUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
-    if (isJunkNavUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
+    if (isJunkNavUrl(url) || isJavNavPage(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
     if (resolvedUrl) resolvedUrl = unwrapExtensionUrl(resolvedUrl);
     // Duplicate handling: an already-downloaded URL becomes a "duplicate" list
     // entry (so the user can "Download anyway"), unless the bulk/windowed path
@@ -1504,4 +1527,4 @@ class DownloadManager {
   }
 }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isJavNavPage };

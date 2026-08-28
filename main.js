@@ -143,11 +143,18 @@ function startWsServer() {
 
   wss.on("connection", (ws) => {
     ws.send(JSON.stringify({ type: "hello", version: "1.0.0", port: config.port }));
+    const throttle = wsBridge.makeCrawlThrottle();
     ws.on("message", async (data) => {
       let msg;
       try {
         msg = JSON.parse(data.toString());
       } catch (e) {
+        return;
+      }
+      if (msg.type === "download" && throttle()) {
+        try {
+          ws.send(JSON.stringify({ type: "error", message: "Pace limit: too many downloads in the last minute.", url: msg.url }));
+        } catch (e) { /* ignore */ }
         return;
       }
       try {
@@ -715,6 +722,38 @@ function extensionDir() {
 // Chromium only honors --load-extension on a NON-default profile, so we run a
 // dedicated user-data-dir that persists — the extension stays loaded every time
 // that profile is opened, without touching the user's normal profile.
+
+// If the dedicated profile was left in a "Crashed" exit state, Chrome auto-restores
+// its saved tab session on the next launch. Over time that session can balloon to
+// hundreds of tabs (and GBs of RAM). Clear stale session files so the browser
+// opens fresh instead of restoring a runaway crashed session.
+function clearStaleBrowserSessions(profile) {
+  try {
+    const prefsFile = path.join(profile, "Default", "Preferences");
+    if (fs.existsSync(prefsFile)) {
+      let exitType = "";
+      try {
+        const prefs = JSON.parse(fs.readFileSync(prefsFile, "utf8"));
+        exitType = (prefs.profile && prefs.profile.exit_type) || "";
+      } catch (e) { /* unreadable profile -> leave sessions alone */ }
+      if (exitType === "Crashed") {
+        const sessionsDir = path.join(profile, "Default", "Sessions");
+        if (fs.existsSync(sessionsDir)) {
+          const removed = [];
+          for (const f of fs.readdirSync(sessionsDir)) {
+            const fp = path.join(sessionsDir, f);
+            try { fs.unlinkSync(fp); removed.push(f); }
+            catch (e) { console.error("[browser] session clear error:", f, e.message); }
+          }
+          if (removed.length) console.log("[browser] cleared", removed.length, "stale session file(s):", removed.join(", "));
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[browser] session clear failure:", e.message);
+  }
+}
+
 function launchExtensionInBrowser(browser) {
   const name = String(browser || "chrome").toLowerCase();
   const exe = findBrowser(name);
@@ -722,6 +761,7 @@ function launchExtensionInBrowser(browser) {
   const ext = extensionDir();
   if (!ext) return { error: "no-extension", browser: name };
   const profile = path.join(app.getPath("userData"), "browser-profile-" + name);
+  clearStaleBrowserSessions(profile);
   execFile(exe, [
     "--user-data-dir=" + profile,
     "--load-extension=" + ext,

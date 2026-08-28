@@ -282,8 +282,10 @@
     return true;
   }
   function isSextbMoviePath(p) {
-    if (/^\/(genre|actor|actress|list|jav|category|categories|tag|tags|search|page|top|latest|popular|model|free-cams|user|terms|privacy|contact|faq|about|login|register|stream|watch|studio|studios|series|playlist|feed|rss|atom|api|ajax|wp-json|wp-content|wp-admin|wp-includes|trackback|xmlrpc|author|date|embed|oembed)\b/i.test(p)) return false;
-    return /^\/[^/]+\/?$/i.test(p);
+    const m = /^\/([^/]+)\/?$/i.exec(p);
+    if (!m) return false;
+    if (/^\/(genre|actor|actress|list|jav|category|categories|tag|tags|search|page|top|latest|popular|model|free-cams|user|terms|privacy|contact|faq|about|login|register|stream|watch|studio|studios|series|playlist|invite-ads|private|genres|new-releases|dmca|download|slut|hot|best|most|censored|uncensored|feed|rss|atom|api|ajax|wp-json|wp-content|wp-admin|wp-includes|trackback|xmlrpc|author|date|embed|oembed)\b/i.test(p)) return false;
+    return /\d/.test(m[1]);
   }
   function isJavMoviePath(p) {
     return isSupjavMoviePath(p) || isSextbMoviePath(p);
