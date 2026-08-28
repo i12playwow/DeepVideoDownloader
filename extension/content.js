@@ -380,6 +380,44 @@
     }
   }
 
+  // missav.com & anti-bot tube sites: the full video lives on a /player/ or
+  // /embed/ page (or lazy iframe) whose source is in the player page's DOM/JS —
+  // never in a listing-page attribute. Fetch the player page same-origin (the
+  // extension runs in the page, so the request carries the Cloudflare session
+  // the browser already solved) and report the mp4/m3u8. Each player resolved once.
+  const resolvedMissav = new Set();
+  async function extractMissav() {
+    if (!/missav\d*\.(ws|ai|com|live|xyz)/i.test(location.hostname)) return;
+    const players = new Set();
+    document.querySelectorAll("a[href], iframe[src], iframe[data-src]").forEach((el) => {
+      const v = (el.getAttribute("href") || el.getAttribute("src") || el.getAttribute("data-src") || "").trim();
+      if (!v) return;
+      if (/\/player\//i.test(v) || /\/embed\//i.test(v)) {
+        players.add(/^https?:\/\//i.test(v) ? v : location.origin + (v.startsWith("/") ? "" : "/") + v);
+      }
+    });
+    for (const u of players) {
+      if (resolvedMissav.has(u)) continue;
+      resolvedMissav.add(u);
+      try {
+        const html = await (await fetch(u)).text();
+        let m = /<video[^>]*>\s*<source[^>]+src=["']([^"']+\.(?:mp4|m3u8|webm)[^"']*)["']/i.exec(html);
+        if (!m) m = /<video[^>]+src=["']([^"']+\.(?:mp4|m3u8|webm)[^"']*)["']/i.exec(html);
+        if (!m) m = /["']file["']\s*:\s*["']([^"']+\.(?:mp4|m3u8|webm)[^"']*)["']/i.exec(html);
+        if (!m) continue;
+        const url = m[1].replace(/\\\//g, "/");
+        if (found.has(url)) continue;
+        const kind = /\.m3u8([?#]|$)/i.test(url) ? "m3u8" : "mp4";
+        const h1 = document.querySelector("#video-name, .movie-info h1, h1");
+        const title = (h1 ? h1.textContent.trim() : "") || document.title.replace(/\s*-\s*[^-]*$/, "");
+        found.set(url, { url, title, size: 0, added: false, kind, _rank: 0 });
+        chrome.runtime.sendMessage({ type: "video-found", url, title, pageUrl: location.href, kind }).catch(() => {});
+        renderFoundList();
+        updateCounts();
+      } catch (e) { /* player fetch failed — webRequest capture remains the fallback */ }
+    }
+  }
+
   function hookNetwork() {
     const origOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function (method, url) {
@@ -1283,6 +1321,7 @@ const acted = clickCloudflareWidget();
       scanSupjavList();
       scanSupjavDl();
       extractCnPorn();
+      extractMissav();
     }, 3000);
 
     setInterval(() => {
@@ -1298,6 +1337,7 @@ const acted = clickCloudflareWidget();
       scanSupjavList();
       scanSupjavDl();
       extractCnPorn();
+      extractMissav();
       if (IS_TOP) refreshFromBackground(true);
       sendResponse({ ok: true, count: found.size });
       return false;
