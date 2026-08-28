@@ -25,6 +25,32 @@ function parseProxyUrl(p) {
   }
 }
 
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Match a host against a rule pattern (already lower-cased inputs).
+function matchHost(pattern, host) {
+  if (!pattern || !host) return false;
+  pattern = pattern.trim().toLowerCase();
+  // /regex/ literal
+  if (pattern.length > 1 && pattern.startsWith("/") && pattern.endsWith("/")) {
+    try { return new RegExp(pattern.slice(1, -1), "i").test(host); } catch (e) { return false; }
+  }
+  // *.suffix  -> matches suffix.com and anything.suffix.com (only when the
+  // pattern has no further wildcards; otherwise it's a glob below)
+  if (pattern.startsWith("*.") && !pattern.slice(2).includes("*")) {
+    const suffix = pattern.slice(1); // ".example.com"
+    return host === suffix.slice(1) || host.endsWith(suffix);
+  }
+  // * glob
+  if (pattern.includes("*")) {
+    const re = new RegExp("^" + pattern.split("*").map(escapeRegex).join(".*") + "$", "i");
+    return re.test(host);
+  }
+  return host === pattern;
+}
+
 function agentFor(proxy, targetUrl) {
   if (!proxy) return null;
   const isHttps = /^https:/i.test(targetUrl);
@@ -44,8 +70,19 @@ function transport(targetUrl) {
 class ProxyManager {
   constructor(config) {
     this.config = config;
+    this.rules = (config && Array.isArray(config.proxyRules)) ? config.proxyRules : [];
     this.bad = new Map();   // proxy url -> timestamp of last failure
     this.latency = new Map(); // proxy url -> last measured ms
+  }
+
+  // Match a host against a rule pattern: exact, "*.suffix", "*" glob, or
+  // "/regex/" literal (all case-insensitive).
+  ruleFor(host) {
+    const h = (host || "").toLowerCase();
+    for (const r of this.rules) {
+      if (r && matchHost(r.host, h)) return r;
+    }
+    return null;
   }
 
   list() {
@@ -123,8 +160,34 @@ class ProxyManager {
     });
   }
 
-  // Return the best proxy for a target (auto mode). Falls back to next best.
+  // Return the best proxy for a target. Honors per-host rules first (only when
+  // autoProxy is ON, since callers only invoke this in that case), falling back
+  // to the lowest-latency proxy from the pool.
   async pickBest(targetUrl, timeout = 6000) {
+    let host = null;
+    try { host = new URL(targetUrl).hostname; } catch (e) { host = null; }
+
+    // 1) per-host rule
+    if (host) {
+      const rule = this.ruleFor(host);
+      if (rule) {
+        if (rule.proxy === "direct") return null;
+        const p = parseProxyUrl(rule.proxy);
+        if (!p) {
+          console.warn("[proxy] dropping invalid rule proxy: " + rule.proxy);
+        } else {
+          const lat = await this.testLatency(p, targetUrl, timeout);
+          if (lat && lat.ms != null) {
+            this.latency.set(p.url, lat.ms);
+            return p;
+          }
+          // dead rule proxy -> fall back to the auto pool
+          console.warn("[proxy] rule proxy dead, falling back to auto pool: " + rule.proxy);
+        }
+      }
+    }
+
+    // 2) auto pool lowest latency
     const proxies = this.list().filter((p) => !this.isBad(p));
     if (!proxies.length) return null;
 
@@ -144,4 +207,4 @@ class ProxyManager {
   }
 }
 
-module.exports = { ProxyManager, parseProxyUrl, agentFor, transport };
+module.exports = { ProxyManager, parseProxyUrl, agentFor, transport, matchHost };

@@ -5,6 +5,12 @@
   if (window.__DEEPVID_INJECTED__) return;
   window.__DEEPVID_INJECTED__ = true;
 
+  // The extension runs in every frame (manifest all_frames:true). Only the
+  // top frame should build the UI and run the periodic scans — otherwise a
+  // page full of iframes spawns dozens of toolbars + scan loops that peg the
+  // CPU. Network capture still happens globally via background.js webRequest.
+  const IS_TOP = (window === window.top);
+
   // Ad-network hosts whose streams/players must never be captured as videos.
   const AD_DOMAINS = /(?:^|\.)(?:doubleclick\.net|googlesyndication\.com|adservice\.google\.com|ads\.youtube\.com|adroll\.com|criteo\.com|taboola\.com|outbrain\.com|adnxs\.com|amazon-adsystem\.com|adform\.net|adcolony\.com|smartadserver\.com|rubiconproject\.com|pubmatic\.com|openx\.net|appnexus\.com|casalemedia\.com|adsrvr\.org|exoclick\.com|popads\.net|propellerads\.com|mgid\.com|revcontent\.com|adsterra\.com|juicyads\.com)$/i;
   const isAdUrl = (u) => {
@@ -193,6 +199,9 @@
     if (!isVideoEl && !looksLikeVideoUrl(url)) return;
     if (url.startsWith("blob:")) return;
     const clean = url.startsWith("//") ? location.protocol + url : url;
+    // Only fetchable schemes: tab-suspender/lazy-load chrome-extension pages
+    // (…/suspended.html#uri=<url>) and other browser-internal schemes are junk.
+    if (!/^(?:https?|blob):/i.test(clean)) return;
     // streamtape/fstape embed <title> is generic/empty, but the URL slug has
     // the video name — prefer it as the fallback title.
     const pageTitle = slugTitle(location.href) || document.title;
@@ -208,7 +217,7 @@
         chrome.runtime.sendMessage({ type: "remove-found", urls: [cur.url] }).catch(() => {});
       }
       const titleText = (title || pageTitle || clean.split("/").pop()).trim();
-      found.set(clean, { title: titleText, size: 0, added: false, kind: "mp4", _rank: rank });
+      found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind: "mp4", _rank: rank });
       chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind: "mp4" }).catch(() => {});
       maybeAutoDownload(clean);
       renderFoundList();
@@ -218,7 +227,7 @@
 
     if (found.has(clean)) return;
     const titleText = (title || pageTitle || clean.split("/").pop()).trim();
-    found.set(clean, { title: titleText, size: 0, added: false, kind: kindOf(clean) });
+    found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind: kindOf(clean) });
     chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind: kindOf(clean) }).catch(() => {});
     renderFoundList();
     updateCounts();
@@ -255,6 +264,86 @@
     });
   }
 
+  // On supjav list pages (category / popular / search / pagination) the items are
+  // movie *pages*, not media files. Capture those page URLs as "link" sources so
+  // the desktop resolver can open each one and pull its stream.
+  function isSupjavHostname(h) {
+    return /(?:supjav|supremejav)\.(?:com|ph|net)$/i.test(h);
+  }
+  function isSextbHostname(h) {
+    return /(?:sextb)\.(?:net|cc)$/i.test(h);
+  }
+  function isJavHostname(h) {
+    return isSupjavHostname(h) || isSextbHostname(h);
+  }
+  function isSupjavMoviePath(p) {
+    if (!/\.html?$/i.test(p)) return false;
+    if (/^\/(popular|search|category|tag|actor|genre|studio|series|playlist|page|top|latest|random|ranking|update|hd|cn|us|forum|faq|contact|uncensored|subbed|leak|best|most|watch|trending|censored|english|dubbed|4k|vr|feed|rss|atom|api|ajax|wp-json|wp-admin|author|date|embed|oembed)\b/i.test(p)) return false;
+    return true;
+  }
+  function isSextbMoviePath(p) {
+    if (/^\/(genre|actor|actress|list|jav|category|categories|tag|tags|search|page|top|latest|popular|model|free-cams|user|terms|privacy|contact|faq|about|login|register|stream|watch|studio|studios|series|playlist|feed|rss|atom|api|ajax|wp-json|wp-content|wp-admin|wp-includes|trackback|xmlrpc|author|date|embed|oembed)\b/i.test(p)) return false;
+    return /^\/[^/]+\/?$/i.test(p);
+  }
+  function isJavMoviePath(p) {
+    return isSupjavMoviePath(p) || isSextbMoviePath(p);
+  }
+  function scanSupjavList() {
+    if (!isJavHostname(location.hostname)) return;
+    document.querySelectorAll("a[href]").forEach((a) => {
+      const href = a.href;
+      if (!href) return;
+      let u;
+      try { u = new URL(href); } catch (e) { return; }
+      if (!isJavHostname(u.hostname) || !isJavMoviePath(u.pathname)) return;
+      const title = (a.getAttribute("title") || a.textContent || "").trim() || document.title;
+      tryCaptureMoviePage(href, title);
+    });
+  }
+  function tryCaptureMoviePage(url, title) {
+    if (isAdUrl(url)) return;
+    const clean = url.startsWith("//") ? location.protocol + url : url;
+    if (!/^(?:https?):/i.test(clean)) return;
+    if (found.has(clean)) return;
+    const titleText = (title || clean.split("/").pop()).trim();
+    found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind: "link", _rank: 0 });
+    chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind: "link" }).catch(() => {});
+    renderFoundList();
+    updateCounts();
+  }
+
+  // supjav movie pages expose real download entry points as ?dl= links that
+  // redirect (server-side) to the file host (RapidGator / keep2share). Capture
+  // them so the user can export / hand them to the desktop resolver.
+  function isSupjavDlUrl(raw) {
+    if (!/[?&]dl=[^&"'\s]+/i.test(raw)) return false;
+    if (/^https?:\/\//i.test(raw)) {
+      try { return isSupjavHostname(new URL(raw).hostname); } catch (e) { return false; }
+    }
+    return true;
+  }
+  function scanSupjavDl() {
+    if (!isJavHostname(location.hostname)) return;
+    document.querySelectorAll("a[href]").forEach((a) => {
+      const href = a.getAttribute("href");
+      if (!href || !isSupjavDlUrl(href)) return;
+      const clean = href.startsWith("//") ? location.protocol + href : href;
+      const label = (a.getAttribute("title") || a.textContent || "").trim() || "supjav download";
+      tryCaptureDl(clean, label);
+    });
+  }
+  function tryCaptureDl(url, title) {
+    if (isAdUrl(url)) return;
+    const clean = url.startsWith("//") ? location.protocol + url : url;
+    if (!/^(?:https?):/i.test(clean)) return;
+    if (found.has(clean)) return;
+    const titleText = title || "supjav download";
+    found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind: "link", _rank: 0 });
+    chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind: "link" }).catch(() => {});
+    renderFoundList();
+    updateCounts();
+  }
+
   // cnporn.org video pages: the player is a lazy /embed/<uuid> iframe whose
   // sources live in the embed page's inline JS — never in a DOM attribute.
   // Fetch the embed (same-origin) and report the mp4/m3u8 so the user doesn't
@@ -281,7 +370,7 @@
         const h1 = document.querySelector("#video-name, .movie-info h1, h1");
         const title = (h1 ? h1.textContent.trim() : "") || document.title.replace(/\s*-\s*[^-]*$/, "");
         const kind = /\.mp4([?#]|$)/i.test(url) ? "mp4" : "m3u8";
-        found.set(url, { title, size: 0, added: false, kind, _rank: 0 });
+        found.set(url, { url, title, size: 0, added: false, kind, _rank: 0 });
         chrome.runtime.sendMessage({ type: "video-found", url, title, pageUrl: location.href, kind }).catch(() => {});
         renderFoundList();
         updateCounts();
@@ -465,18 +554,8 @@
       if (!resp) return;
     const grabBtn = document.getElementById("dv-grab");
     if (grabBtn) {
-      grabBtn.addEventListener("click", () => {
-        grabOn = !grabOn;
-        grabBtn.textContent = grabOn ? "■ Send" : "▶ Send";
-        grabBtn.classList.toggle("dv-on", grabOn);
-        toast(grabOn ? "Auto-send ON — new videos are sent automatically" : "Auto-send OFF");
-        if (grabOn) {
-          // send the current best immediately, then flush anything stashed offline
-          const cur = found.size ? found.values().next().value : null;
-          if (cur && !cur.added) maybeAutoDownload(cur.url);
-          flushAutoPending();
-        }
-      });
+      grabBtn.textContent = grabOn ? "■ Send" : "▶ Send";
+      grabBtn.classList.toggle("dv-on", grabOn);
     }
     const runBtn = document.getElementById("dv-run");
       if (runBtn) {
@@ -499,6 +578,7 @@
             // for Cloudflare/anti-bot sites (missav*); surface them in best-only
             // mode too so they're addable without toggling Best only off.
             found.set(v.url, {
+              url: v.url,
               title: v.title || "",
               size: v.size || 0,
               added: !!v.added || capturedUrls.has(v.url),
@@ -510,6 +590,7 @@
         if (!found.has(v.url)) {
           // merge in videos found by other tabs / earlier sessions in real time
           found.set(v.url, {
+            url: v.url,
             title: v.title || "",
             size: v.size || 0,
             added: !!v.added || capturedUrls.has(v.url),
@@ -521,6 +602,12 @@
         if (v.size) row.size = v.size;
         row.added = !!v.added || capturedUrls.has(v.url);
       });
+      // Prune items the app already captured/removed so they leave the panel
+      // once downloading starts (keeps the list focused on what's left).
+      const respUrls = new Set((resp.found || []).map((v) => v.url));
+      for (const [key, v] of Array.from(found.entries())) {
+        if (v.added && !respUrls.has(key)) { found.delete(key); selected.delete(key); }
+      }
       renderFoundList();
       updateCounts();
     });
@@ -604,6 +691,7 @@
             <label class="dv-all" title="Select all shown videos"><input type="checkbox" id="dv-selall"> All</label>
             <button id="dv-addsel" class="dv-mini" disabled>+ Add sel</button>
             <button id="dv-removesel" class="dv-mini" disabled>✕ Remove sel</button>
+            <button id="dv-export" class="dv-mini" title="Export collected URLs (selected, or all shown)">⤓ Export</button>
             <span id="dv-selcount" class="dv-counts"></span>
           </div>
           <ul id="dv-found"></ul>
@@ -699,10 +787,27 @@
     scanBtn.addEventListener("click", () => {
       scanVideoElements();
       scanPageLinks();
+      scanSupjavList();
+      scanSupjavDl();
       extractCnPorn();
       refreshFromBackground(true);
       toast(`Scan done — ${found.size} videos`);
     });
+    const grabBtn = document.getElementById("dv-grab");
+    if (grabBtn) {
+      grabBtn.addEventListener("click", () => {
+        grabOn = !grabOn;
+        grabBtn.textContent = grabOn ? "■ Send" : "▶ Send";
+        grabBtn.classList.toggle("dv-on", grabOn);
+        toast(grabOn ? "Auto-send ON — new videos are sent automatically" : "Auto-send OFF");
+        if (grabOn) {
+          // send the current best immediately, then flush anything stashed offline
+          const cur = found.size ? found.values().next().value : null;
+          if (cur && !cur.added) maybeAutoDownload(cur.url);
+          flushAutoPending();
+        }
+      });
+    }
     addAllBtn.addEventListener("click", () => {
       const urls = Array.from(found.values())
         .filter((v) => matchesRules(v) && !v.added)
@@ -749,7 +854,12 @@
       const shown = Array.from(found.values()).filter((v) => matchesRules(v));
       if (selAll.checked) shown.forEach((v) => selected.add(v.url));
       else shown.forEach((v) => selected.delete(v.url));
-      renderFoundList();
+      // Reflect selection directly onto the visible row checkboxes (not just via
+      // renderFoundList) so the tick state is always in sync with `selected`.
+      const listEl = document.getElementById("dv-found");
+      if (listEl) listEl.querySelectorAll("input[data-sel]").forEach((cb) => {
+        cb.checked = selected.has(cb.dataset.sel);
+      });
       updateBatch();
     });
 
@@ -779,6 +889,22 @@
         toast(urls.length + " removed");
       });
     });
+
+    const exportBtn = host.querySelector("#dv-export");
+    if (exportBtn) {
+      exportBtn.addEventListener("click", () => {
+        const useSelected = selected.size > 0;
+        const urls = useSelected
+          ? Array.from(selected)
+          : Array.from(found.values()).filter((v) => matchesRules(v)).map((v) => v.url);
+        const uniq = Array.from(new Set(urls.filter(Boolean)));
+        if (!uniq.length) { toast("No URLs to export"); return; }
+        const text = uniq.join("\n");
+        copyText(text);
+        downloadText("deepgrab-urls.txt", text);
+        toast("Exported " + uniq.length + " URL" + (uniq.length === 1 ? "" : "s") + (useSelected ? " (selected)" : " (all)"));
+      });
+    }
 
     // initial state from config — auto-scroll never resumes by itself; press
     // ↓ Auto-scroll on each page where you want it
@@ -841,7 +967,7 @@
       updateBatch();
       return;
     }
-    const shown = entries.slice(0, 200);
+    const shown = entries;
     shown.forEach((v) => {
       const li = document.createElement("li");
       li.className = "dv-item";
@@ -877,12 +1003,6 @@
       li.appendChild(btn);
       listEl.appendChild(li);
     });
-    if (entries.length > 200) {
-      const li = document.createElement("li");
-      li.className = "dv-empty";
-      li.textContent = "… " + (entries.length - 200) + " more (scroll more)";
-      listEl.appendChild(li);
-    }
   }
 
   function updateCounts() {
@@ -924,6 +1044,20 @@
     } catch (e) { /* clipboard unavailable */ }
   }
 
+  function downloadText(name, text) {
+    try {
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) { /* download unavailable */ }
+  }
+
   // ---------- desktop status ----------
   function refreshStatus() {
     chrome.runtime.sendMessage({ type: "desktop-status" }, (resp) => {
@@ -936,7 +1070,7 @@
       if (on && grabOn) flushAutoPending();
     });
   }
-  setInterval(refreshStatus, 3000);
+  if (IS_TOP) setInterval(refreshStatus, 3000);
 
   // ---------- config ----------
   function saveConfig() {
@@ -987,20 +1121,41 @@
   let cfLastClick = 0;
   let cfTries = 0;
   let cfGaveUp = false;
+  const CF_COOLDOWN_MS = 6000;   // Turnstile verifies on its own after ONE click;
+  const CF_MAX_CLICKS = 5;       // re-clicking sooner re-triggers the challenge loop.
+  const CF_RELOADS_KEY = "dvCfReloads";
+  // Soft interstitials ("Checking your browser...") have NO clickable widget;
+  // Cloudflare runs proof-of-work (can take 20-45s under suspicion) then sets
+  // the cf_clearance cookie and reloads with a token. Reloading too early kills
+  // the verification mid-flight, so wait long before one gentle retry.
+  const CF_SOFT_TIMEOUT_MS = 45000;
+  const CF_SOFT_MAX_RELOADS = 1;
+  let cfSoftSince = 0;
+  let cfSoftReloads = 0;
+  function cfReloadBudget() {
+    try { return Math.max(0, 2 - (parseInt(sessionStorage.getItem(CF_RELOADS_KEY) || "0", 10) || 0)); } catch (e) { return 0; }
+  }
+  function cfSpendReload() {
+    try { sessionStorage.setItem(CF_RELOADS_KEY, String((parseInt(sessionStorage.getItem(CF_RELOADS_KEY) || "0", 10) || 0) + 1)); } catch (e) { /* ignore */ }
+  }
+  function cfClearReloadBudget() {
+    try { sessionStorage.removeItem(CF_RELOADS_KEY); } catch (e) { /* ignore */ }
+  }
+  // Checkbox clicks are only safe inside real Cloudflare frames — the page's
+  // own checkboxes must never be touched (title text alone can misfire).
+  function cfFrameKind() {
+    if (/challenges\.cloudflare\.com$/i.test(location.hostname)) return "checkbox";
+    if (document.getElementById("challenge-form") || document.getElementById("challenge-stage")) return "checkbox";
+    return "soft";
+  }
   function clickCloudflareWidget() {
     const now = Date.now();
-    // Turnstile needs a single click, then a few seconds to verify on its own.
-    // Re-clicking every tick interrupts that verification, so enforce a cooldown.
-    if (now - cfLastClick < 6000) return false;
+    // Single click, then wait out the cooldown while Turnstile verifies.
+    if (now - cfLastClick < CF_COOLDOWN_MS) return false;
     if (!looksLikeCloudflareChallenge()) return false;
-    const targets = [
-      'input[type="checkbox"]',
-      '[role="checkbox"]',
-      "#challenge-stage button",
-      "#challenge-form button",
-      "button[type=submit]",
-      ".cf-turnstile"
-    ];
+    const targets = cfFrameKind() === "checkbox"
+      ? ['input[type="checkbox"]', '[role="checkbox"]', "#challenge-stage button", "#challenge-form button", "button[type=submit]", ".cf-turnstile"]
+      : ["#challenge-stage button", "#challenge-form button", "button[type=submit]", ".cf-turnstile"];
     let acted = false;
     for (const sel of targets) {
       document.querySelectorAll(sel).forEach((el) => {
@@ -1013,9 +1168,16 @@
       cfLastClick = now;
       cfTries++;
       console.info("DeepVid: clicked Cloudflare challenge in", location.href, "(attempt " + cfTries + ")");
-      if (cfTries >= 6) {
-        cfGaveUp = true;
-        console.warn("DeepVid: Cloudflare challenge not auto-solving - please solve it manually, then the page will continue.");
+      if (cfTries >= CF_MAX_CLICKS && IS_TOP) {
+        if (cfReloadBudget() > 0) {
+          cfSpendReload();
+          cfTries = 0;
+          console.warn("DeepVid: challenge stuck — reloading once for a fresh verification token (" + cfReloadBudget() + " reload(s) left)");
+          setTimeout(() => { try { location.reload(); } catch (e) { /* ignore */ } }, 800);
+        } else {
+          cfGaveUp = true;
+          console.warn("DeepVid: Cloudflare challenge not auto-solving - please solve it manually, then the page will continue.");
+        }
       }
     }
     return acted;
@@ -1025,13 +1187,49 @@
     if (cfSolverTimer) return;
     cfSolverTimer = setInterval(() => {
       if (cfGaveUp) { clearInterval(cfSolverTimer); cfSolverTimer = 0; return; }
-      // only act while a challenge is present; stop once it clears
+      // only act while a challenge is present; stop (and refund the reload
+      // budget) once it clears, so a later challenge starts fresh
       if (!looksLikeCloudflareChallenge()) {
         clearInterval(cfSolverTimer);
         cfSolverTimer = 0;
+        cfClearReloadBudget();
+        cfSoftSince = 0;
         return;
       }
-      clickCloudflareWidget();
+const acted = clickCloudflareWidget();
+      // Soft interstitial with nothing to click (and no Turnstile iframe to
+      // hand off to): give Cloudflare's proof-of-work a full CF_SOFT_TIMEOUT_MS
+      // to issue cf_clearance before one gentle reload. If even that fails,
+      // flag for manual solve (visible banner, not a silent forever-spinner).
+      if (!acted && cfFrameKind() === "soft" && IS_TOP && !document.querySelector('iframe[src*="challenges.cloudflare.com"]')) {
+        const now = Date.now();
+        if (!cfSoftSince) cfSoftSince = now;
+        if (now - cfSoftSince >= CF_SOFT_TIMEOUT_MS) {
+          cfSoftSince = 0;
+          cfSoftReloads++;
+          if (cfSoftReloads <= CF_SOFT_MAX_RELOADS && cfReloadBudget() > 0) {
+            cfSpendReload();
+            console.warn("DeepVid: cloudflare soft challenge not verifying - one gentle reload for a fresh token (" + cfReloadBudget() + " reload(s) left)");
+            setTimeout(() => { try { location.reload(); } catch (e) { /* ignore */ } }, 800);
+          } else {
+            cfGaveUp = true;
+            console.warn("DeepVid: Cloudflare challenge not auto-solving - please solve it manually, then the page will continue.");
+            if (document.getElementById("dv-cf-banner") == null) {
+              const b = document.createElement("div");
+              b.id = "dv-cf-banner";
+              b.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:2147483647;background:rgba(20,20,30,.92);color:#fff;font:500 13px/1.4 Segoe UI,Arial,sans-serif;padding:10px 14px;text-align:center";
+              b.innerHTML = "Cloudflare challenge couldn't be auto-solved. <a href='#' style='color:#4fc3f7' id='dv-cf-retry'>Reload once</a> and wait ~45s, or solve it manually below.";
+              b.addEventListener("click", (ev) => {
+                const t = ev.target;
+                if (t && t.id === "dv-cf-retry") { ev.preventDefault(); location.reload(); }
+              });
+              document.documentElement.appendChild(b);
+            }
+          }
+        }
+      } else if (acted) {
+        cfSoftSince = 0;
+      }
     }, 2000);
   }
   function maybeStartCloudflareSolver() {
@@ -1052,53 +1250,59 @@
     document.addEventListener("auxclick", handleAuxClick, true);
     hookNetwork();
     maybeStartCloudflareSolver();
-    loadConfig();
+    // UI + heavy scanning only in the top frame; iframes keep network hooks
+    // + CF auto-click but skip the toolbar, observers and periodic scans.
+    if (IS_TOP) loadConfig();
   });
 
   // Debounced: on heavy pages a single burst of DOM changes would otherwise
-  // re-run the filter + video scan once per mutation.
-  let mutationTimer = 0;
-  const observer = new MutationObserver(() => {
-    if (mutationTimer) clearTimeout(mutationTimer);
-    mutationTimer = setTimeout(() => {
-      applyFilter();
+  // re-run the filter + video scan once per mutation. Top frame only.
+  if (IS_TOP) {
+    let mutationTimer = 0;
+    const observer = new MutationObserver(() => {
+      if (mutationTimer) clearTimeout(mutationTimer);
+      mutationTimer = setTimeout(() => {
+        applyFilter();
+        scanVideoElements();
+      }, 150);
+    });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["src", "data-src", "data-video", "data-mp4"]
+    });
+
+    // Periodic re-scan: catches videos whose src is set as a JS property
+    // (video.currentSrc) on elements that never start loading.
+    setInterval(() => {
+      if (document.hidden) return;
       scanVideoElements();
-    }, 150);
-  });
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeFilter: ["src", "data-src", "data-video", "data-mp4"]
-  });
+      scanSupjavList();
+      scanSupjavDl();
+      extractCnPorn();
+    }, 3000);
 
-  // Periodic re-scan: catches videos whose src is set as a JS property
-  // (video.currentSrc) on elements that never start loading. Skipped while the
-  // tab is hidden — with all_frames:true every background tab's iframes would
-  // otherwise keep scanning forever; the next visible tick catches up.
-  setInterval(() => {
-    if (document.hidden) return;
-    scanVideoElements();
-    extractCnPorn();
-  }, 3000);
-
-  setInterval(() => {
-    if (document.hidden) return;
-    refreshFromBackground(false);
-  }, 3000);
+    setInterval(() => {
+      if (document.hidden) return;
+      refreshFromBackground(false);
+    }, 3000);
+  }
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg && msg.type === "dv-rescan") {
       scanVideoElements();
       scanPageLinks();
+      scanSupjavList();
+      scanSupjavDl();
       extractCnPorn();
-      refreshFromBackground(true);
+      if (IS_TOP) refreshFromBackground(true);
       sendResponse({ ok: true, count: found.size });
       return false;
     }
     if (msg && msg.type === "dv-found-updated") {
       // background learned a new video / size from any tab — update now
-      refreshFromBackground(true);
+      if (IS_TOP) refreshFromBackground(true);
     }
     return false;
   });

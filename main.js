@@ -12,6 +12,8 @@ const { execFile } = require("child_process");
 const { WebSocketServer } = require("ws");
 const { DownloadManager, requestWithRedirects } = require("./downloader");
 const { ProxyManager } = require("./proxy");
+const browserOpen = require("./lib/browser-open");
+const wsBridge = require("./lib/ws-bridge");
 const { DEFAULT_CONFIG, loadConfig, saveConfig, validateConfig } = require("./config");
 
 // Dev builds read/write config.json next to main.js (gitignored). Packaged
@@ -48,53 +50,68 @@ async function probeUrl(url) {
 
 let config = loadConfig(CONFIG_PATH);
 let proxyManager = new ProxyManager(config);
-let dm = new DownloadManager({ config, proxyManager, onUpdate: pushUpdate, cookieProvider: (url) => cookieHeaderFor(url) });
+let dm = new DownloadManager({ config, proxyManager, onUpdate: pushUpdate, cookieProvider: (url) => cookieHeaderFor(url), onRequiresBrowser: (url) => browserOpen.queueBrowserOpen(url) });
 let mainWindow = null;
 let wss = null;
 
+// Batched renderer/extension updates: progress ticks fire up to several times
+// per second per download; coalescing them into a ~100ms flush window keeps
+// IPC + WS traffic proportional to what the user sees, not to disk throughput.
+const UPDATE_FLUSH_MS = 100;
+const updateQueue = [];
+let updateFlushTimer = null;
+
 function pushUpdate(item) {
-  if (item && item._removed) {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("download-update", item);
-    }
-    return;
+  updateQueue.push(item);
+  if (!updateFlushTimer) {
+    updateFlushTimer = setTimeout(flushUpdates, UPDATE_FLUSH_MS);
   }
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("download-update", item);
+}
+
+function flushUpdates() {
+  updateFlushTimer = null;
+  if (!updateQueue.length) return;
+  const batch = updateQueue.splice(0, updateQueue.length);
+  if (mainWindow && !mainWindow.isDestroyed() && batch.length) {
+    mainWindow.webContents.send("download-update", batch.length === 1 ? batch[0] : batch);
   }
-  // relay status back to the extension over WebSocket
+  // relay status back to the extension over WebSocket (one status per entry)
   const clients = wss ? Array.from(wss.clients) : [];
-  clients.forEach((client) => {
-    if (client.readyState === 1) {
-      client.send(JSON.stringify({
-        type: "status",
-        id: item.id,
-        url: item.url,
-        label: item.label,
-        fileName: item.fileName,
-        status: item.status,
-        total: item.total,
-        received: item.received,
-        progress: item.total ? item.received / item.total : 0,
-        speed: item.speed,
-        proxy: item.proxy,
-        error: item.error,
-        errorCategory: item.errorCategory,
-        refreshCount: item.refreshCount,
-        finalPath: item.finalPath,
-        thumb: item.thumb || ""
-      }));
+  if (clients.length && clients.some((c) => c.readyState === 1)) {
+    const payloads = batch.map((item) => JSON.stringify({
+      type: "status",
+      id: item.id,
+      url: item.url,
+      label: item.label,
+      fileName: item.fileName,
+      status: item.status,
+      total: item.total,
+      received: item.received,
+      progress: item.total ? item.received / item.total : 0,
+      speed: item.speed,
+      proxy: item.proxy,
+      error: item.error,
+      errorCategory: item.errorCategory,
+      refreshCount: item.refreshCount,
+      finalPath: item.finalPath,
+      thumb: item.thumb || ""
+    }));
+    clients.forEach((client) => {
+      if (client.readyState === 1) {
+        for (const p of payloads) {
+          try { client.send(p); } catch (e) { /* ignore */ }
+        }
+      }
+    });
+  }
+  // Auto-close the built-in browser tab that produced each finished download
+  // and move to the next, when enabled (matches by source page / referer URL).
+  if (config.autoCloseTab && browserWindow && !browserWindow.isDestroyed()) {
+    for (const item of batch) {
+      if (item.status === "done" || item.status === "error" || item.status === "cancelled") {
+        bvCloseTabForUrl(item.referer || item.url);
+      }
     }
-  });
-  // Auto-close the built-in browser tab that produced this download and move
-  // to the next, when enabled (matches by the source page / referer URL).
-  if (
-    config.autoCloseTab &&
-    browserWindow && !browserWindow.isDestroyed() &&
-    (item.status === "done" || item.status === "error" || item.status === "cancelled")
-  ) {
-    const ref = item.referer || item.url;
-    bvCloseTabForUrl(ref);
   }
 }
 
@@ -133,51 +150,15 @@ function startWsServer() {
       } catch (e) {
         return;
       }
-       if (msg.type === "download") {
-         try {
-            // `sources` (array of {kind,url,label}) may accompany a download:
-            // enqueue every `kind:"link"` entry AND every `kind:"iframe"` entry
-            // as its own download (label appended to the file name); fall back to
-            // plain `url` when no usable source exists. `iframe` carries the
-            // player page (e.g. supjav.php?l=<OLID>) which resolvers turn into a
-            // direct URL, so it must be enqueued — only `server` (often a
-            // `javascript:` pseudo-URL) is ignored.
-            const links = Array.isArray(msg.sources)
-              ? msg.sources.filter((s) => s && (s.kind === "link" || s.kind === "iframe") && typeof s.url === "string")
-              : [];
-           const usable = links.length
-             ? links
-             : (typeof msg.url === "string" ? [{ kind: "link", url: msg.url, label: "" }] : []);
-           if (!usable.length) {
-             ws.send(JSON.stringify({ type: "error", message: "No usable source", url: msg.url || "" }));
-             return;
-           }
-           const ids = [];
-            for (const s of usable) {
-              const cookieHeader = await gatherCookieHeader([s.url, msg.referer]);
-              const id = await dm.enqueue({
-                url: s.url,
-                title: msg.title,
-                referer: msg.referer,
-                label: s.label || "",
-                cookieHeader,
-                scheduledStart: msg.scheduledStart ? new Date(msg.scheduledStart).getTime() : null,
-                scheduledStop: msg.scheduledStop ? new Date(msg.scheduledStop).getTime() : null
-              });
-              ids.push(id);
-            }
-          ws.send(JSON.stringify({ type: "accepted", id: ids[0], ids, url: msg.url }));
-        } catch (e) {
-          ws.send(JSON.stringify({ type: "error", message: e.message, url: msg.url }));
-        }
-      }
-      if (msg.type === "ping") {
-        ws.send(JSON.stringify({ type: "pong" }));
-      }
-      if (msg.type === "probe") {
-        probeUrl(msg.url).then((r) => {
-          ws.send(JSON.stringify({ type: "probe-result", url: msg.url, ...r }));
+      try {
+        await wsBridge.handleWsMessage(msg, {
+          dm,
+          gatherCookieHeader,
+          probeUrl,
+          send: (o) => { try { ws.send(JSON.stringify(o)); } catch (e) { /* ignore */ } }
         });
+      } catch (e) {
+        try { ws.send(JSON.stringify({ type: "error", message: e.message, url: msg.url })); } catch (_) {}
       }
     });
     ws.on("error", () => {});
@@ -210,6 +191,15 @@ function createWindow() {
 
 // ---------------- built-in browser (Deep Grab extension) ----------------
 let browserWindow = null;
+// Throttled auto-open queue for requires-browser URLs lives in lib/browser-open
+// (so it's unit-testable). Wire its opener: open a single tab (creating the
+// browser window if needed); bulk opens go through queueBrowserOpenMany so they
+// are themselves concurrency-capped instead of opening everything at once.
+function openTab(u) {
+  if (!browserWindow || browserWindow.isDestroyed()) createBrowserWindow(u);
+  else bvAddTab(u);
+}
+browserOpen.setOpener(openTab);
 
 // Real browser UA for the built-in browser. Anti-bot/Cloudflare sites serve a
 // stripped or "verify you are human" partial page to the default Electron UA; a
@@ -271,6 +261,9 @@ let browserSeq = 0;
 // tab instead of replacing the current one. Address-bar Go / back / forward /
 // reload are unaffected (Electron doesn't fire will-navigate for them).
 let bvNewTabMode = true;
+// Auto group-by-site: keep tabs sorted by domain as new ones are added
+// (persisted renderer-side via localStorage; sent here on startup + toggle).
+let bvGroupMode = false;
 // Per-tab infinite scroll loops: entry id -> setInterval handle. Each tick
 // scrolls ~85% of a viewport and, when already at the bottom, clicks any
 // common "load more" / next-page control before scrolling again.
@@ -417,7 +410,7 @@ function bvPositionActive() {
 function bvPushTabs() {
   if (!browserWindow || browserWindow.isDestroyed()) return;
   const list = [];
-  browserTabs.forEach((e) => list.push({ id: e.id, title: e.title || e.url, url: e.url }));
+  browserTabs.forEach((e) => list.push({ id: e.id, title: e.title || e.url, url: e.url, suspended: !!e.suspended }));
   try { browserWindow.webContents.send("browser-tabs-update", list, activeBrowserId); } catch (e) { /* ignore */ }
 }
 
@@ -437,10 +430,8 @@ function bvPushNav() {
   } catch (e) { /* ignore */ }
 }
 
-function bvAddTab(url, opts) {
-  const activate = !(opts && opts.activate === false);
-  if (!browserWindow || browserWindow.isDestroyed()) return null;
-  const id = "bv" + (++browserSeq);
+// Shared factory so a suspended tab can be revived with identical wiring.
+function bvMakeView(entry) {
   const view = new BrowserView({
     webPreferences: {
       session: browserSession(),
@@ -450,14 +441,11 @@ function bvAddTab(url, opts) {
     }
   });
   view.setBackgroundColor("#0f172a");
-  const entry = { id, view, url: url || "https://www.google.com", title: "" };
-  browserTabs.set(id, entry);
-
   view.webContents.on("page-title-updated", (ev, title) => { entry.title = title; bvPushTabs(); });
-  view.webContents.on("did-navigate", (ev, u) => { entry.url = u; bvPushTabs(); bvPushNav(); });
+  view.webContents.on("did-navigate", (ev, u) => { entry.url = u; bvRedirecting = false; bvPushTabs(); bvPushNav(); });
   view.webContents.on("did-navigate-in-page", (ev, u) => { entry.url = u; bvPushTabs(); });
   view.webContents.on("did-start-loading", () => bvPushNav());
-  view.webContents.on("did-stop-loading", () => { entry.url = view.webContents.getURL(); bvPushTabs(); bvPushNav(); });
+  view.webContents.on("did-stop-loading", () => { entry.url = view.webContents.getURL(); entry.lastActive = Date.now(); bvPushTabs(); bvPushNav(); });
 
   // target=_blank / window.open become tabs instead of popup windows.
   // background-tab disposition (middle-click) lands without stealing focus.
@@ -465,23 +453,65 @@ function bvAddTab(url, opts) {
     if (/^https?:/i.test(u)) bvAddTab(u, { activate: disposition !== "background-tab" });
     return { action: "deny" };
   });
-  // New-tab mode: intercept page-initiated navigations and spawn a tab instead
+  // New-tab mode: intercept user-initiated navigations and spawn a tab instead
+  // of replacing the current one. Redirects (server 302 / refresh) follow in
+  // place so a redirecting page does not cascade into an endless tab loop.
+  let bvRedirecting = false;
+  view.webContents.on("will-redirect", () => { bvRedirecting = true; });
   view.webContents.on("will-navigate", (ev, u) => {
     if (!bvNewTabMode || !/^https?:/i.test(u)) return;
+    if (bvRedirecting) { bvRedirecting = false; return; }
+    if (u === entry.url) return;
     ev.preventDefault();
     bvAddTab(u);
   });
+  return view;
+}
 
-  view.webContents.loadURL(entry.url).catch(() => {});
+function bvAddTab(url, opts) {
+  const activate = !(opts && opts.activate === false);
+  if (!browserWindow || browserWindow.isDestroyed()) return null;
+  const id = "bv" + (++browserSeq);
+  const entry = { id, url: url || "https://www.google.com", title: "", lastActive: Date.now(), suspended: false };
+  entry.view = bvMakeView(entry);
+  browserTabs.set(id, entry);
+
+  entry.view.webContents.loadURL(entry.url).catch(() => {});
   if (activate) bvActivate(id);
   else bvPushTabs();
+  if (bvGroupMode) bvGroupByDomain();
   return id;
+}
+
+// OPTIMIZER: unload an idle tab's webContents to free memory but keep the
+// strip entry; clicking the tab revives it by reloading its last URL.
+function bvSuspendTab(id) {
+  const e = browserTabs.get(id);
+  if (!e || e.suspended || !e.view) return;
+  try {
+    const wc = e.view.webContents;
+    if (wc && !wc.isDestroyed()) {
+      e.url = wc.getURL() || e.url;
+      stopAutoScroll(id);
+      try { browserWindow.removeBrowserView(e.view); } catch (e2) { /* ignore */ }
+      try { wc.destroy(); } catch (e3) { /* ignore */ }
+    }
+  } catch (e2) { /* ignore */ }
+  e.view = null;
+  e.suspended = true;
+  bvPushTabs();
 }
 
 function bvActivate(id) {
   if (!browserWindow || browserWindow.isDestroyed()) return;
   const e = browserTabs.get(id);
   if (!e) return;
+  e.lastActive = Date.now();
+  if (e.suspended || !e.view) {
+    e.suspended = false;
+    e.view = bvMakeView(e);
+    e.view.webContents.loadURL(e.url).catch(() => {});
+  }
   browserTabs.forEach((en) => { try { browserWindow.removeBrowserView(en.view); } catch (e2) { /* ignore */ } });
   try { browserWindow.addBrowserView(e.view); } catch (e2) { /* ignore */ }
   activeBrowserId = id;
@@ -495,8 +525,10 @@ function bvCloseTab(id) {
   stopAutoScroll(id);
   const e = browserTabs.get(id);
   if (!e) return;
-  try { browserWindow.removeBrowserView(e.view); } catch (e2) { /* ignore */ }
-  try { e.view.webContents.destroy(); } catch (e2) { /* ignore */ }
+  if (e.view) {
+    try { browserWindow.removeBrowserView(e.view); } catch (e2) { /* ignore */ }
+    try { e.view.webContents.destroy(); } catch (e2) { /* ignore */ }
+  }
   browserTabs.delete(id);
   if (activeBrowserId === id) {
     const first = browserTabs.keys().next();
@@ -514,6 +546,76 @@ function bvCloseTabForUrl(url) {
   if (toClose) bvCloseTab(toClose);
 }
 
+function domainOf(url) {
+  try { return new URL(url).hostname.toLowerCase(); } catch (e) { return (url || "").toLowerCase(); }
+}
+function normTabUrl(url) {
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    if (u.pathname.endsWith("/")) u.pathname = u.pathname.slice(0, -1);
+    return u.href.toLowerCase();
+  } catch (e) { return (url || "").toLowerCase(); }
+}
+
+// ORGANIZER: close tabs whose URL duplicates another (keep the first / active).
+function bvCloseDuplicates() {
+  const seen = new Set();
+  const toClose = [];
+  browserTabs.forEach((e) => {
+    const key = normTabUrl(e.url);
+    if (seen.has(key)) toClose.push(e.id);
+    else seen.add(key);
+  });
+  toClose.forEach((id) => bvCloseTab(id));
+  if (toClose.length) console.log("[browser] closed " + toClose.length + " duplicate tab(s)");
+}
+
+// ORGANIZER: sort tabs so same-site tabs are adjacent.
+function bvGroupByDomain() {
+  const entries = [...browserTabs.entries()].sort((a, b) => domainOf(a[1].url).localeCompare(domainOf(b[1].url)));
+  browserTabs = new Map(entries);
+  if (activeBrowserId) bvActivate(activeBrowserId);
+  bvPushTabs();
+}
+
+// ORGANIZER: close every tab except the active one.
+function bvCloseOthers() {
+  const keep = activeBrowserId;
+  [...browserTabs.keys()].forEach((id) => { if (id !== keep) bvCloseTab(id); });
+}
+
+// ORGANIZER: close every tab on the active tab's domain.
+function bvCloseDomain() {
+  if (!activeBrowserId) return;
+  const dom = domainOf(browserTabs.get(activeBrowserId).url);
+  [...browserTabs.keys()].forEach((id) => { if (domainOf(browserTabs.get(id).url) === dom) bvCloseTab(id); });
+}
+
+// ORGANIZER: close all tabs (a fresh blank tab is left by bvCloseTab).
+function bvCloseAll() {
+  [...browserTabs.keys()].forEach((id) => bvCloseTab(id));
+}
+
+// OPTIMIZER: auto-suspend tabs idle longer than idleTabMinutes (unload the
+// webContents to free memory; the strip entry stays and reloads on click).
+function startIdleTabSweeper() {
+  setInterval(() => {
+    const mins = (config && Number(config.idleTabMinutes)) || 0;
+    if (!mins || !browserWindow || browserWindow.isDestroyed()) return;
+    const cutoff = Date.now() - mins * 60000;
+    [...browserTabs.keys()].forEach((id) => {
+      if (id === activeBrowserId) return;          // never suspend the active tab
+      if (autoScrollTimers.has(id)) return;         // don't interrupt captures
+      const e = browserTabs.get(id);
+      if (e && e.lastActive && e.lastActive < cutoff) {
+        console.log("[browser] idle suspend: " + (e.title || e.url));
+        bvSuspendTab(id);
+      }
+    });
+  }, 30000);
+}
+
 function sendBrowserTabs(urls, kind) {
   const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
   if (!browserWindow || browserWindow.isDestroyed()) { pendingTabs = pendingTabs.concat(list); return; }
@@ -524,7 +626,7 @@ function createBrowserWindow(urls) {
   const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
   if (browserWindow && !browserWindow.isDestroyed()) {
     browserWindow.show(); browserWindow.focus();
-    list.forEach((u) => bvAddTab(u));
+    browserOpen.queueBrowserOpenMany(list);
     return;
   }
   pendingTabs = list;
@@ -553,7 +655,7 @@ function createBrowserWindow(urls) {
   browserWindow.loadFile(path.join(__dirname, "browser.html")).catch(() => {});
   browserWindow.webContents.once("did-finish-load", () => {
     const l = pendingTabs; pendingTabs = [];
-    if (l.length) l.forEach((u) => bvAddTab(u));
+    if (l.length) browserOpen.queueBrowserOpenMany(l);
     else bvAddTab("https://www.google.com");
   });
 }
@@ -734,7 +836,7 @@ ipcMain.handle("download-resume-last", async () => {
 });
 ipcMain.handle("download-cancel", (e, id) => { dm.cancel(id); return { ok: true }; });
 ipcMain.handle("download-remove", (e, id) => { dm.remove(id); return { ok: true }; });
-ipcMain.handle("downloads-add", async (e, url) => {
+ipcMain.handle("downloads-add", async (e, url, dirOverride) => {
   if (!url || typeof url !== "string") return { ok: false, error: "Invalid URL" };
   try {
     let title = "video";
@@ -742,7 +844,7 @@ ipcMain.handle("downloads-add", async (e, url) => {
       const u = new URL(url);
       title = u.pathname.split("/").filter(Boolean).pop() || u.hostname;
     } catch (err) { /* keep default title */ }
-    const id = await dm.enqueue({ url, title, referer: "" });
+    const id = await dm.enqueue({ url, title, referer: "", dirOverride: typeof dirOverride === "string" && dirOverride.trim() ? dirOverride : null });
     return { ok: true, id, duplicate: id !== null && dm.isDownloaded(url) };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -751,10 +853,16 @@ ipcMain.handle("downloads-add", async (e, url) => {
 // Batch import — hands URLs to the windowed loader (addPending) so thousands of
 // URLs are pulled into the active map a few at a time instead of materializing
 // them all at once.
-ipcMain.handle("downloads-add-many", async (e, urls) => {
+ipcMain.handle("downloads-add-many", async (e, urls, dirOverride) => {
   if (!Array.isArray(urls)) return { ok: false, error: "Invalid list" };
-  const n = dm.addPending(urls);
+  const n = dm.addPending(urls, typeof dirOverride === "string" && dirOverride.trim() ? dirOverride : null);
   return { ok: true, count: n };
+});
+// Relocate a finished download (and its thumbnail) to another folder.
+ipcMain.handle("download-move", async (e, id, destDir) => {
+  if (!id || typeof destDir !== "string" || !destDir.trim()) return { ok: false, error: "missing id or folder" };
+  try { fs.statSync(destDir); } catch (err) { /* created on demand */ }
+  return await dm.moveDownloaded(id, destDir);
 });
 ipcMain.handle("downloads-force", (e, id) => ({ ok: dm.forceDownload(id) }));
 ipcMain.handle("download-schedule", (e, { id, mode, scheduledStart, scheduledStop }) => {
@@ -789,6 +897,13 @@ ipcMain.handle("test-proxies", async (e, target) => {
 });
 
 ipcMain.handle("get-active-dir", () => dm.dir);
+// Native folder picker for the Settings storage inputs (returns "" on cancel).
+ipcMain.handle("select-dir", async () => {
+  const { dialog } = require("electron");
+  const res = await dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"] });
+  if (res.canceled || !res.filePaths || !res.filePaths.length) return "";
+  return res.filePaths[0];
+});
 ipcMain.handle("open-dir", () => {
   try {
     const active = dm.dir; // opens the folder downloads currently land in
@@ -892,8 +1007,14 @@ if (gotLock) {
   ipcMain.handle("browser-nav", (e, url) => { createBrowserWindow(url); });
   ipcMain.handle("browser-get-tabs", () => { const t = pendingTabs; pendingTabs = []; return t; });
   ipcMain.on("bv-new-tab", () => { if (browserWindow && !browserWindow.isDestroyed()) bvAddTab("https://www.google.com"); });
-  ipcMain.on("bv-close", (e, id) => { bvCloseTab(id); });
-  ipcMain.on("bv-activate", (e, id) => { bvActivate(id); });
+ipcMain.on("bv-close", (e, id) => { bvCloseTab(id); });
+ipcMain.on("bv-activate", (e, id) => { bvActivate(id); });
+ipcMain.on("bv-dupes", () => { bvCloseDuplicates(); });
+ipcMain.on("bv-group", () => { bvGroupByDomain(); });
+ipcMain.on("bv-close-others", () => { bvCloseOthers(); });
+ipcMain.on("bv-close-domain", () => { bvCloseDomain(); });
+ipcMain.on("bv-close-all", () => { bvCloseAll(); });
+ipcMain.on("bv-group-mode", (e, on) => { bvGroupMode = !!on; if (bvGroupMode) bvGroupByDomain(); });
   ipcMain.on("bv-navigate", (e, url) => {
     if (!activeBrowserId) return;
     const en = browserTabs.get(activeBrowserId);
@@ -927,7 +1048,15 @@ if (gotLock) {
     createWindow();
     loadBrowserExtension();
     startClipboardMonitor();
+    startIdleTabSweeper();
     registerFileAssociations();
+    // Backfill thumbnails for old downloads (missing .thumb.jpg) after startup
+    // settles; each new thumb nudges the renderer to refresh the history list.
+    setTimeout(() => {
+      dm.backfillThumbs(() => {
+        try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("history-updated"); } catch (e) { /* ignore */ }
+      }).then((n) => { if (n) console.log("[thumbs] backfilled " + n + " thumbnail(s)"); }).catch(() => {});
+    }, 8000);
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });

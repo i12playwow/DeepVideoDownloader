@@ -14,11 +14,13 @@ contextBridge.exposeInMainWorld("api", {
   cancel: (id) => ipcRenderer.invoke("download-cancel", id),
   remove: (id) => ipcRenderer.invoke("download-remove", id),
   forceDownload: (id) => ipcRenderer.invoke("downloads-force", id),
-  add: (url) => ipcRenderer.invoke("downloads-add", url),
-  addMany: (urls) => ipcRenderer.invoke("downloads-add-many", urls),
+  add: (url, dirOverride) => ipcRenderer.invoke("downloads-add", url, dirOverride || null),
+  addMany: (urls, dirOverride) => ipcRenderer.invoke("downloads-add-many", urls, dirOverride || null),
+  moveDownload: (id, destDir) => ipcRenderer.invoke("download-move", id, destDir),
   schedule: (data) => ipcRenderer.invoke("download-schedule", data),
   testProxies: (url) => ipcRenderer.invoke("test-proxies", url),
   openDir: () => ipcRenderer.invoke("open-dir"),
+  chooseDir: () => ipcRenderer.invoke("select-dir"),
   getActiveDir: () => ipcRenderer.invoke("get-active-dir"),
   showInFolder: (p) => ipcRenderer.invoke("open-path", p),
   openBrowser: (urls) => ipcRenderer.invoke("browser-open", urls),
@@ -26,6 +28,7 @@ contextBridge.exposeInMainWorld("api", {
   openExternal: (url, browser) => ipcRenderer.invoke("browser-external", url, browser),
   installExtension: (browser) => ipcRenderer.invoke("extension-install", browser),
   onUpdate: (cb) => ipcRenderer.on("download-update", (e, item) => cb(item)),
+  onHistoryUpdated: (cb) => ipcRenderer.on("history-updated", () => cb()),
   onClipboardUrl: (cb) => ipcRenderer.on("clipboard-url", (e, data) => cb(data)),
   onFileOpened: (cb) => ipcRenderer.on("file-opened", (e, data) => cb(data))
 });

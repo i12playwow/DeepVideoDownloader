@@ -16,9 +16,29 @@ const { URL } = require("url");
 
 const { isExpiredError, isProxyFailure, isRateLimited, isCloudflareBlocked, categorizeError } = require("./lib/errors");
 const { requestWithRedirects, fetchHtml, delay, contentRangeStart, contentRangeTotal, DEFAULT_MAX_RETRIES } = require("./lib/http");
-const { HLS_MASTER_RE, isHlsUrl, parseHlsPlaylist, pickHlsVariant, stripPngPrefix } = require("./lib/hls");
+const { HLS_MASTER_RE, isHlsUrl, parseHlsPlaylist, pickHlsVariant, stripPngPrefix, matchHlsMaster } = require("./lib/hls");
 const { sanitizeName, titleFromReferer } = require("./lib/names");
 const { SJ_PLAYER_RE, resolveUrl, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster } = require("./lib/resolvers");
+const { unwrapExtensionUrl } = require("./lib/urls");
+
+// Feed/RSS-style navigation endpoints (WordPress tube sites emit <a href="/feed">)
+// are never media — they'd otherwise enqueue as bogus downloads from list scans.
+function isJunkNavUrl(u) {
+  try {
+    const seg = new URL(u).pathname.toLowerCase().replace(/\/+$/, "").split("/").pop() || "";
+    return ["feed", "rss", "atom", "sitemap.xml", "sitemap", "robots.txt", "favicon.ico"].includes(seg);
+  } catch (e) {
+    return false;
+  }
+}
+
+// A source URL is only downloadable if it has a fetchable scheme. chrome- and
+// moz-extension wrappers (suspended/lazy-load tabs) are unwrapped to their
+// inner http(s) target first; anything else unsupported is rejected early so
+// it never poisons the queue with a doomed item.
+function isFetchableUrl(s) {
+  return /^(?:https?|blob):/i.test(s || "");
+}
 
 const PART_EXT = ".part";
 const PROGRESS_INTERVAL = 300;
@@ -48,16 +68,22 @@ function refreshSourceUrl(item) {
 }
 
 class DownloadManager {
-  constructor({ config, proxyManager, onUpdate, cookieProvider }) {
+  constructor({ config, proxyManager, onUpdate, cookieProvider, onRequiresBrowser }) {
     this.config = config;
     this.proxyManager = proxyManager;
     this.onUpdate = onUpdate || (() => {});
     this.cookieProvider = cookieProvider || null;
+    // Called with a URL when a resolve fails because the site needs a real
+    // browser (Cloudflare/anti-bot). The app opens it in the built-in browser
+    // so the Deep Grab extension can capture the stream via webRequest.
+    this.onRequiresBrowser = onRequiresBrowser || (() => {});
     this.items = new Map();
     this.active = 0;
     this._id = 0;
     this.history = [];
     this._pending = [];       // bulk-import URLs waiting to be loaded into items
+    this._pendingIdx = 0;     // front-of-queue index (avoids O(n) shift)
+    this._queuedIds = new Set(); // ids of items with status="queued" (O(1) pump lookup)
     this._downloaded = new Set(); // URLs that reached "done" (for duplicate handling)
     this._hostLast = new Map();   // hostname -> last request time (per-host pacing)
     this._paceChains = new Map(); // hostname -> promise chain serializing _paceHost callers
@@ -149,13 +175,13 @@ class DownloadManager {
   _saveHistoryNow() {
     if (this.config.saveHistory === false) return; // history persistence toggle
     try {
-      fsp.writeFile(this.historyPath, JSON.stringify(this.history, null, 2), "utf8").catch(() => {});
+      fsp.writeFile(this.historyPath, JSON.stringify(this.history), "utf8").catch(() => {});
     } catch (e) { /* ignore */ }
   }
 
   _saveDownloadedNow() {
     try {
-      fsp.writeFile(this.downloadedPath, JSON.stringify(Array.from(this._downloaded), null, 0), "utf8").catch(() => {});
+      fsp.writeFile(this.downloadedPath, JSON.stringify(Array.from(this._downloaded)), "utf8").catch(() => {});
     } catch (e) { /* ignore */ }
   }
 
@@ -175,10 +201,26 @@ class DownloadManager {
   }
 
   getBandwidthStats() {
-    const allItems = Array.from(this.items.values()).concat(this.history);
-    const speeds = allItems
-      .filter((i) => i._samples && i._samples.length > 0)
-      .flatMap((i) => i._samples);
+    // Fold samples from the active items + the most recent history entries so
+    // a multi-thousand-entry history can't balloon this into hundreds of
+    // thousands of objects per poll (renderer calls this every 5s).
+    const speeds = [];
+    let budget = 4096;
+    for (const it of this.items.values()) {
+      if (it._samples && it._samples.length) {
+        speeds.push(...it._samples);
+        if (speeds.length >= budget) break;
+      }
+    }
+    if (speeds.length < budget) {
+      for (let i = this.history.length - 1; i >= 0 && speeds.length < budget; i--) {
+        const h = this.history[i];
+        if (h._samples && h._samples.length) {
+          speeds.push(...h._samples);
+          if (speeds.length >= budget) break;
+        }
+      }
+    }
 
     if (!speeds.length) {
       return { current: 0, avg: 0, peak: 0, count: 0, samples: [] };
@@ -222,6 +264,16 @@ class DownloadManager {
     return this._activeDirSync();
   }
 
+  // Per-download destination override; falls back to auto rotation when unset
+  // or the folder cannot be created.
+  _targetDir(item) {
+    const d = item && typeof item.dirOverride === "string" ? item.dirOverride.trim() : "";
+    if (d) {
+      try { fs.mkdirSync(d, { recursive: true }); return d; } catch (e) { /* fall through */ }
+    }
+    return this.dir;
+  }
+
   get historyPath() {
     return path.join(this.dir, "history.json");
   }
@@ -250,16 +302,34 @@ class DownloadManager {
     if (this._persistTimer) { clearTimeout(this._persistTimer); this._persistTimer = null; }
     try {
       if (this.config.saveHistory !== false) {
-        fs.writeFileSync(this.historyPath, JSON.stringify(this.history, null, 2), "utf8");
+        fs.writeFileSync(this.historyPath, JSON.stringify(this.history), "utf8");
       }
     } catch (e) { /* ignore */ }
     try {
-      fs.writeFileSync(this.downloadedPath, JSON.stringify(Array.from(this._downloaded), null, 0), "utf8");
+      fs.writeFileSync(this.downloadedPath, JSON.stringify(Array.from(this._downloaded)), "utf8");
     } catch (e) { /* ignore */ }
   }
 
   isDownloaded(url) {
-    return this._downloaded.has(String(url || ""));
+    const u = String(url || "");
+    if (this._downloaded.has(u)) return true;
+    // Redundant quality variant: once its master playlist is recorded as
+    // downloaded, a later <N>p/video.m3u8 capture of the SAME stream is a dup.
+    for (const c of matchHlsMaster(u)) {
+      if (this._downloaded.has(c)) return true;
+    }
+    return false;
+  }
+
+  // True when a family master playlist for `url` is currently queued/running
+  // (so a captured variant doesn't start downloading while the master wins).
+  _hlsMasterInFlight(url) {
+    const fam = matchHlsMaster(String(url || ""));
+    if (!fam.length) return false;
+    for (const it of this.items.values()) {
+      if (fam.indexOf(it.url) !== -1 && (it.status === "queued" || it.status === "running")) return true;
+    }
+    return false;
   }
 
   _markDownloaded(url) {
@@ -289,6 +359,7 @@ class DownloadManager {
     const cap = this.config.maxHistory || 500;
     if (this.history.length > cap) this.history = this.history.slice(-cap);
     this._saveHistory();
+    this._queuedIds.delete(item.id);
     this.items.delete(item.id);
     if (item.tempDir) fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
     this.onUpdate({ _removed: item.id });
@@ -310,13 +381,22 @@ class DownloadManager {
   // Windowed loader: pull queued URLs from the pending list into the active
   // map up to the live cap, so bulk imports stay memory-bounded.
   refill() {
-    if (!this._pending || !this._pending.length) return;
+    if (!this._pending || this._pendingIdx >= this._pending.length) return;
     const cap = this.config.liveWindow || (this.config.concurrency || 3) * 4;
-    while (this._pending.length && this.items.size < cap) {
-      const u = this._pending.shift();
-      if (!u) continue;
-      // Bulk imports skip already-downloaded URLs silently (no duplicate rows).
-      this.enqueue({ url: u, title: "", referer: "", markDuplicate: false }).catch(() => {});
+    while (this._pendingIdx < this._pending.length && this.items.size < cap) {
+      const raw = this._pending[this._pendingIdx++];
+      if (!raw) continue;
+      const u = typeof raw === "string" ? raw : raw.url;
+      const dirOverride = typeof raw === "string" ? null : raw.dirOverride || null;
+      this.enqueue({ url: u, title: "", referer: "", markDuplicate: false, dirOverride }).catch(() => {});
+    }
+    // Compact the consumed prefix to avoid unbounded memory growth
+    if (this._pendingIdx > 256 && this._pendingIdx >= this._pending.length) {
+      this._pending = [];
+      this._pendingIdx = 0;
+    } else if (this._pendingIdx > 1024) {
+      this._pending = this._pending.slice(this._pendingIdx);
+      this._pendingIdx = 0;
     }
   }
 
@@ -327,6 +407,7 @@ class DownloadManager {
     if (item.status === "duplicate") {
       item.duplicate = false;
       item.status = "queued";
+      this._queuedIds.add(item.id);
       item.error = "";
       item.speed = 0;
       item.lastEmit = Date.now();
@@ -339,12 +420,12 @@ class DownloadManager {
   }
 
   // Enqueue a whole batch without materializing all of them at once.
-  addPending(urls) {
+  addPending(urls, dirOverride = null) {
     let added = 0;
     for (const u of urls) {
-      const s = typeof u === "string" ? u.trim() : "";
-      if (!s) continue;
-      this._pending.push(s);
+      const s = unwrapExtensionUrl(typeof u === "string" ? u.trim() : "");
+      if (!isFetchableUrl(s) || isJunkNavUrl(s)) continue;
+      this._pending.push(dirOverride ? { url: s, dirOverride } : s);
       added++;
     }
     this.refill();
@@ -377,11 +458,22 @@ class DownloadManager {
     grant();
   }
 
-  async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", cookieHeader = null, force = false, markDuplicate = true }) {
+  async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", cookieHeader = null, force = false, markDuplicate = true, dirOverride = null }) {
+    // Unwrap tab-suspender/lazy-load chrome-extension wrappers to their real
+    // target (…/suspended.html#…uri=<url>) and reject unfetchable schemes.
+    url = unwrapExtensionUrl(url);
+    referer = unwrapExtensionUrl(typeof referer === "string" ? referer : "") || "";
+    if (!isFetchableUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
+    if (isJunkNavUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
+    if (resolvedUrl) resolvedUrl = unwrapExtensionUrl(resolvedUrl);
     // Duplicate handling: an already-downloaded URL becomes a "duplicate" list
     // entry (so the user can "Download anyway"), unless the bulk/windowed path
     // opts out with markDuplicate:false (skip silently — no item to avoid bloat).
-    const isDup = !force && this.config.skipDuplicates !== false && this.isDownloaded(url);
+    // An HLS quality variant whose master is already downloaded OR queued/running
+    // is also a duplicate — the master ships the higher resolution and taking
+    // both is wasted bandwidth (the 997MB + 406MB 360p pair).
+    const isDup = !force && this.config.skipDuplicates !== false &&
+      (this.isDownloaded(url) || this._hlsMasterInFlight(url));
     if (isDup && markDuplicate === false) return null;
     const id = "dl-" + (++this._id) + "-" + Date.now();
     // Schedule times arrive as ISO strings / Date objects / ms numbers
@@ -401,6 +493,7 @@ class DownloadManager {
       referer,
       label,
       cookieHeader: cookieHeader || null,
+      dirOverride: typeof dirOverride === "string" && dirOverride.trim() ? dirOverride.trim() : null,
       kind: hls ? "hls" : "mp4",
       fileName: sanitizeName(effectiveTitle) + (label ? "[" + sanitizeName(label) + "]" : "") + ".mp4",
       status: "queued",
@@ -442,16 +535,16 @@ class DownloadManager {
           refreshCount: this.refreshCount,
           finalPath: this.finalPath,
           thumb: this.thumb || "",
+          dirOverride: this.dirOverride || "",
           scheduledStart: this.scheduledStart,
-          scheduledStop: this.scheduledStop,
-          samples: this._samples.slice(-120).map((s) => ({ time: s.time, speed: s.speed }))
+          scheduledStop: this.scheduledStop
         };
       }
     };
     this.items.set(id, item);
     this.emit(item);
     if (isDup) {
-      // Already downloaded — show it in the list but don't auto-download.
+      // Already downloaded �?show it in the list but don't auto-download.
       item.status = "duplicate";
       item.duplicate = true;
       this.emit(item);
@@ -461,6 +554,7 @@ class DownloadManager {
       item.status = "scheduled";
       this.emit(item);
     }
+    if (item.status === "queued") this._queuedIds.add(id);
     this.pump();
     if (item.scheduledStart || item.scheduledStop) {
       this.checkScheduled();
@@ -470,7 +564,11 @@ class DownloadManager {
 
   async pump() {
     while (this.active < (this.config.concurrency || 3)) {
-      const next = Array.from(this.items.values()).find((i) => i.status === "queued" && !i._running);
+      let next = null;
+      for (const id of this._queuedIds) {
+        const candidate = this.items.get(id);
+        if (candidate && candidate.status === "queued" && !candidate._running) { next = candidate; break; }
+      }
       if (!next) break;
       if (next.scheduledStart && Date.now() < next.scheduledStart) {
         next.status = "scheduled";
@@ -478,6 +576,7 @@ class DownloadManager {
         continue;
       }
       next.status = "running";
+      this._queuedIds.delete(next.id);
       this.active++;
       this.emit(next);
       this.run(next)
@@ -488,6 +587,11 @@ class DownloadManager {
           next.errorCategory = categorizeError(err);
           next.speed = 0;
           this.emit(next);
+          // Site needs a real browser (Cloudflare/anti-bot): hand the URL to the
+          // built-in browser so the Deep Grab extension can capture the stream.
+          if (next.errorCategory === "requires-browser") {
+            try { this.onRequiresBrowser(next.url); } catch (e) { /* ignore */ }
+          }
           this._maybeFinalize(next);
         })
         .finally(() => {
@@ -502,9 +606,9 @@ class DownloadManager {
     const due = Array.from(this.items.values()).filter((i) => i.status === "scheduled" && now >= (i.scheduledStart || 0));
     if (due.length) {
       due.forEach((i) => {
-        // Whole start..stop window already elapsed — pause instead of starting.
+        // Whole start..stop window already elapsed �?pause instead of starting.
         if (i.scheduledStop && now >= i.scheduledStop) { this.pause(i.id); return; }
-        i.status = "queued"; this.emit(i);
+        i.status = "queued"; this._queuedIds.add(i.id); this.emit(i);
       });
       this.pump();
     }
@@ -514,7 +618,7 @@ class DownloadManager {
     );
     if (stopDue.length) stopDue.forEach((i) => this.pause(i.id));
     // Keep a sweep alive while anything is still scheduled or has a future
-    // start/stop time — wake just before the earliest event so both fire on time.
+    // start/stop time �?wake just before the earliest event so both fire on time.
     const scheduledStarts = Array.from(this.items.values())
       .filter((i) => i.status === "scheduled" && (i.scheduledStart || 0) > now)
       .map((i) => i.scheduledStart);
@@ -588,7 +692,7 @@ class DownloadManager {
       } catch (err) {
         if (err.aborted || attempt >= maxRefresh) throw err;
         // Rate-limited / Cloudflare-blocked: rotate proxy, back off, and retry
-        // the same URL — the video isn't dead and re-resolving the (also blocked)
+        // the same URL �?the video isn't dead and re-resolving the (also blocked)
         // source page would just waste requests.
         if (isRateLimited(err) || isCloudflareBlocked(err)) {
           if (this.proxyManager && item._proxy) this.proxyManager.markBad(item._proxy);
@@ -599,7 +703,7 @@ class DownloadManager {
           this.emit(item);
           continue;
         }
-        // Expired direct URL (e.g. streamtape signed token) — re-resolve the
+        // Expired direct URL (e.g. streamtape signed token) �?re-resolve the
         // original page and retry from scratch with the fresh URL.
         if (!isExpiredError(err)) throw err;
         // A bare HTTP 403/404/410 can mean the *proxy* is Cloudflare-blocked
@@ -610,14 +714,14 @@ class DownloadManager {
         item._proxy = null;
         // get_video links are passed through (resolved === original), so the
         // usual "resolved differs from url" test can't gate them; a signed link
-        // with a streamtape/fstape referer is still refreshable — from the page.
+        // with a streamtape/fstape referer is still refreshable �?from the page.
         const refreshable =
           (item._resolvedUrl && item._resolvedUrl !== item.url) || isSignedRefreshable(item);
         if (!refreshable) throw err;
         let fresh = null;
         try {
           fresh = await resolveUrl(refreshSourceUrl(item), { proxyManager: this.proxyManager, config: this.config, paceHost: (u) => this._paceHost(u) }, baseHeaders);
-        } catch (e) { /* re-resolution failed — keep original error */ }
+        } catch (e) { /* re-resolution failed �?keep original error */ }
         if (!fresh || fresh === item._resolvedUrl) throw err;
         item._resolvedUrl = fresh;
         await fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
@@ -643,6 +747,19 @@ class DownloadManager {
     // resolve lazily (deferred from enqueue); can take seconds via proxies
     if (!item._resolvedUrl) {
       const r = await resolveUrl(item.url, { proxyManager: this.proxyManager, config: this.config, paceHost: (u) => this._paceHost(u) }, baseHeaders);
+      if (Array.isArray(r)) {
+        let n = 0;
+        for (const u of r) {
+          try { await this.enqueue({ url: u, title: "", referer: item.url, markDuplicate: true }); n++; } catch (e) {}
+        }
+        item.listCount = n;
+        item.status = "done";
+        item.error = "";
+        item.errorCategory = "";
+        this.emit(item);
+        this._maybeFinalize(item);
+        return;
+      }
       if (r) item._resolvedUrl = r;
       if (item.status !== "running") {
         const err = new Error("Aborted");
@@ -654,7 +771,7 @@ class DownloadManager {
     await fsp.mkdir(this.dir, { recursive: true });
     item.tempDir = path.join(this.dir, item.id);
     await fsp.mkdir(item.tempDir, { recursive: true });
-    item.finalPath = path.join(this.dir, item.fileName);
+    item.finalPath = path.join(this._targetDir(item), item.fileName);
     // Dedupe-rename once per run: if a same-named file already exists, give this
     // download a timestamped name. _pathCreated keeps the rename stable across
     // _runOnce re-entries (refresh / norange fallback / error->resume), so the
@@ -662,7 +779,7 @@ class DownloadManager {
     if (!item._pathCreated && fs.existsSync(item.finalPath) && !item.received) {
       const now = new Date();
       item.fileName = sanitizeName(item.title) + (item.label ? "[" + sanitizeName(item.label) + "]" : "") + "_" + now.getTime() + ".mp4";
-      item.finalPath = path.join(this.dir, item.fileName);
+      item.finalPath = path.join(this._targetDir(item), item.fileName);
       item._pathCreated = true;
     }
 
@@ -673,7 +790,7 @@ class DownloadManager {
 
     if (item.kind === "hls" || isHlsUrl(actualUrl)) {
       item.kind = "hls";
-      item.total = 0; // playlist has no byte size — indeterminate progress
+      item.total = 0; // playlist has no byte size �?indeterminate progress
       this.emit(item);
       await this.runHls(item, baseHeaders, actualUrl);
     } else {
@@ -715,6 +832,7 @@ class DownloadManager {
     await fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
     item.status = "done";
     item.speed = 0;
+    item.total = stat.size; // real on-disk size (HLS has no Content-Length)
     this.emit(item);
     // Best-effort preview frame (needs ffmpeg; never fails the download).
     try {
@@ -743,7 +861,7 @@ class DownloadManager {
       onReq: (req, on) => this._trackReq(item, req, on)
     });
     // Some servers reject HEAD outright (405/501). Fall back to a ranged GET and
-    // read only the headers — the tiny body is destroyed, never written to disk.
+    // read only the headers �?the tiny body is destroyed, never written to disk.
     if (result.status === 405 || result.status === 501) {
       try { result.res.resume(); } catch (e) { /* ignore */ }
       result = await requestWithRedirects(actualUrl || item.url, {
@@ -790,7 +908,7 @@ class DownloadManager {
     try {
       await Promise.all(workers);
     } catch (err) {
-      // A segment failed terminally — abort sibling workers so they don't keep
+      // A segment failed terminally �?abort sibling workers so they don't keep
       // streaming into the temp dir while the item is retried or finalized.
       this.abort(item);
       throw err;
@@ -830,10 +948,10 @@ class DownloadManager {
         throw err;
       }
       if (status === 200) {
-        // Server ignored Range and restarted at byte 0 — a truncated part would
+        // Server ignored Range and restarted at byte 0 �?a truncated part would
         // silently corrupt the merge. Signal the fallback to a single stream.
         res.resume();
-        const err = new Error("Server ignored Range (HTTP 200) — falling back to single stream");
+        const err = new Error("Server ignored Range (HTTP 200) �?falling back to single stream");
         err.category = "norange";
         throw err;
       }
@@ -954,6 +1072,37 @@ class DownloadManager {
   }
 
   // ---------------- HLS ----------------
+  // Best-effort: given a media/variant playlist URL, try to find a sibling
+  // master playlist (one dir up, or in the same dir) and return it. Returns
+  // null if none is a variant master — the original media playlist is kept.
+  // Never throws: upgrade is a nice-to-have, not a reason to fail the download.
+  async _probeMasterPlaylist(item, baseHeaders, agent, variantUrl, maxRetries) {
+    try {
+      const u = new URL(variantUrl);
+      const dir = u.pathname.slice(0, u.pathname.lastIndexOf("/") + 1);
+      const lastDir = dir.split("/").filter(Boolean).pop() || "";
+      const inQualityDir = /(?:\d{3,4}p|hls|sd|hd|uhd|fhd|v\d+|default|low|high|index)/i.test(lastDir);
+      const fam = /(?:playlist|master|index|manifest|media)\.m3u8$/i.test(u.pathname);
+      if (fam && !inQualityDir) return null; // already a canonical playlist name, no parent to probe
+      const baseDir = inQualityDir ? dir.slice(0, dir.slice(0, -1).lastIndexOf("/") + 1) : dir;
+      const names = ["playlist.m3u8", "master.m3u8", "index.m3u8"];
+      const candidates = [];
+      for (const n of names) {
+        candidates.push(baseDir + n);
+        if (baseDir !== dir) candidates.push(dir + n);
+      }
+      for (const cand of [...new Set(candidates)]) {
+        if (cand === u.pathname) continue;
+        const abs = u.origin + cand;
+        await this._paceHost(abs);
+        const c = await fetchHtml(abs, agent, await this._reqHeaders(item, baseHeaders, abs, {}), 0, Math.min(maxRetries, 1));
+        if (item.status !== "running") return null;
+        if (HLS_MASTER_RE.test(c)) return { body: c, url: abs };
+      }
+    } catch (e) { /* best-effort */ }
+    return null;
+  }
+
   async runHls(item, baseHeaders, m3u8Url, attempt = 0) {
     // Fail fast when ffmpeg (needed for the .mp4 remux) isn't available.
     const ffmpeg = this.config.ffmpegPath || "ffmpeg";
@@ -976,6 +1125,15 @@ class DownloadManager {
     let body = await fetchHtml(playlistUrl, agent, await this._reqHeaders(item, baseHeaders, playlistUrl, {}), 0, maxRetries);
     if (item.status !== "running") this.throwAborted();
 
+    // Variant -> master upgrade: a captured media playlist (e.g.
+    // .../<hash>/360p/video.m3u8) pins the player's chosen resolution (360p).
+    // Probe sibling master playlists and, if one advertises variants, switch to
+    // it so the engine picks the HIGHEST resolution instead of the small one.
+    if (!HLS_MASTER_RE.test(body)) {
+      const up = await this._probeMasterPlaylist(item, baseHeaders, agent, playlistUrl, maxRetries);
+      if (up && item.status === "running") { body = up.body; playlistUrl = up.url; }
+    }
+
     // Master playlist -> pick the best variant and fetch its media playlist.
     if (HLS_MASTER_RE.test(body)) {
       const variant = pickHlsVariant(body, playlistUrl);
@@ -990,7 +1148,7 @@ class DownloadManager {
     if (!segs.length) throw new Error("HLS: no segments in playlist");
 
     await fsp.mkdir(item.tempDir, { recursive: true });
-    item.finalPath = path.join(this.dir, item.fileName);
+    item.finalPath = path.join(this._targetDir(item), item.fileName);
 
     const queue = [];
     for (let i = 0; i < segs.length; i++) {
@@ -1079,7 +1237,7 @@ class DownloadManager {
     }
     await fsp.writeFile(listPath, lines.join("\n"), "utf8");
     const tmpOut = item.finalPath + ".part";
-    // Output is <final>.part so ffmpeg can't infer the muxer from the extension — force mp4.
+    // Output is <final>.part so ffmpeg can't infer the muxer from the extension �?force mp4.
     await this.runFfmpeg(ffmpeg, ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", "-f", "mp4", tmpOut], item);
     await fsp.rm(item.finalPath, { force: true }).catch(() => {});
     await fsp.rename(tmpOut, item.finalPath);
@@ -1129,6 +1287,88 @@ class DownloadManager {
     // for clips shorter than the seek point.
     return await attempt(["-y", "-ss", "3", "-i", item.finalPath, "-frames:v", "1", "-vf", "scale=96:-1", "-f", "image2", thumb])
       || await attempt(["-y", "-i", item.finalPath, "-frames:v", "1", "-vf", "scale=96:-1", "-f", "image2", thumb]);
+  }
+
+  // Backfill .thumb.jpg for history entries whose video file still exists but
+  // has no thumbnail yet (finished before thumbnails were enabled, ffmpeg was
+  // missing at the time, etc.). Also syncs each entry's size to the real file
+  // size on disk. Runs sequentially in the background; onOne is called after
+  // each newly extracted thumb so the UI can refresh live.
+  async backfillThumbs(onOne) {
+    if (this.config.thumbnails === false) return 0;
+    let made = 0;
+    for (const h of this.history) {
+      if (!h || h.status !== "done" || !h.finalPath) continue;
+      if (!fs.existsSync(h.finalPath)) continue;
+      try {
+        const st = fs.statSync(h.finalPath);
+        if (st.isFile() && st.size && h.total !== st.size) {
+          h.total = st.size;
+          this._saveHistory();
+        }
+      } catch (e) { /* ignore */ }
+      if (!h.thumb && fs.existsSync(h.finalPath + ".thumb.jpg")) h.thumb = h.finalPath + ".thumb.jpg";
+      if (h.thumb) continue;
+      const t = await this.makeThumb({ finalPath: h.finalPath, status: "done" });
+      if (t) {
+        h.thumb = t;
+        made++;
+        this._saveHistory();
+        if (typeof onOne === "function") { try { onOne(h); } catch (e2) { /* ignore */ } }
+        await new Promise((r) => setTimeout(r, 150)); // go easy on the disk
+      }
+    }
+    return made;
+  }
+
+  // Move a file into destDir; rename first, falling back to copy+delete for
+  // cross-drive moves (EXDEV).
+  async _moveFileWithFallback(src, destDir) {
+    try {
+      fs.mkdirSync(destDir, { recursive: true });
+      const dest = path.join(destDir, path.basename(src));
+      if (path.resolve(src) === path.resolve(dest)) return { ok: true, path: src };
+      await fsp.rename(src, dest).catch(async () => {
+        await fsp.copyFile(src, dest);
+        await fsp.rm(src, { force: true });
+      });
+      return { ok: true, path: dest };
+    } catch (e) {
+      return { ok: false, error: String(e.message || e) };
+    }
+  }
+
+  // Move a finished download (active list and/or history entry) to another
+  // folder, carrying its .thumb.jpg along.
+  async moveDownloaded(id, destDir) {
+    const movable = (x) => x && x.status === "done" && x.finalPath;
+    const moveOne = async (rec) => {
+      const r1 = await this._moveFileWithFallback(rec.finalPath, destDir);
+      if (!r1.ok) return r1;
+      rec.finalPath = r1.path;
+      if (rec.thumb) {
+        const t = await this._moveFileWithFallback(rec.thumb, destDir);
+        if (t.ok) rec.thumb = t.path;
+      }
+      return null;
+    };
+    const item = this.items.get(id);
+    if (item && !movable(item)) return { ok: false, error: "only finished downloads can be moved" };
+    if (item) {
+      const err = await moveOne(item);
+      if (err) return err;
+      item.dirOverride = destDir;
+      this.emit(item);
+    }
+    const h = this.history.find((x) => x.id === id);
+    if (h && !movable(h)) return { ok: false, error: "only finished downloads can be moved" };
+    if (h) {
+      const err = await moveOne(h);
+      if (err) return err;
+      this._saveHistory();
+    }
+    if (!item && !h) return { ok: false, error: "not found" };
+    return { ok: true, path: (item || h).finalPath };
   }
 
   async streamToFile(item, res, filePath, flags) {
@@ -1181,6 +1421,7 @@ class DownloadManager {
   pause(id) {
     const item = this.items.get(id);
     if (!item || (item.status !== "running" && item.status !== "scheduled" && item.status !== "queued")) return;
+    if (item.status === "queued") this._queuedIds.delete(item.id);
     item.status = "paused";
     this.abort(item);
     this.emit(item);
@@ -1191,6 +1432,7 @@ class DownloadManager {
     if (!item) return;
     if (item.status === "paused" || item.status === "error" || item.status === "scheduled") {
       item.status = "queued";
+      this._queuedIds.add(item.id);
       item.error = "";
       item.speed = 0;
       this.emit(item);
@@ -1225,6 +1467,7 @@ class DownloadManager {
       item.status = "cancelled";
       this.abort(item);
     } else if (item.status === "queued" || item.status === "paused") {
+      if (item.status === "queued") this._queuedIds.delete(item.id);
       item.status = "cancelled";
     }
     fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
@@ -1242,4 +1485,4 @@ class DownloadManager {
   }
 }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster };

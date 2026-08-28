@@ -31,23 +31,35 @@ function fmtDate(ts) {
 
 let items = new Map();
 let historyItems = new Map();
-let showing = "active";
+let activeVisible = true;
+let historyVisible = true;
 let selected = new Set();
+
+// Cached flat arrays of items/history — rebuilt once per update batch instead of
+// copying the Map inside every render/summary/batch-bar call (cheap with a few
+// dozen items, wasteful with thousands).
+let itemList = [];
+let historyList = [];
 
 function updateBatchBar() {
   const bar = $("batchBar");
-  bar.style.display = showing === "active" ? "flex" : "none";
+  bar.style.display = activeVisible ? "flex" : "none";
   const count = selected.size;
   const hasSel = count > 0;
-  $("batchCount").textContent = hasSel ? count + " selected" : "";
+  let selBytes = 0;
+  for (const id of selected) {
+    const it = items.get(id);
+    if (it && it.total) selBytes += it.total;
+  }
+  $("batchCount").textContent = hasSel ? count + " selected \u00B7 " + fmtBytes(selBytes) : "";
   ["batchPause", "batchResume", "batchCancel", "batchRemove"].forEach((id) => {
     $(id).disabled = !hasSel;
   });
-  const visibleIds = new Set(Array.from(items.values()).map((i) => i.id));
+  const visibleIds = new Set(itemList.map((i) => i.id));
   let visSel = 0;
   for (const id of selected) if (visibleIds.has(id)) visSel++;
   const selAll = $("selAll");
-  selAll.disabled = showing === "history";
+  selAll.disabled = !activeVisible;
   selAll.checked = visibleIds.size > 0 && visSel === visibleIds.size;
   selAll.indeterminate = visSel > 0 && visSel < visibleIds.size;
 }
@@ -104,25 +116,58 @@ function rowHtml(it, showing) {
 
 let searchQuery = "";
 
-function filteredList() {
-  const base = showing === "history" ? Array.from(historyItems.values()) : Array.from(items.values());
-  if (!searchQuery) return base;
+function filteredItems() {
+  if (!searchQuery) return itemList;
   const q = searchQuery.toLowerCase();
-  return base.filter((it) =>
+  return itemList.filter((it) =>
     (it.fileName || "").toLowerCase().includes(q) ||
     (it.url || "").toLowerCase().includes(q)
   );
 }
 
+function filteredHistory() {
+  if (!searchQuery) return historyList;
+  const q = searchQuery.toLowerCase();
+  return historyList.filter((it) =>
+    (it.fileName || "").toLowerCase().includes(q) ||
+    (it.url || "").toLowerCase().includes(q)
+  );
+}
+
+// Column sorting: per-table { key, dir }, toggled by clicking <th class=sortable>.
+const sortState = { active: { key: "", dir: 1 }, history: { key: "", dir: 1 } };
+const sortCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+function sortValue(it, key) {
+  switch (key) {
+    case "name": return (it.fileName || "").toLowerCase();
+    case "size": return Number(it.total || 0);
+    case "date": return Number(it.endTime || it.timestamp || 0);
+    case "status": return it.status || "";
+    default: return "";
+  }
+}
+function sortList(list, st) {
+  if (!st || !st.key) return list;
+  const dir = st.dir;
+  return [...list].sort((a, b) => {
+    const va = sortValue(a, st.key), vb = sortValue(b, st.key);
+    const c = (typeof va === "number" && typeof vb === "number") ? va - vb : sortCollator.compare(String(va), String(vb));
+    return c * dir;
+  });
+}
+function refreshSortHeaders() {
+  document.querySelectorAll("th.sortable").forEach((th) => {
+    const st = sortState[th.dataset.table];
+    const label = th.dataset.label || "";
+    th.textContent = (st && st.key === th.dataset.sort) ? label + (st.dir === 1 ? " \u25B2" : " \u25BC") : label;
+  });
+}
+
 function updateSummary() {
   const el = $("dlSummary");
   if (!el) return;
-  if (showing === "history") {
-    el.textContent = historyItems.size ? historyItems.size + " entries" : "";
-    return;
-  }
   const counts = { running: 0, queued: 0, paused: 0, scheduled: 0, done: 0, error: 0, duplicate: 0 };
-  for (const it of items.values()) if (counts[it.status] !== undefined) counts[it.status]++;
+  for (const it of itemList) if (counts[it.status] !== undefined) counts[it.status]++;
   const parts = [];
   [["running", "active"], ["queued", "queued"], ["paused", "paused"], ["scheduled", "scheduled"],
    ["done", "done"], ["error", "error"], ["duplicate", "duplicate"]].forEach(([k, label]) => {
@@ -133,11 +178,11 @@ function updateSummary() {
 
 function render() {
   const tbody = $("dlsBody");
-  const displayItems = filteredList();
+  const displayItems = sortList(filteredItems(), sortState.active);
   const total = displayItems.length;
 
   if (!total) {
-    tbody.innerHTML = `<tr id="emptyRow"><td class="empty" colspan="9">${showing === "history" ? "No history yet." : "No downloads yet. Find an MP4 in the browser and it will appear here."}</td></tr>`;
+    tbody.innerHTML = `<tr id="emptyRow"><td class="empty" colspan="9">No downloads yet. Find an MP4 in the browser and it will appear here.</td></tr>`;
     updateBatchBar();
     updateSummary();
     return;
@@ -151,7 +196,7 @@ function render() {
   if (start > 0) tbody.appendChild(spacer(start * ROW_H));
   for (let i = start; i < end; i++) {
     const tr = document.createElement("tr");
-    tr.innerHTML = rowHtml(displayItems[i], showing);
+    tr.innerHTML = rowHtml(displayItems[i], "active");
     tbody.appendChild(tr);
   }
   if (end < total) tbody.appendChild(spacer((total - end) * ROW_H));
@@ -184,6 +229,7 @@ function actionButtons(it) {
     html += `<button data-act="cancel" data-id="${it.id}" class="danger">✕</button>`;
   }
   if (["done", "error", "cancelled"].includes(it.status)) {
+    if (it.status === "done") html += `<button data-act="move" data-id="${it.id}" title="Move file to another folder">&#8646;</button>`;
     html += `<button data-act="remove" data-id="${it.id}">🗑</button>`;
   }
   if (it.status === "duplicate") {
@@ -199,7 +245,20 @@ function histActionButtons(it) {
     html += `<button data-act="history-error" data-id="${it.id}" title="${esc(it.error)}" class="ghost">ⓘ</button>`;
   }
   html += `<button data-act="history-date" data-id="${it.id}" title="${fmtDate(it.timestamp)}">📅</button>`;
+  if (it.status === "done" && it.finalPath) {
+    html += `<button data-act="move" data-id="${it.id}" title="Move file to another folder">&#8646;</button>`;
+  }
   return html;
+}
+
+async function handleMove(id) {
+  const dir = await window.api.chooseDir();
+  if (!dir) return;
+  const r = await window.api.moveDownload(id, dir);
+  if (!r.ok) alert("Move failed: " + (r.error || "unknown error"));
+  else showToast("Moved to " + dir, [{ label: "Dismiss", className: "btn ghost", onClick: () => {} }]);
+  render();
+  scheduleHistoryReload();
 }
 
 $("dlsBody").addEventListener("click", (e) => {
@@ -227,6 +286,8 @@ $("dlsBody").addEventListener("click", (e) => {
     } else if (it && act === "history-date") {
       alert("Completed: " + fmtDate(it.endTime || it.timestamp));
     }
+  } else if (act === "move") {
+    handleMove(id);
   } else {
     window.api[act](id);
   }
@@ -247,6 +308,30 @@ $("selAll").addEventListener("change", () => {
   render();
 });
 
+document.querySelectorAll("th.sortable").forEach((th) => {
+  th.addEventListener("click", () => {
+    const t = th.dataset.table;
+    if (!t) return;
+    const st = sortState[t];
+    if (st.key === th.dataset.sort) st.dir = -st.dir;
+    else { st.key = th.dataset.sort; st.dir = 1; }
+    refreshSortHeaders();
+    if (t === "active") render();
+    else renderHistory();
+  });
+});
+refreshSortHeaders();
+
+$("histBody").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const it = historyItems.get(btn.dataset.id);
+  if (!it) return;
+  if (btn.dataset.act === "history-error") alert("Error: " + it.error);
+  else if (btn.dataset.act === "history-date") alert("Completed: " + fmtDate(it.endTime || it.timestamp));
+  else if (btn.dataset.act === "move") handleMove(it.id);
+});
+
 ["batchPause", "batchResume", "batchCancel", "batchRemove"].forEach((btnId) => {
   const method = btnId.replace("batch", "").toLowerCase();
   $(btnId).addEventListener("click", () => {
@@ -258,22 +343,82 @@ $("selAll").addEventListener("change", () => {
 async function loadAll() {
   const list = await window.api.list();
   items = new Map(list.map((i) => [i.id, i]));
+  itemList = list;
   render();
 }
 
 async function loadHistory() {
   const hist = await window.api.history();
   historyItems = new Map(hist.map((i) => [i.id, i]));
-  render();
+  historyList = hist;
+  renderHistory();
 }
 
-window.api.onUpdate((item) => {
-  if (item._removed) {
-    items.delete(item._removed);
-    selected.delete(item._removed);
-  } else {
-    items.set(item.id, item);
+function historyRowHtml(it) {
+  return `<tr>
+    <td class="name-cell" title="${esc(it.url)}">
+      ${it.thumb ? `<img class="thumb" src="file:///${String(it.thumb).replace(/\\/g, "/")}" alt="" onerror="this.remove()">` : ""}
+      <div class="name-col"><div class="name">${esc(it.fileName)}</div><div class="sub">${esc(it.url)}</div></div>
+    </td>
+    <td>${fmtBytes(it.total)}</td>
+    <td class="wide">${fmtDate(it.endTime || it.timestamp)}</td>
+    <td class="status ${statusClass(it.status)}">${esc(it.status)}</td>
+    <td class="actions">${histActionButtons(it)}</td>
+  </tr>`;
+}
+
+function renderHistory() {
+  const tbody = $("histBody");
+  if (!tbody) return;
+  const count = $("histCount");
+  const list = sortList(filteredHistory(), sortState.history);
+  if (count) {
+    let sum = 0;
+    for (const h of list) sum += Number(h.total || 0);
+    count.textContent = historyItems.size
+      ? historyItems.size + (historyItems.size === 1 ? " entry" : " entries") + " \u00B7 " + fmtBytes(sum)
+      : "";
   }
+  if (!list.length) {
+    tbody.innerHTML = `<tr><td class="empty" colspan="5">${searchQuery ? "No history matches your filter." : "No history yet."}</td></tr>`;
+    return;
+  }
+  // Virtualized like the active list: only rows near the viewport are in the
+  // DOM so a multi-thousand-entry history stays responsive.
+  const scroll = $("histScroll");
+  const st = scroll.scrollTop || 0;
+  const vh = scroll.clientHeight || 400;
+  const start = Math.max(0, Math.floor(st / ROW_H) - 6);
+  const end = Math.min(list.length, Math.ceil((st + vh) / ROW_H) + 6);
+  let html = "";
+  if (start > 0) html += `<tr style="height:${start * ROW_H}px;"><td colspan="5" style="border:none;padding:0;"></td></tr>`;
+  for (let i = start; i < end; i++) html += historyRowHtml(list[i]);
+  if (end < list.length) html += `<tr style="height:${(list.length - end) * ROW_H}px;"><td colspan="5" style="border:none;padding:0;"></td></tr>`;
+  tbody.innerHTML = html;
+}
+
+let histReloadTimer = null;
+function scheduleHistoryReload() {
+  if (histReloadTimer) return;
+  histReloadTimer = setTimeout(() => { histReloadTimer = null; loadHistory(); }, 1500);
+}
+
+window.api.onHistoryUpdated(() => scheduleHistoryReload());
+
+window.api.onUpdate((msg) => {
+  const batch = Array.isArray(msg) ? msg : [msg];
+  let needHistory = false;
+  for (const item of batch) {
+    if (item && item._removed) {
+      items.delete(item._removed);
+      selected.delete(item._removed);
+    } else if (item) {
+      items.set(item.id, item);
+      if (["done", "error", "cancelled", "duplicate"].includes(item.status)) needHistory = true;
+    }
+  }
+  itemList = Array.from(items.values());
+  if (needHistory) scheduleHistoryReload();
   scheduleRender();
 });
 
@@ -281,10 +426,16 @@ $("dlsScroll").addEventListener("scroll", () => {
   if (!renderTimer) render(); // virtualized render is cheap; keep rows in view
 });
 
+$("histScroll").addEventListener("scroll", () => {
+  if (!renderTimer) renderHistory(); // keep history rows in view
+});
+
 $("search").addEventListener("input", () => {
   searchQuery = $("search").value.trim();
   $("dlsScroll").scrollTop = 0;
+  if ($("histScroll")) $("histScroll").scrollTop = 0;
   render();
+  renderHistory();
 });
 
 // ---------------- settings ----------------
@@ -304,7 +455,9 @@ async function loadSettings() {
   $("skipDuplicates").checked = s.skipDuplicates !== false;
   $("autoCloseTab").checked = s.autoCloseTab !== false;
   $("thumbnails").checked = s.thumbnails !== false;
+  $("idleTabMinutes").value = s.idleTabMinutes ?? 0;
   $("proxies").value = (s.proxies || []).join("\n");
+  $("proxyRules").value = (s.proxyRules || []).map((r) => r.host + "\t" + r.proxy).join("\n");
   applyTheme(s.theme || "dark");
 }
 
@@ -317,6 +470,15 @@ function applyTheme(theme) {
 $("themeToggle").addEventListener("click", () => {
   const current = document.documentElement.getAttribute("data-theme") || "dark";
   applyTheme(current === "dark" ? "light" : "dark");
+});
+
+document.querySelectorAll("button[data-browse]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const inp = $(btn.dataset.browse);
+    if (!inp) return;
+    const dir = await window.api.chooseDir();
+    if (dir) inp.value = dir;
+  });
 });
 
 $("save").addEventListener("click", async () => {
@@ -335,7 +497,14 @@ $("save").addEventListener("click", async () => {
     skipDuplicates: $("skipDuplicates").checked,
     autoCloseTab: $("autoCloseTab").checked,
     thumbnails: $("thumbnails").checked,
-    proxies: $("proxies").value.split("\n").map((p) => p.trim()).filter(Boolean)
+    idleTabMinutes: Math.max(0, parseInt($("idleTabMinutes").value || "0", 10)),
+    proxies: $("proxies").value.split("\n").map((p) => p.trim()).filter(Boolean),
+    proxyRules: $("proxyRules").value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
+      const i = l.search(/\s/);
+      const host = (i === -1 ? l : l.slice(0, i)).trim();
+      const proxy = (i === -1 ? "" : l.slice(i)).trim();
+      return { host, proxy };
+    }).filter((r) => r.host && r.proxy)
   });
   refreshActiveDir();
 });
@@ -387,10 +556,26 @@ $("browserUrl").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e
 $("downloadAll").addEventListener("click", async () => {
   const urls = parseUrls();
   if (!urls.length) return;
-  const r = await window.api.addMany(urls);
+  const r = await window.api.addMany(urls, destOverride || null);
   const n = r && r.ok ? r.count : 0;
   alert("Enqueued " + n + " of " + urls.length + " URL(s).");
 });
+
+// Per-download destination override: when set, newly added URLs skip the
+// automatic folder rotation and land in the picked folder instead.
+let destOverride = "";
+function updateDestUi() {
+  const short = destOverride ? (destOverride.split(/[\\/]/).filter(Boolean).pop() || destOverride) : "auto";
+  $("pickDestLabel").textContent = short;
+  $("pickDest").title = "Destination for added URLs" + (destOverride ? ": " + destOverride : " (automatic rotation)");
+  $("clearDest").style.display = destOverride ? "" : "none";
+}
+$("pickDest").addEventListener("click", async () => {
+  const dir = await window.api.chooseDir();
+  if (dir) { destOverride = dir; updateDestUi(); }
+});
+$("clearDest").addEventListener("click", () => { destOverride = ""; updateDestUi(); });
+updateDestUi();
 
 $("installExt").addEventListener("click", async () => {
   const target = $("browserTarget").value;
@@ -418,20 +603,19 @@ $("resumeLast").addEventListener("click", async () => {
 });
 
 $("showActive").addEventListener("click", () => {
-  showing = "active";
-  $("showActive").classList.add("active");
-  $("showHistory").classList.remove("active");
-  $("dlsScroll").scrollTop = 0;
+  activeVisible = !activeVisible;
+  $("showActive").classList.toggle("active", activeVisible);
+  $("dlsScroll").style.display = activeVisible ? "" : "none";
   render();
+  updateBatchBar();
 });
 
 $("showHistory").addEventListener("click", () => {
-  showing = "history";
-  $("showHistory").classList.add("active");
-  $("showActive").classList.remove("active");
-  $("dlsScroll").scrollTop = 0;
-  loadHistory();
-  render();
+  historyVisible = !historyVisible;
+  $("showHistory").classList.toggle("active", historyVisible);
+  const sec = $("historySection");
+  if (sec) sec.style.display = historyVisible ? "" : "none";
+  if (historyVisible) loadHistory();
 });
 
 $("exportJson").addEventListener("click", () => window.api.exportHistory("json"));
@@ -442,7 +626,7 @@ $("clearHistory").addEventListener("click", async () => {
   const res = await window.api.clearHistory();
   if (res.ok) {
     historyItems = new Map();
-    render();
+    renderHistory();
   }
 });
 
@@ -479,7 +663,7 @@ window.api.onClipboardUrl((data) => {
       label: "Add download",
       className: "btn",
       onClick: async () => {
-        const res = await window.api.add(data.url);
+        const res = await window.api.add(data.url, destOverride || null);
         if (!res.ok) {
           alert("Failed to add download: " + (res.error || "unknown error"));
         }
@@ -549,5 +733,5 @@ loadSettings();
 loadAll();
 loadHistory();
 updateBandwidth();
-setInterval(loadAll, 2000);
+setInterval(loadAll, 5000);
 setInterval(updateBandwidth, 5000);

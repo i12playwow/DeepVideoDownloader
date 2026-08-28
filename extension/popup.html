@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: system-ui, sans-serif; font-size: 13px; width: 260px; margin: 0; padding: 12px; background: #0f172a; color: #e2e8f0; }
+    h1 { font-size: 14px; margin: 0 0 10px; }
+    #status { padding: 6px 8px; border-radius: 6px; margin-bottom: 10px; font-weight: 600; background: rgba(255,255,255,0.08); }
+    #status.connected { color: #22c55e; }
+    #status.connecting { color: #fbbf24; }
+    #status.disconnected { color: #ef4444; }
+    label { display: block; color: #94a3b8; margin-bottom: 4px; }
+    input { width: 100%; box-sizing: border-box; background: #0f172a; border: 1px solid rgba(255,255,255,0.1); color: #e2e8f0; border-radius: 6px; padding: 7px 9px; margin-bottom: 10px; outline: none; }
+    input:focus { border-color: #3b82f6; }
+    button { width: 100%; background: #3b82f6; color: #fff; border: none; border-radius: 6px; padding: 8px; font-weight: 600; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    .hint { color: #94a3b8; font-size: 11px; margin-top: 10px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <h1>Deep Video Downloader</h1>
+  <div id="status">checking…</div>
+  <label for="url">Video / MP4 URL</label>
+  <input id="url" type="text" placeholder="https://…/video.mp4" autofocus>
+  <button id="send">Send to desktop app</button>
+  <div class="hint">Tip: right-click any link or video and choose "Send link / media to Deep Downloader".</div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -209,11 +209,20 @@ th, td {
   font-size: 12px;
 }
 th { color: var(--muted); font-weight: 600; background: var(--panel-2); position: sticky; top: 0; z-index: 1; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { text-decoration: underline; }
 td.wide { min-width: 220px; }
 tr:hover td { background: var(--hover); }
 
 th.sel, td.sel { width: 26px; padding-right: 2px; padding-left: 8px; }
 th.sel input, td.sel input { margin: 0; }
+
+/* ---------------- history (always visible) ---------------- */
+.history-section { margin-top: 14px; }
+.hist-head { display: flex; align-items: center; gap: 8px; margin: 4px 2px; }
+.hist-head h3 { font-size: 14px; margin: 0; }
+#histScroll { max-height: 42vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; }
+#hist th, #hist td { font-size: 12px; }
 
 .name-cell { display: flex; align-items: center; gap: 8px; }
 .name-col { min-width: 0; }

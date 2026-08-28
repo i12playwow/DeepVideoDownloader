@@ -2,7 +2,7 @@
 // forwards them to the Deep Video Downloader desktop app over WebSocket.
 
 const WS_URL = "ws://127.0.0.1:8765";
-const FOUND_CAP = 500;
+const FOUND_CAP = 10000;
 const RECONNECT_DELAY = 3000;
 const SEND_TIMEOUT = 20000;
 
@@ -191,6 +191,12 @@ function waitForOpen(ms) {
 
 function sendToDesktop(url, title, referer) {
   return new Promise((resolve) => {
+    // Only fetchable schemes reach the desktop engine (chrome-extension pages
+    // like …/suspended.html#uri=<url> are unwrapped/rejected there).
+    if (!/^(?:https?|blob):/i.test(url || "")) {
+      resolve({ ok: false, error: "Unsupported URL" });
+      return;
+    }
     const state = ws ? ws.readyState : -1;
     if (state !== WebSocket.OPEN && state !== WebSocket.CONNECTING) {
       // SW wake or dropped socket: start (re)connecting instead of failing fast
@@ -242,6 +248,15 @@ function markCaptured(url, id) {
     maybeCloseTab(entry);
     pipelineTabDone(entry.tabId);
   }
+  persist();
+  broadcastFound();
+}
+
+// Remove a URL from the Found list once it has been handed to the app, so the
+// panel only shows videos still pending collection.
+function removeFound(url) {
+  found = found.filter((x) => x.url !== url);
+  captured.delete(url);
   persist();
   broadcastFound();
 }
@@ -478,7 +493,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         pendingSend.add(msg.url);
         const r = await sendToDesktop(msg.url, msg.title || "", msg.pageUrl || "");
         pendingSend.delete(msg.url);
-        if (r.ok) markCaptured(msg.url, r.id);
+        if (r.ok) { markCaptured(msg.url, r.id); removeFound(msg.url); }
         sendResponse({ ok: r.ok, error: r.error || "" });
       })();
       return true; // keep the channel open for the async reply
@@ -504,7 +519,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           pendingSend.add(f.url);
           const r = await sendToDesktop(f.url, f.title || "", f.pageUrl || "");
           pendingSend.delete(f.url);
-          if (r.ok) { markCaptured(f.url, r.id); okCount++; }
+          if (r.ok) { markCaptured(f.url, r.id); removeFound(f.url); okCount++; }
           else { err = r.error || ""; break; }
         }
         sendResponse({ ok: okCount > 0, added: okCount, total: pending.length, error: err });

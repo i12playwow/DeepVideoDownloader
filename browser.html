@@ -17,10 +17,17 @@
     .tab { display: inline-flex; align-items: center; gap: 6px; max-width: 180px; padding: 4px 8px; border-radius: 6px 6px 0 0; background: #1e293b; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; }
     .tab.active { background: #334155; }
     .tab .t { overflow: hidden; text-overflow: ellipsis; }
+    .tab.suspended .t { opacity: .55; font-style: italic; }
     .tab .x { padding: 0 2px; opacity: .7; }
     .tab .x:hover { opacity: 1; }
     .tab-new { background: transparent; color: #94a3b8; padding: 2px 8px; font-size: 16px; }
     #content { flex: 1 1 0%; min-height: 0; position: relative; }
+    #tabbar { position: relative; }
+    #tabsearch { width: 130px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 5px; padding: 4px 8px; font-size: 12px; }
+    #tabtools { background: transparent; color: #94a3b8; padding: 2px 8px; font-size: 16px; }
+    #tabmenu { display: none; position: absolute; top: 38px; right: 8px; z-index: 20; flex-direction: column; gap: 2px; background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 4px; min-width: 160px; }
+    #tabmenu button { text-align: left; background: #334155; }
+    #tabmenu button:hover { background: #475569; }
   </style>
 </head>
 <body>
@@ -32,9 +39,20 @@
     <button id="autoscroll" title="Unlimited scroll: keeps scrolling and clicking Load more until you stop it">&#8595; Auto</button>
     <input id="url" type="text" placeholder="Enter a URL and press Enter">
     <button id="go">Go</button>
+    <span id="tabcount" title="Open tabs" style="opacity:.55;font-size:12px;padding:0 2px;"></span>
   </div>
   <div id="tabbar">
     <button class="tab-new" id="newtab" title="New tab">+</button>
+    <input id="tabsearch" type="text" placeholder="Filter tabs…">
+    <button id="tabtools" title="Tab tools">&#9776;</button>
+    <div id="tabmenu">
+      <button data-act="autogroup">Auto group by site</button>
+      <button data-act="group">Group by site</button>
+      <button data-act="dupes">Close duplicates</button>
+      <button data-act="others">Close others</button>
+      <button data-act="domain">Close same site</button>
+      <button data-act="all">Close all</button>
+    </div>
   </div>
   <div id="content"></div>
   <script>
@@ -54,17 +72,29 @@
     window.addEventListener("resize", reportRect);
     new ResizeObserver(reportRect).observe(content);
 
+    let lastList = [], lastActive = null, tabFilter = "";
     function renderTabs(list, active) {
-      activeId = active;
+      lastList = list || [];
+      lastActive = active;
+      applyTabRender();
+    }
+    function applyTabRender() {
+      activeId = lastActive;
       [...tabbar.querySelectorAll(".tab")].forEach((el) => el.remove());
-      list.forEach((t) => {
+      const f = (tabFilter || "").trim().toLowerCase();
+      lastList.forEach((t) => {
+        const hay = ((t.title || "") + " " + (t.url || "")).toLowerCase();
+        if (f && !hay.includes(f)) return;
         const btn = document.createElement("div");
-        btn.className = "tab" + (t.id === active ? " active" : "");
+        btn.className = "tab" + (t.id === lastActive ? " active" : "") + (t.suspended ? " suspended" : "");
+        if (t.suspended) btn.title = "Suspended — click to reload";
         btn.innerHTML = '<span class="t">' + (t.title || t.url) + '</span><span class="x" title="Close">&#10005;</span>';
         btn.addEventListener("click", (e) => { if (!e.target.classList.contains("x")) window.api.activate(t.id); });
         btn.querySelector(".x").addEventListener("click", () => window.api.closeTab(t.id));
         tabbar.appendChild(btn);
       });
+      const tc = document.getElementById("tabcount");
+      if (tc) tc.textContent = String(lastList.length);
     }
 
     window.api.onTabsUpdate((list, active) => renderTabs(list, active));
@@ -92,6 +122,55 @@
     backBtn.addEventListener("click", () => window.api.back());
     fwdBtn.addEventListener("click", () => window.api.forward());
     document.getElementById("newtab").addEventListener("click", () => window.api.newTab());
+
+    const tabSearch = document.getElementById("tabsearch");
+    tabSearch.addEventListener("input", () => { tabFilter = tabSearch.value; applyTabRender(); });
+
+    const tabTools = document.getElementById("tabtools");
+    const tabMenu = document.getElementById("tabmenu");
+    tabTools.addEventListener("click", (e) => {
+      e.stopPropagation();
+      tabMenu.style.display = tabMenu.style.display === "flex" ? "none" : "flex";
+    });
+    document.addEventListener("click", (e) => {
+      if (!tabMenu.contains(e.target) && e.target !== tabTools) tabMenu.style.display = "none";
+    });
+    let gmOn = localStorage.getItem("dvGroupMode") === "1";
+    tabMenu.querySelectorAll("button").forEach((b) => {
+      b.addEventListener("click", () => {
+        const act = b.dataset.act;
+        if (act === "autogroup") {
+          gmOn = !gmOn;
+          localStorage.setItem("dvGroupMode", gmOn ? "1" : "0");
+          b.textContent = (gmOn ? "\u2713 " : "") + "Auto group by site";
+          window.api.setGroupMode(gmOn);
+          return;
+        }
+        if (act === "group") window.api.groupTabs();
+        else if (act === "dupes") window.api.closeDuplicates();
+        else if (act === "others") window.api.closeOthers();
+        else if (act === "domain") window.api.closeDomain();
+        else if (act === "all") {
+          if (!confirm("Close all " + lastList.length + " tabs?")) return;
+          window.api.closeAll();
+        }
+        tabMenu.style.display = "none";
+      });
+    });
+    const gmBtn = tabMenu.querySelector('[data-act="autogroup"]');
+    gmBtn.textContent = (gmOn ? "\u2713 " : "") + "Auto group by site";
+    window.api.setGroupMode(gmOn);
+
+    document.addEventListener("keydown", (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.key === "w" || e.key === "W") {
+        e.preventDefault();
+        if (activeId) window.api.closeTab(activeId);
+      } else if (/^[1-9]$/.test(e.key)) {
+        const t = lastList[parseInt(e.key, 10) - 1];
+        if (t) { e.preventDefault(); window.api.activate(t.id); }
+      }
+    });
 
     const ntBtn = document.getElementById("ntmode");
     let ntOn = localStorage.getItem("dvNewTabMode") !== "0";

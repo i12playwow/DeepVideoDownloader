@@ -20,6 +20,7 @@ const DEFAULT_CONFIG = {
   maxRetries: 3,
   maxRefresh: 2,
   hostDelayMs: 120,
+  idleTabMinutes: 0,
   autoProxy: true,
   ffmpegPath: "ffmpeg",
   theme: "dark",
@@ -33,14 +34,19 @@ const DEFAULT_CONFIG = {
   proxies: [
     "http://127.0.0.1:7890",
     "socks5://127.0.0.1:1080"
-  ]
+  ],
+  // Per-host proxy rules: route a URL host to a specific proxy (or "direct").
+  // Each entry: { host: "<pattern>", proxy: "<proxyUrl | 'direct'>" }.
+  // Patterns match exact host, "*.suffix", "*" glob, or "/regex/" literal.
+  // Rules only apply when autoProxy is ON (see proxy.js pickBest).
+  proxyRules: []
 };
 
 // Numeric fields that should be numbers — coerce stringy values coming from a
 // hand-edited config.json.
 const NUMERIC_FIELDS = [
   "port", "minFreeMB", "concurrency", "segments", "speedLimitKB",
-  "maxRetries", "maxRefresh", "hostDelayMs", "maxHistory", "autoTrimAt", "liveWindow"
+  "maxRetries", "maxRefresh", "hostDelayMs", "idleTabMinutes", "maxHistory", "autoTrimAt", "liveWindow"
 ];
 // Boolean toggles.
 const BOOLEAN_FIELDS = [
@@ -105,6 +111,26 @@ function validateConfig(config) {
     c.proxies = cleaned.length ? cleaned : DEFAULT_CONFIG.proxies;
   } else {
     c.proxies = DEFAULT_CONFIG.proxies;
+  }
+
+  // Per-host proxy rules: array of { host, proxy }. `proxy` is "direct" or any
+  // valid proxy URL (arbitrary — not required to be in the proxies list).
+  if (Array.isArray(c.proxyRules)) {
+    const cleanedRules = [];
+    for (const r of c.proxyRules) {
+      if (!r || typeof r !== "object" || Array.isArray(r)) continue;
+      const host = typeof r.host === "string" ? r.host.trim() : "";
+      const proxy = typeof r.proxy === "string" ? r.proxy.trim() : "";
+      if (!host || !proxy) continue;
+      if (proxy !== "direct" && !parseProxyUrl(proxy)) {
+        console.warn("[config] dropping invalid proxyRules entry: " + JSON.stringify(r));
+        continue;
+      }
+      cleanedRules.push({ host, proxy });
+    }
+    c.proxyRules = cleanedRules;
+  } else {
+    c.proxyRules = [];
   }
 
   return c;

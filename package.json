@@ -8,7 +8,7 @@
     "start": "electron .",
     "dist": "electron-builder --win",
     "check": "node check.js",
-    "test": "node test-config.js && node test-hls.js"
+    "test": "node test-config.js && node test-hls.js && node test-proxy.js && node test-e2e-harness.js"
   },
   "dependencies": {
     "follow-redirects": "^1.15.6",

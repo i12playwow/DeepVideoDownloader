@@ -32,6 +32,8 @@
           <button id="browserGo" class="btn">Open</button>
           <button id="openBrowser" class="btn ghost">🌐 Open browser</button>
           <button id="downloadAll" class="btn ghost" title="Directly enqueue every URL as a download">&#8681; Download all</button>
+          <button id="pickDest" class="btn ghost" title="Destination folder used for added URLs (empty = automatic rotation)">&#128193; <span id="pickDestLabel">auto</span></button>
+          <button id="clearDest" class="btn ghost" style="display:none" title="Back to automatic folder rotation">&#10005; clear</button>
           <button id="installExt" class="btn ghost" title="Load Deep Grab into the selected browser on a dedicated profile — no manual chrome://extensions needed">📦 Install in browser</button>
         </div>
       </div>
@@ -50,8 +52,8 @@
       <div class="toolbar">
         <div class="toolbar-left">
           <div class="seg">
-            <button id="showActive" class="btn ghost active">Active</button>
-            <button id="showHistory" class="btn ghost">History</button>
+             <button id="showActive" class="btn ghost active">Active</button>
+             <button id="showHistory" class="btn ghost active">History</button>
           </div>
           <input id="search" type="search" class="search" placeholder="Filter by name or URL…">
         </div>
@@ -76,20 +78,40 @@
         <table id="dls">
           <thead>
             <tr>
-              <th class="sel"><input type="checkbox" id="selAll" title="Select all"></th>
-              <th>File</th>
-              <th>Size</th>
-              <th class="wide">Progress</th>
-              <th>Speed</th>
-              <th>Proxy</th>
-              <th>Sched</th>
-              <th>Status</th>
-              <th>Actions</th>
+<th class="sel"><input type="checkbox" id="selAll" title="Select all"></th>
+<th class="sortable" data-table="active" data-sort="name" data-label="File">File</th>
+<th class="sortable" data-table="active" data-sort="size" data-label="Size">Size</th>
+<th class="wide">Progress</th>
+<th>Speed</th>
+<th>Proxy</th>
+<th>Sched</th>
+<th class="sortable" data-table="active" data-sort="status" data-label="Status">Status</th>
+<th>Actions</th>
             </tr>
           </thead>
           <tbody id="dlsBody"></tbody>
-        </table>
-      </div>
+         </table>
+       </div>
+
+       <div class="history-section" id="historySection">
+         <div class="hist-head">
+           <h3>History <span id="histCount" class="pill pill-info"></span></h3>
+         </div>
+         <div id="histScroll" class="list-scroll">
+           <table id="hist">
+             <thead>
+               <tr>
+<th class="sortable" data-table="history" data-sort="name" data-label="File">File</th>
+<th class="sortable" data-table="history" data-sort="size" data-label="Size">Size</th>
+<th class="sortable wide" data-table="history" data-sort="date" data-label="When">When</th>
+<th class="sortable" data-table="history" data-sort="status" data-label="Status">Status</th>
+<th>Actions</th>
+               </tr>
+             </thead>
+             <tbody id="histBody"></tbody>
+           </table>
+         </div>
+       </div>
     </section>
 
     <section class="panel">
@@ -101,16 +123,25 @@
         <h3>Storage</h3>
         <div class="grid">
           <label>Download folder
-            <input type="text" id="downloadDir">
+            <span class="row" style="gap:6px;">
+              <input type="text" id="downloadDir" style="flex:1;min-width:0;">
+              <button type="button" class="btn ghost" data-browse="downloadDir">Browse…</button>
+            </span>
           </label>
           <label>Switch when free space below (MB)
             <input type="number" id="minFreeMB" min="0" value="500">
           </label>
           <label>Secondary folder (when primary drive is full)
-            <input type="text" id="downloadDir2" placeholder="e.g. D:\Downloads (different drive)">
+            <span class="row" style="gap:6px;">
+              <input type="text" id="downloadDir2" placeholder="e.g. D:\Downloads (different drive)" style="flex:1;min-width:0;">
+              <button type="button" class="btn ghost" data-browse="downloadDir2">Browse…</button>
+            </span>
           </label>
           <label>Third folder (when secondary is full too)
-            <input type="text" id="downloadDir3" placeholder="e.g. E:\Downloads (different drive)">
+            <span class="row" style="gap:6px;">
+              <input type="text" id="downloadDir3" placeholder="e.g. E:\Downloads (different drive)" style="flex:1;min-width:0;">
+              <button type="button" class="btn ghost" data-browse="downloadDir3">Browse…</button>
+            </span>
           </label>
         </div>
       </div>
@@ -145,6 +176,10 @@
           <label><input type="checkbox" id="autoCloseTab"> Auto-close the browser tab + go to the next after a download</label>
           <label><input type="checkbox" id="thumbnails"> Show video thumbnails in the list (requires ffmpeg)</label>
         </div>
+        <label class="row" style="margin-top:8px;">Auto-suspend idle tabs after
+          <input type="number" id="idleTabMinutes" min="0" value="0" style="width:70px;margin:0 6px;">
+          minutes (0 = off; unloads the tab, reloads on click)
+        </label>
       </div>
 
       <div class="group">
@@ -163,6 +198,9 @@
             <ul id="proxyResults"></ul>
           </div>
         </div>
+        <label class="rules">Per-host rules (one per line: <code>&lt;host pattern&gt;</code> <code>&lt;proxy url | direct&gt;</code>) — only used when Auto proxy is ON
+          <textarea id="proxyRules" rows="5" placeholder="supjav.com http://127.0.0.1:7890&#10;sextb.net socks5://127.0.0.1:1080&#10;*.mayzaent.com socks5://127.0.0.1:1080&#10;go.mnaspm.com direct"></textarea>
+        </label>
       </div>
     </section>
 
