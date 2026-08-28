@@ -69,6 +69,29 @@ function isJavNavPage(u) {
   }
 }
 
+// First candidate that spawns a working ffmpeg wins. The configured value
+// ("ffmpeg" by default) only resolves through PATH, so on an installed app
+// launched without a dev shell it falls through to a bundled resources copy
+// (if electron-builder ever ships one) and to known install roots.
+function findFfmpeg(config = {}) {
+  const resourcesPath = typeof process.resourcesPath === "string" ? process.resourcesPath : "";
+  const candidates = [
+    config.ffmpegPath,
+    resourcesPath ? path.join(resourcesPath, "ffmpeg.exe") : null,
+    process.env.FFMPEG_PATH || null,
+    "C:\\Program Files\\JavLuv\\ffmpeg.exe",
+    "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
+    "ffmpeg",
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try {
+      const v = spawnSync(c, ["-version"], { stdio: "ignore", timeout: 10000 });
+      if (!v.error && v.status === 0) return c;
+    } catch (e) { /* keep probing */ }
+  }
+  return null;
+}
+
 // A source URL is only downloadable if it has a fetchable scheme. chrome- and
 // moz-extension wrappers (suspended/lazy-load tabs) are unwrapped to their
 // inner http(s) target first; anything else unsupported is rejected early so
@@ -1148,12 +1171,21 @@ class DownloadManager {
     return null;
   }
 
+  // Locate a working system ffmpeg. The configured value ("ffmpeg" by default)
+  // resolves through PATH only when the app is launched from a shell that carries
+  // it (e.g. dev test runs) — a Start-menu-launched installed app has a clean
+  // PATH, so fall back to a resources-bundled copy and to known install roots.
+  // The first candidate that actually spawns wins; the result is cached.
+  _resolveFfmpeg() {
+    if (this._ffmpegPath !== undefined) return this._ffmpegPath;
+    this._ffmpegPath = findFfmpeg(this.config);
+    return this._ffmpegPath;
+  }
+
   async runHls(item, baseHeaders, m3u8Url, attempt = 0) {
     // Fail fast when ffmpeg (needed for the .mp4 remux) isn't available.
-    const ffmpeg = this.config.ffmpegPath || "ffmpeg";
-    const ver = spawnSync(ffmpeg, ["-version"], { stdio: "ignore" });
-    if (ver.error) throw new Error("ffmpeg not found (set ffmpegPath in config.json)");
-    if (ver.status !== 0) throw new Error("ffmpeg check failed (" + ver.status + ")");
+    const ffmpeg = this._resolveFfmpeg();
+    if (!ffmpeg) throw new Error("ffmpeg not found (set ffmpegPath in config.json)");
 
     const maxRetries = this.config.maxRetries ?? DEFAULT_MAX_RETRIES;
     let proxy = item._proxy || null;
@@ -1541,4 +1573,4 @@ class DownloadManager {
   }
 }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isJavNavPage, isJunkHost };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isJavNavPage, isJunkHost, findFfmpeg };
