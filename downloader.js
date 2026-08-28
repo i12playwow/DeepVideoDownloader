@@ -16,7 +16,7 @@ const { URL } = require("url");
 
 const { isExpiredError, isProxyFailure, isRateLimited, isCloudflareBlocked, categorizeError, isHtmlContentType, looksLikeHtmlHead, notVideoError } = require("./lib/errors");
 const { requestWithRedirects, fetchHtml, delay, contentRangeStart, contentRangeTotal, DEFAULT_MAX_RETRIES } = require("./lib/http");
-const { HLS_MASTER_RE, isHlsUrl, parseHlsPlaylist, pickHlsVariant, stripPngPrefix, matchHlsMaster } = require("./lib/hls");
+const { HLS_MASTER_RE, isHlsUrl, parseHlsPlaylist, pickHlsVariant, stripPngPrefix, matchHlsMaster, isAdSegmentUrl } = require("./lib/hls");
 const { sanitizeName, titleFromReferer } = require("./lib/names");
 const { SJ_PLAYER_RE, resolveUrl, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster } = require("./lib/resolvers");
 const { unwrapExtensionUrl } = require("./lib/urls");
@@ -1224,15 +1224,21 @@ class DownloadManager {
     const segs = parseHlsPlaylist(body, playlistUrl);
     if (!segs.length) throw new Error("HLS: no segments in playlist");
 
+    // Ad-polluted playlists (turbosplayer behind sextb pages) carry tiktokcdn
+    // ad-IMAGE URLs as fake segments. Reject all-ad playlists outright and drop
+    // stray ad images from otherwise-real streams so we never "download" ads.
+    const videoSegs = segs.filter((u) => !isAdSegmentUrl(u));
+    if (!videoSegs.length) throw new Error("HLS: playlist segments are all ad-images (ad-polluted stream)");
+
     await fsp.mkdir(item.tempDir, { recursive: true });
     item.finalPath = path.join(this._targetDir(item), item.fileName);
 
     const queue = [];
-    for (let i = 0; i < segs.length; i++) {
+    for (let i = 0; i < videoSegs.length; i++) {
       const segPath = path.join(item.tempDir, "seg" + i + PART_EXT);
       const existing = await fsp.stat(segPath).catch(() => null);
       if (existing && existing.size > 0) continue;
-      queue.push({ url: segs[i], path: segPath });
+      queue.push({ url: videoSegs[i], path: segPath });
     }
 
     const limit = Math.max(1, Math.min(queue.length || 1, this.config.hlsConcurrency || DEFAULT_HLS_CONCURRENCY));
@@ -1252,7 +1258,7 @@ class DownloadManager {
     }
 
     if (item.status !== "running") this.throwAborted();
-    await this.remuxToMp4(item, segs.length, ffmpeg);
+    await this.remuxToMp4(item, videoSegs.length, ffmpeg);
     if (item.status !== "running") this.throwAborted(); // pause/cancel during ffmpeg
   }
 
@@ -1573,4 +1579,4 @@ class DownloadManager {
   }
 }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isJavNavPage, isJunkHost, findFfmpeg };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, findFfmpeg };
