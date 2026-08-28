@@ -14,7 +14,7 @@ const { createWriteStream, createReadStream } = fs;
 const { once } = require("events");
 const { URL } = require("url");
 
-const { isExpiredError, isProxyFailure, isRateLimited, isCloudflareBlocked, categorizeError } = require("./lib/errors");
+const { isExpiredError, isProxyFailure, isRateLimited, isCloudflareBlocked, categorizeError, isHtmlContentType, looksLikeHtmlHead, notVideoError } = require("./lib/errors");
 const { requestWithRedirects, fetchHtml, delay, contentRangeStart, contentRangeTotal, DEFAULT_MAX_RETRIES } = require("./lib/http");
 const { HLS_MASTER_RE, isHlsUrl, parseHlsPlaylist, pickHlsVariant, stripPngPrefix, matchHlsMaster } = require("./lib/hls");
 const { sanitizeName, titleFromReferer } = require("./lib/names");
@@ -872,12 +872,20 @@ class DownloadManager {
       });
       try { result.res.destroy(); } catch (e) { /* ignore */ }
     }
+    // A page, not a video: never fetch the body as if it were a movie. Failing
+    // here (before any bytes are written) keeps HTML junk out of the download
+    // dir AND out of downloaded.json — the old k2s "3.8KB done" noise.
+    const contentType = String(result.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+    if (isHtmlContentType(contentType)) {
+      throw notVideoError(`server returned ${contentType} at ${String(result.finalUrl || item.url).slice(0, 120)}`);
+    }
     const cr = contentRangeTotal(result.headers["content-range"]);
     const length = cr != null ? cr : parseInt(result.headers["content-length"] || "0", 10);
     return {
       finalUrl: result.finalUrl,
       length: Number.isFinite(length) ? length : 0,
-      acceptRanges: (result.headers["accept-ranges"] || "").toLowerCase() === "bytes"
+      acceptRanges: (result.headers["accept-ranges"] || "").toLowerCase() === "bytes",
+      contentType
     };
   }
 
@@ -1376,8 +1384,19 @@ class DownloadManager {
     const out = createWriteStream(filePath, { flags });
     const errP = new Promise((_, reject) => out.once("error", reject));
     errP.catch(() => {});
+    let sniffed = false;
     try {
       for await (const chunk of res) {
+        // First bytes are an HTML page, not a video (server lied in the HEAD
+        // probe, or omitted Content-Type). Abort and discard instead of saving
+        // doctype bytes as an .mp4; resume/appends were already validated.
+        if (!sniffed && flags !== "a" && looksLikeHtmlHead(chunk)) {
+          out.destroy();
+          try { res.destroy(); } catch (e2) { /* ignore */ }
+          await fsp.rm(filePath, { force: true }).catch(() => {});
+          throw notVideoError("downloaded bytes look like an HTML page");
+        }
+        sniffed = true;
         this.tick(item, chunk.length);
         await this.throttle(chunk.length);
         if (!out.write(chunk)) await Promise.race([once(out, "drain"), errP]);
