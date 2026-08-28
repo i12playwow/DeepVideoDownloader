@@ -141,9 +141,10 @@ async function gatherCookieHeader(urls) {
 function startWsServer() {
   wss = new WebSocketServer({ host: "127.0.0.1", port: config.port });
 
+  const crawlThrottle = wsBridge.makeCrawlThrottle();
+
   wss.on("connection", (ws) => {
     ws.send(JSON.stringify({ type: "hello", version: "1.0.0", port: config.port }));
-    const throttle = wsBridge.makeCrawlThrottle();
     ws.on("message", async (data) => {
       let msg;
       try {
@@ -151,7 +152,7 @@ function startWsServer() {
       } catch (e) {
         return;
       }
-      if (msg.type === "download" && throttle()) {
+      if (msg.type === "download" && crawlThrottle()) {
         try {
           ws.send(JSON.stringify({ type: "error", message: "Pace limit: too many downloads in the last minute.", url: msg.url }));
         } catch (e) { /* ignore */ }

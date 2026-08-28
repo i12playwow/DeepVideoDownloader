@@ -32,6 +32,20 @@ function isJunkNavUrl(u) {
   }
 }
 
+// Dotless single-word hostnames (https://Mouth, https://That, ...) are junk the
+// autoloop crawl manufactures from page words. Real hosts carry a dot (or are
+// loopback). Rejects them before the DNS churn ever reaches the engine.
+function isJunkHost(u) {
+  try {
+    const host = new URL(u).hostname.toLowerCase().replace(/\[|\]/g, "");
+    if (!host || host === "localhost") return false;
+    if (/^[\d.]+$/.test(host) || /^::1$/.test(host)) return false;
+    return host.indexOf(".") === -1;
+  } catch (e) {
+    return false;
+  }
+}
+
 // JAV tube site navigation pages masquerade as movie slugs (invite-ads, genres,
 // new-releases, dmca, ...). Real sextb/supjav movie pages always carry a numeric
 // code in the last slug segment, so a single-segment path without one is nav,
@@ -447,7 +461,7 @@ class DownloadManager {
     let added = 0;
     for (const u of urls) {
       const s = unwrapExtensionUrl(typeof u === "string" ? u.trim() : "");
-      if (!isFetchableUrl(s) || isJunkNavUrl(s) || isJavNavPage(s)) continue;
+      if (!isFetchableUrl(s) || isJunkNavUrl(s) || isJavNavPage(s) || isJunkHost(s)) continue;
       this._pending.push(dirOverride ? { url: s, dirOverride } : s);
       added++;
     }
@@ -487,7 +501,7 @@ class DownloadManager {
     url = unwrapExtensionUrl(url);
     referer = unwrapExtensionUrl(typeof referer === "string" ? referer : "") || "";
     if (!isFetchableUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
-    if (isJunkNavUrl(url) || isJavNavPage(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
+    if (isJunkNavUrl(url) || isJavNavPage(url) || isJunkHost(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
     if (resolvedUrl) resolvedUrl = unwrapExtensionUrl(resolvedUrl);
     // Duplicate handling: an already-downloaded URL becomes a "duplicate" list
     // entry (so the user can "Download anyway"), unless the bulk/windowed path
@@ -1527,4 +1541,4 @@ class DownloadManager {
   }
 }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isJavNavPage };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isJavNavPage, isJunkHost };
