@@ -4,7 +4,7 @@ process.on("unhandledRejection", (err) => {
   console.error("[unhandledRejection]", err);
 });
 
-const { app, BrowserWindow, BrowserView, ipcMain, shell, clipboard, session } = require("electron");
+const { app, BrowserWindow, BrowserView, ipcMain, shell, clipboard, session, Tray, Menu, nativeImage } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -53,6 +53,8 @@ let proxyManager = new ProxyManager(config);
 let dm = new DownloadManager({ config, proxyManager, onUpdate: pushUpdate, cookieProvider: (url) => cookieHeaderFor(url), onRequiresBrowser: (url) => browserOpen.queueBrowserOpen(url) });
 let mainWindow = null;
 let wss = null;
+let tray = null;
+let quitting = false;
 
 // Batched renderer/extension updates: progress ticks fire up to several times
 // per second per download; coalescing them into a ~100ms flush window keeps
@@ -195,6 +197,39 @@ function createWindow() {
   });
   mainWindow.loadFile(path.join(__dirname, "renderer.html"));
   mainWindow.on("closed", () => { mainWindow = null; });
+}
+
+// System tray: keeps the app (download engine + WebSocket server on 8765)
+// running in the background even when every window is closed, so captures
+// relayed from the Deep Grab browser keep downloading. Tray "Show" recreates
+// the main window; "Quit" performs a clean shutdown (flush + wss.close).
+const TRAY_ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAJUlEQVR4nGNgGF5AzmH9f2Iw0QbAwKgBA2EALkA/A8hOSEMTAAAXkvsxE79GJAAAAABJRU5ErkJggg==";
+function createTray() {
+  if (tray) return tray;
+  const img = nativeImage.createFromDataURL("data:image/png;base64," + TRAY_ICON_B64);
+  tray = new Tray(img.resize({ width: 16, height: 16 }));
+  tray.setToolTip("Deep Video Downloader");
+  const menu = Menu.buildFromTemplate([
+    {
+      label: "Open Deep Video Downloader",
+      click: () => {
+        if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+        else { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); }
+        startClipboardMonitor();
+      }
+    },
+    { type: "separator" },
+    {
+      label: "Quit",
+      click: () => { quitting = true; app.quit(); }
+    }
+  ]);
+  tray.setContextMenu(menu);
+  tray.on("click", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
+    else createWindow();
+  });
+  return tray;
 }
 
 // ---------------- built-in browser (Deep Grab extension) ----------------
@@ -1087,6 +1122,7 @@ ipcMain.on("bv-group-mode", (e, on) => { bvGroupMode = !!on; if (bvGroupMode) bv
   app.whenReady().then(() => {
     startWsServer();
     createWindow();
+    createTray();
     loadBrowserExtension();
     startClipboardMonitor();
     startIdleTabSweeper();
@@ -1106,12 +1142,19 @@ ipcMain.on("bv-group-mode", (e, on) => { bvGroupMode = !!on; if (bvGroupMode) bv
   });
 
   app.on("window-all-closed", () => {
+    // Keep the app alive in the background (tray) once every window is closed:
+    // the download engine + WebSocket server on 8765 must keep running so m3u8
+    // captures relayed from the Deep Grab browser keep downloading. Exit only
+    // via the tray "Quit" (which sets `quitting` and calls app.quit()).
+    if (quitting) { app.quit(); return; }
     stopClipboardMonitor();
-    if (process.platform !== "darwin") app.quit();
+    if (process.platform === "darwin") return;
+    // On Windows/Linux keep running behind the tray icon instead of quitting.
   });
 
   app.on("quit", () => {
     stopClipboardMonitor();
+    if (tray) tray.destroy();
     if (dm && typeof dm.flush === "function") dm.flush();
     if (wss) wss.close();
   });
