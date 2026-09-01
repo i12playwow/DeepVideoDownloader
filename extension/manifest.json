@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Deep Grab",
   "version": "1.0.2",
-  "description": "Find videos on the current page and send them to the Deep Video Downloader desktop app (WebSocket 127.0.0.1:8765).",
+  "description": "Find the best video on the current page and send its download link to the Deep Video Downloader app running on your computer.",
   "permissions": [
     "storage",
     "tabs",
@@ -34,7 +34,17 @@
       "all_frames": true
     }
   ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "action": {
-    "default_title": "Deep Grab — click to re-scan the page"
+    "default_title": "Deep Grab — click to re-scan the page",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
   }
 }
