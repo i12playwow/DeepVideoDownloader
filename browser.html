@@ -135,7 +135,7 @@
     document.addEventListener("click", (e) => {
       if (!tabMenu.contains(e.target) && e.target !== tabTools) tabMenu.style.display = "none";
     });
-    let gmOn = localStorage.getItem("dvGroupMode") === "1";
+    let gmOn = localStorage.getItem("dvGroupMode") !== "0";
     tabMenu.querySelectorAll("button").forEach((b) => {
       b.addEventListener("click", () => {
         const act = b.dataset.act;
