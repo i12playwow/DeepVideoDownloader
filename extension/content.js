@@ -29,6 +29,7 @@
     typeFilter: "all",
     minSizeMB: 0,
     bestOnly: true,
+    autoGrab: true,
     autoCloseTab: true,
     pipelineQty: 0
   };
@@ -579,9 +580,11 @@
     if (keep && !keep.added) maybeAutoDownload(keep.url);
   }
 
-  // Master switch for automatic sending. Memory-only on purpose: a fresh page
-  // load always starts OFF — nothing is ever sent without pressing Start.
-  let grabOn = false;
+  // Master switch for automatic sending. Default state is taken from the
+  // persisted `autoGrab` config (ON by default) so a fresh page load is armed
+  // and the full pipeline (CF solve -> capture -> send -> download) runs without
+  // pressing "Send". The button can still toggle it per-session at any time.
+  let grabOn = config.autoGrab !== false;
 
   function maybeAutoDownload(url) {
     if (!grabOn || !config.bestOnly) return;
@@ -727,14 +730,14 @@
           <div class="dv-row dv-toggles">
             <button id="dv-scroll" class="dv-tbtn" title="Auto-scroll to load all content">↓ Auto-scroll</button>
             <button id="dv-tab" class="dv-tbtn" title="Open links in a new tab">↗ New tab</button>
-            <button id="dv-best" class="dv-tbtn" title="Show only the single best-quality MP4 and auto-download it (skips HLS playlists)">↥ Best only</button>
+            <button id="dv-best" class="dv-tbtn" title="Only capture the single best source (full-movie HLS master outranks MP4 highlights)">↥ Best only</button>
             <button id="dv-close" class="dv-tbtn" title="After the video is sent to the desktop app, close its streamtape/fstape tab (cascades through pre-opened tabs)">⟳ Auto-close</button>
             <label class="dv-all" title="All keywords must match"><input type="checkbox" id="dv-all"> ALL</label>
           </div>
           <div class="dv-row dv-meta">
             <span id="dv-counts" class="dv-counts">0 found</span>
             <span id="dv-desktop" class="dv-dot" title="Desktop app connection">●</span>
-            <button id="dv-grab" class="dv-tbtn" title="Master switch for automatic sending: ON = Best-only videos are sent to the desktop app as they are found; OFF (default on every page) = nothing is sent automatically">▶ Send</button>
+            <button id="dv-grab" class="dv-tbtn" title="Master switch for automatic sending: ON (default) = best videos are sent to the desktop app as found; OFF = nothing is sent automatically">▶ Send</button>
             <button id="dv-run" class="dv-tbtn" title="Process streamtape/fstape tabs one by one: autoplay → send → close → next (off by default)">▶ Start</button>
             <button id="dv-scan" class="dv-btn" title="Re-scan page">Scan</button>
           </div>
@@ -862,9 +865,11 @@
     if (grabBtn) {
       grabBtn.addEventListener("click", () => {
         grabOn = !grabOn;
+        config.autoGrab = grabOn;
         grabBtn.textContent = grabOn ? "■ Send" : "▶ Send";
         grabBtn.classList.toggle("dv-on", grabOn);
         toast(grabOn ? "Auto-send ON — new videos are sent automatically" : "Auto-send OFF");
+        saveConfig();
         if (grabOn) {
           // send the current best immediately, then flush anything stashed offline
           const cur = found.size ? found.values().next().value : null;
@@ -1151,6 +1156,7 @@
         typeFilter: config.typeFilter,
         minSizeMB: config.minSizeMB,
         bestOnly: config.bestOnly,
+        autoGrab: config.autoGrab,
         autoCloseTab: config.autoCloseTab,
         pipelineQty: config.pipelineQty
       }
@@ -1162,6 +1168,14 @@
       config = { ...DEFAULT_CONFIG, ...(data.dv || {}) };
       if (config.matchAll) state.matchAll = true;
       if (config.deepSearch) state.keyword = config.deepSearch;
+      // Sync the auto-send master switch with the persisted autoGrab setting
+      // (default ON = armed). A stored OFF is honored here on load.
+      grabOn = config.autoGrab !== false;
+      const grabBtn = document.getElementById("dv-grab");
+      if (grabBtn) {
+        grabBtn.textContent = grabOn ? "■ Send" : "▶ Send";
+        grabBtn.classList.toggle("dv-on", grabOn);
+      }
       buildToolbar();
       applyFilter();
       scanVideoElements();
