@@ -207,10 +207,36 @@
     const pageTitle = slugTitle(location.href) || document.title;
 
     if (config.bestOnly) {
-      if (isHls(clean)) return; // playlists skipped entirely in best-only mode
+      // HLS is never dropped in best-only mode: the full movie behind most
+      // Cloudflare/anti-bot players (missav/surrit/supjav masters) is HLS,
+      // while the <video> element only ever exposes an MP4 *highlight* clip.
+      // So an HLS master outweighs any MP4 and becomes the single "best".
+      if (isHls(clean)) {
+        if (found.has(clean)) return;
+        const cur = found.size ? found.values().next().value : null;
+        // HLS (full movie) always beats any MP4 (highlight) currently held;
+        // keep it as the sole best so the full high-quality movie surfaces.
+        const curIsHls = cur && cur.kind === "m3u8";
+        if (cur && (curIsHls || !isHls(cur.url))) {
+          // replace the existing entry (doesn't matter if it's an HLS or MP4
+          // highlight — HLS master is the full movie)
+          found.delete(cur.url);
+          chrome.runtime.sendMessage({ type: "remove-found", urls: [cur.url] }).catch(() => {});
+        }
+        const kind = "m3u8";
+        const titleText = (title || pageTitle || clean.split("/").pop()).trim();
+        found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind, _rank: 99 });
+        chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind }).catch(() => {});
+        maybeAutoDownload(clean);
+        renderFoundList();
+        updateCounts();
+        return;
+      }
       if (found.has(clean)) return;
       const rank = qualityRank(clean, sourceEl);
       const cur = found.size ? found.values().next().value : null;
+      // A previously-held HLS full movie must NOT be replaced by an MP4 highlight.
+      if (cur && cur.kind === "m3u8") return;
       if (cur && rank <= (cur._rank || 0)) return; // keep the current best on ties
       if (cur) {
         found.delete(cur.url);
@@ -536,22 +562,21 @@
   function reevaluateBest() {
     if (!config.bestOnly) return;
     const entries = Array.from(found.values());
+    // HLS (full movie master) outranks any MP4 highlight clip.
+    const hlsEntry = entries.find((v) => v.kind === "m3u8");
     let bestEntry = null;
     entries.forEach((v) => {
-      if (isHls(v.url)) {
-        found.delete(v.url);
-        chrome.runtime.sendMessage({ type: "remove-found", urls: [v.url] }).catch(() => {});
-        return;
-      }
+      if (v.kind === "m3u8") { v._rank = 99; return; }
       v._rank = qualityRank(v.url);
       if (!bestEntry || v._rank > bestEntry._rank) bestEntry = v;
     });
+    const keep = hlsEntry ? hlsEntry : bestEntry;
     entries.forEach((v) => {
-      if (v === bestEntry || !found.has(v.url)) return;
+      if (v === keep || !found.has(v.url)) return;
       found.delete(v.url);
       chrome.runtime.sendMessage({ type: "remove-found", urls: [v.url] }).catch(() => {});
     });
-    if (bestEntry && !bestEntry.added) maybeAutoDownload(bestEntry.url);
+    if (keep && !keep.added) maybeAutoDownload(keep.url);
   }
 
   // Master switch for automatic sending. Memory-only on purpose: a fresh page
@@ -1163,6 +1188,13 @@
   let cfGaveUp = false;
   const CF_COOLDOWN_MS = 6000;   // Turnstile verifies on its own after ONE click;
   const CF_MAX_CLICKS = 5;       // re-clicking sooner re-triggers the challenge loop.
+  // After any solver action (a click) or a manual human interaction, hold off
+  // for CF_QUIET_MS before clicking AGAIN or reloading. Cloudflare's Turnstile
+  // needs that quiet to verify + hand back the cf_clearance cookie + reload on
+  // its own; a second click or an early reload during this window invalidates
+  // the just-submitted solve and forces another challenge (the "solve, refresh,
+  // solve again" loop).
+  const CF_QUIET_MS = 20000;
   const CF_RELOADS_KEY = "dvCfReloads";
   // Soft interstitials ("Checking your browser...") have NO clickable widget;
   // Cloudflare runs proof-of-work (can take 20-45s under suspicion) then sets
@@ -1172,6 +1204,9 @@
   const CF_SOFT_MAX_RELOADS = 1;
   let cfSoftSince = 0;
   let cfSoftReloads = 0;
+  // last moment we (or the user) interacted with a challenge; solver goes quiet
+  // until this expires so a manual solve lands instead of being re-clicked away
+  let cfQuietUntil = 0;
   function cfReloadBudget() {
     try { return Math.max(0, 2 - (parseInt(sessionStorage.getItem(CF_RELOADS_KEY) || "0", 10) || 0)); } catch (e) { return 0; }
   }
@@ -1190,7 +1225,9 @@
   }
   function clickCloudflareWidget() {
     const now = Date.now();
-    // Single click, then wait out the cooldown while Turnstile verifies.
+    // Honor the quiet window: right after any solver/human interaction, do NOT
+    // click again (Turnstile is verifying; a second click re-triggers the loop).
+    if (now < cfQuietUntil) return false;
     if (now - cfLastClick < CF_COOLDOWN_MS) return false;
     if (!looksLikeCloudflareChallenge()) return false;
     const targets = cfFrameKind() === "checkbox"
@@ -1206,6 +1243,7 @@
     }
     if (acted) {
       cfLastClick = now;
+      cfQuietUntil = now + CF_QUIET_MS;   // let this solve land before any retry
       cfTries++;
       console.info("DeepVid: clicked Cloudflare challenge in", location.href, "(attempt " + cfTries + ")");
       if (cfTries >= CF_MAX_CLICKS && IS_TOP) {
@@ -1244,7 +1282,10 @@ const acted = clickCloudflareWidget();
       if (!acted && cfFrameKind() === "soft" && IS_TOP && !document.querySelector('iframe[src*="challenges.cloudflare.com"]')) {
         const now = Date.now();
         if (!cfSoftSince) cfSoftSince = now;
-        if (now - cfSoftSince >= CF_SOFT_TIMEOUT_MS) {
+        // Stay quiet during the post-interaction/solve grace so a manual solve
+        // never gets nuked by an auto reload, and never reload while a Turnstile
+        // iframe is present (that widget is the thing the human reaches to solve).
+        if (!(now < cfQuietUntil) && now - cfSoftSince >= CF_SOFT_TIMEOUT_MS) {
           cfSoftSince = 0;
           cfSoftReloads++;
           if (cfSoftReloads <= CF_SOFT_MAX_RELOADS && cfReloadBudget() > 0) {
@@ -1276,6 +1317,19 @@ const acted = clickCloudflareWidget();
     if (!cfGaveUp && looksLikeCloudflareChallenge()) startCloudflareSolver();
   }
   setInterval(maybeStartCloudflareSolver, 1500);
+
+  // Detect a HUMAN manually solving the Turnstile (they click the checkbox in
+  // the challenges.cloudflare.com iframe / widget). Arm the same quiet window so
+  // the nested-frame auto-solver never re-clicks their checkbox right after and
+  // invalidates the manual solve — the "solve, it refreshes, solve again" loop.
+  document.addEventListener("pointerdown", (ev) => {
+    if (cfQuietUntil > Date.now()) return;
+    const t = ev.target;
+    if (t && t.closest && t.closest('[role="checkbox"], input[type="checkbox"], .cf-turnstile, #challenge-stage, #challenge-form')) {
+      cfQuietUntil = Date.now() + CF_QUIET_MS;
+      console.info("DeepVid: manual Cloudflare solve detected - staying quiet for verification");
+    }
+  }, true);
 
   // ---------- init ----------
   domReady(() => {
