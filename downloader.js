@@ -46,6 +46,23 @@ function isJunkHost(u) {
   }
 }
 
+// Browser-internal / store-UI URLs (chrome://, chrome-extension://, edge://,
+// brave://, about:, devtools:, and the Chrome Web Store listing pages) are never
+// downloadable media. The extension's own Tab Copy / webstore install pages and
+// the CF "Reload once" self-link are real examples that reached the queue.
+function isBrowserUiUrl(u) {
+  try {
+    const url = new URL(u);
+    if (/^(?:chrome|moz|edge|brave)-extension:/i.test(url.protocol)) return true;
+    if (/^(?:chrome|edge|brave|about|devtools|view-source|data|file):/i.test(url.protocol)) return true;
+    const host = url.hostname.toLowerCase().replace(/^www\./, "");
+    if (/^(?:chromewebstore\.google\.com|chrome\.google\.com)$/.test(host)) return true;
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
 // JAV tube site navigation pages masquerade as movie slugs (invite-ads, genres,
 // new-releases, dmca, ...). Real sextb/supjav movie pages always carry a numeric
 // code in the last slug segment, so a single-segment path without one is nav,
@@ -484,7 +501,7 @@ class DownloadManager {
     let added = 0;
     for (const u of urls) {
       const s = unwrapExtensionUrl(typeof u === "string" ? u.trim() : "");
-      if (!isFetchableUrl(s) || isJunkNavUrl(s) || isJavNavPage(s) || isJunkHost(s)) continue;
+      if (!isFetchableUrl(s) || isJunkNavUrl(s) || isJavNavPage(s) || isJunkHost(s) || isBrowserUiUrl(s)) continue;
       this._pending.push(dirOverride ? { url: s, dirOverride } : s);
       added++;
     }
@@ -524,7 +541,7 @@ class DownloadManager {
     url = unwrapExtensionUrl(url);
     referer = unwrapExtensionUrl(typeof referer === "string" ? referer : "") || "";
     if (!isFetchableUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
-    if (isJunkNavUrl(url) || isJavNavPage(url) || isJunkHost(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
+    if (isJunkNavUrl(url) || isJavNavPage(url) || isJunkHost(url) || isBrowserUiUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
     if (resolvedUrl) resolvedUrl = unwrapExtensionUrl(resolvedUrl);
     // Duplicate handling: an already-downloaded URL becomes a "duplicate" list
     // entry (so the user can "Download anyway"), unless the bulk/windowed path
@@ -1579,4 +1596,4 @@ class DownloadManager {
   }
 }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, findFfmpeg };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, isBrowserUiUrl, findFfmpeg };

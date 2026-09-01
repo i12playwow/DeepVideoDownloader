@@ -325,6 +325,13 @@
       let u;
       try { u = new URL(href); } catch (e) { return; }
       if (!isJavHostname(u.hostname) || !isJavMoviePath(u.pathname)) return;
+      // Skip self-links / in-page anchors (e.g. the Cloudflare "Reload once"
+      // banner is <a href="#">, which resolves to `this page` + "#" and must
+      // never be misread as a movie/related-link). A movie is a DIFFERENT page.
+      const rawHref = (a.getAttribute("href") || "").trim();
+      if (rawHref === "" || rawHref === "#" || rawHref.startsWith("#")) return;
+      const currentNoHash = location.href.split("#")[0];
+      if (u.href.split("#")[0] === currentNoHash) return;
       const title = (a.getAttribute("title") || a.textContent || "").trim() || document.title;
       tryCaptureMoviePage(href, title);
     });
