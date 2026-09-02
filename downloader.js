@@ -21,6 +21,11 @@ const { sanitizeName, titleFromReferer } = require("./lib/names");
 const { SJ_PLAYER_RE, resolveUrl, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster } = require("./lib/resolvers");
 const { unwrapExtensionUrl } = require("./lib/urls");
 
+// A file must be at least this big to count as a real downloaded video for the
+// on-disk duplicate check. Smaller files are partials/stubs (failed CF probes,
+// retry storms) and must NOT block a re-download.
+const MIN_REAL_FILE = 1024 * 1024;
+
 // Feed/RSS-style navigation endpoints (WordPress tube sites emit <a href="/feed">)
 // are never media — they'd otherwise enqueue as bogus downloads from list scans.
 function isJunkNavUrl(u) {
@@ -450,6 +455,31 @@ class DownloadManager {
     this._saveDownloaded();
   }
 
+  // A real (non-stub) file already sits on disk under the name a download of
+  // this title/label would produce — the video is available, so don't re-download
+  // even if downloaded.json was cleared or the signed URL rotated. Return false
+  // for the base-name (main) file OR its timestamped collision siblings.
+  _fileExistsFor(title, label, dirOverride) {
+    const base = sanitizeName(title || "") + (label ? "[" + sanitizeName(label) + "]" : "") + ".mp4";
+    const stem = base.replace(/\.mp4$/i, "");
+    const matcher = new RegExp("^" + stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?:_\\d+)?\\.mp4$", "i");
+    const dirs = [];
+    if (typeof dirOverride === "string" && dirOverride.trim()) dirs.push(dirOverride.trim());
+    for (const d of [this.config.downloadDir, this.config.downloadDir2, this.config.downloadDir3]) {
+      if (typeof d === "string" && d.trim()) dirs.push(d.trim());
+    }
+    for (const dir of dirs) {
+      try {
+        for (const f of fs.readdirSync(dir)) {
+          if (!matcher.test(f)) continue;
+          const st = fs.statSync(path.join(dir, f));
+          if (st.isFile() && st.size >= MIN_REAL_FILE) return true;
+        }
+      } catch (e) { /* dir missing/unreadable: no disk-dupe signal */ }
+    }
+    return false;
+  }
+
   // Move a terminal item to history (frees its slot for the windowed loader).
   _toHistory(item) {
     const histEntry = {
@@ -587,6 +617,8 @@ class DownloadManager {
     if (!isFetchableUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
     if (isJunkNavUrl(url) || isJavNavPage(url) || isJunkHost(url) || isBrowserUiUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
     if (resolvedUrl) resolvedUrl = unwrapExtensionUrl(resolvedUrl);
+    // Fall back to the streamtape/fstape URL slug when the sender gave no title.
+    const effectiveTitle = title || titleFromReferer(referer);
     // Duplicate handling: an already-downloaded URL becomes a "duplicate" list
     // entry (so the user can "Download anyway"), unless the bulk/windowed path
     // opts out with markDuplicate:false (skip silently — no item to avoid bloat).
@@ -604,16 +636,18 @@ class DownloadManager {
         if (canon.length && it._canon && it._canon.some((c) => canon.includes(c))) { chainDup = true; break; }
       }
     }
+    // The video is already on disk if a real (non-stub) file exists under the
+    // name a download of this title would produce — don't re-download even when
+    // downloaded.json was cleared or the signed URL rotated.
+    const diskDup = !force && this.config.skipDuplicates !== false && this._fileExistsFor(effectiveTitle, label, dirOverride);
     const isDup = !force && this.config.skipDuplicates !== false &&
-      (this.isDownloaded(url) || this._hlsMasterInFlight(url) || chainDup);
+      (this.isDownloaded(url) || this._hlsMasterInFlight(url) || chainDup || diskDup);
     if (isDup && markDuplicate === false) return null;
     const id = "dl-" + (++this._id) + "-" + Date.now();
     // Schedule times arrive as ISO strings / Date objects / ms numbers
     // (renderer, WS, tests). Normalize to numeric ms so the pump() and
     // checkScheduled() `Date.now() >= item.scheduledX` comparisons work.
     const normTs = (v) => (v == null || v === "" ? null : new Date(v).getTime());
-    // Fall back to the streamtape/fstape URL slug when the sender gave no title.
-    const effectiveTitle = title || titleFromReferer(referer);
     const hls = isHlsUrl(url) || (resolvedUrl && isHlsUrl(resolvedUrl));
     // Resolution is deferred to _runOnce so callers get an id immediately and
     // the WS `accepted` reply never blocks on slow resolver page fetches.
