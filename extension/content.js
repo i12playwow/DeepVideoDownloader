@@ -452,6 +452,49 @@
     }
   }
 
+  // supjav movie pages load the actual stream inside a supjav.php?l=<OLID>
+  // player iframe (which matches neither /player/ nor /embed/). The app's
+  // desktop resolver (resolveSupjav) needs that exact player URL — it reverses
+  // the id, fetches ?c=<reversed> and follows the 302 to the streamtape/fstape
+  // embed or turbovidhls m3u8, all server-side and headless-friendly. Without
+  // it an item stays a raw movie page that only a CF-solved browser tab can
+  // open. So capture the iframe's player URL as a `link` source (never the
+  // anti-bot gated stream itself) and let resolveUrl resolve it.
+  const resolvedSupjav = new Set();
+  const SUPJAV_PLAYER_RE = /(?:supjav|supremejav)\.(?:com|ph|net)[^"'\s]*\bsupjav\.php/i;
+  async function extractSupjav() {
+    if (!isSupjavHostname(location.hostname)) return;
+    if (!/\.html?$/i.test(location.pathname) || isAdUrl(location.href)) return;
+    const players = new Set();
+    document.querySelectorAll("iframe[src], iframe[data-src], [data-server], [data-player]").forEach((el) => {
+      const v = (el.getAttribute("src") || el.getAttribute("data-src") || el.getAttribute("data-server") || el.getAttribute("data-player") || "").trim();
+      if (!v) return;
+      if (SUPJAV_PLAYER_RE.test(v) || /supjav\.php/i.test(v) || /(?:^|[?&])player=/i.test(v)) {
+        players.add(/^https?:\/\//i.test(v) ? v : location.origin + (v.startsWith("/") ? "" : "/") + v);
+      }
+    });
+    // In-page reference: some themes inline the player URL in an attribute or
+    // data-* on the page (not an iframe). The userscript reads frame src/defaultSrc;
+    // also grep the rendered DOM for a direct supjav.php?l= reference.
+    document.querySelectorAll("a[href], [data-src], [data-url], [data-frame]").forEach((el) => {
+      const v = (el.getAttribute("href") || el.getAttribute("data-src") || el.getAttribute("data-url") || el.getAttribute("data-frame") || "").trim();
+      if (v && SUPJAV_PLAYER_RE.test(v)) players.add(/^https?:\/\//i.test(v) ? v : location.origin + (v.startsWith("/") ? "" : "/") + v);
+    });
+    const seen = new Set(Array.from(found.keys()));
+    for (const u of players) {
+      if (seen.has(u) || found.has(u)) continue;
+      if (resolvedSupjav.has(u)) continue;
+      resolvedSupjav.add(u);
+      const kind = "link";
+      const titleText = (document.title.replace(/\s*-\s*[^-]*$/, "") || location.href.split("/").pop() || "").trim();
+      found.set(u, { url: u, title: titleText, size: 0, added: false, kind, _rank: 0 });
+      chrome.runtime.sendMessage({ type: "video-found", url: u, title: titleText, pageUrl: location.href, kind }).catch(() => {});
+      maybeAutoDownload(u);
+      renderFoundList();
+      updateCounts();
+    }
+  }
+
   function hookNetwork() {
     const origOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function (method, url) {
@@ -865,6 +908,7 @@
       scanSupjavList();
       scanSupjavDl();
       extractCnPorn();
+      extractSupjav();
       refreshFromBackground(true);
       toast(`Scan done — ${found.size} videos`);
     });
@@ -1397,6 +1441,7 @@ const acted = clickCloudflareWidget();
       scanSupjavDl();
       extractCnPorn();
       extractMissav();
+      extractSupjav();
     }, 3000);
 
     setInterval(() => {
@@ -1413,6 +1458,7 @@ const acted = clickCloudflareWidget();
       scanSupjavDl();
       extractCnPorn();
       extractMissav();
+      extractSupjav();
       if (IS_TOP) refreshFromBackground(true);
       sendResponse({ ok: true, count: found.size });
       return false;
