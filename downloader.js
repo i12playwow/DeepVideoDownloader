@@ -63,6 +63,37 @@ function isBrowserUiUrl(u) {
   }
 }
 
+// Signed / rotating media URLs (streamtape get_video expires/token, tapecontent
+// blob paths, signed m3u8 query tokens) are a brand-new string on every capture
+// of the SAME stream, so exact-URL dedupe never matches and the movie re-downloads
+// under a timestamped name. canonicalKeys() returns stable keys that describe the
+// CONTENT a URL points at; the downloader dedupes on them alongside the raw URL.
+// Returns [] for everything with no stable identity (plain mp4s, page URLs).
+function canonicalKeys(u) {
+  const s = String(u || "");
+  const out = [];
+  if (!s) return out;
+  try {
+    const url = new URL(s);
+    const host = url.hostname.toLowerCase().replace(/^www\./, "");
+    // streamtape/fstape get_video: the id is stable, expires/token rotate.
+    if (/^(?:[^/]+\.)?(?:streamtape|fstape)\.com$/i.test(host) && /^\/get_video\/?$/i.test(url.pathname)) {
+      const id = url.searchParams.get("id");
+      if (id) out.push("st:" + id);
+    }
+    // HLS playlists: forget the query so a re-captured master/variant with a
+    // fresh signed token still dedupes against the recorded one.
+    if (/\.m3u8([?#]|$)/i.test(url.pathname)) out.push("hls:" + url.origin + url.pathname);
+    // streamtape CDN: the deep radosgw parent dir is unique per file, so keying
+    // on it catches the resolved tapecontent capture without keying on the tail.
+    if (/(?:^|\.)tapecontent\.net$/i.test(host)) {
+      const p = url.pathname.split("/").filter(Boolean).slice(0, -1).join("/");
+      if (p) out.push("cdn:" + url.origin + "/" + p + "/");
+    }
+  } catch (e) { /* malformed URL: no canonical identity */ }
+  return out;
+}
+
 // JAV tube site navigation pages masquerade as movie slugs (invite-ads, genres,
 // new-releases, dmca, ...). Real sextb/supjav movie pages always carry a numeric
 // code in the last slug segment, so a single-segment path without one is nav,
@@ -390,6 +421,9 @@ class DownloadManager {
   isDownloaded(url) {
     const u = String(url || "");
     if (this._downloaded.has(u)) return true;
+    for (const k of canonicalKeys(u)) {
+      if (this._downloaded.has(k)) return true;
+    }
     // Redundant quality variant: once its master playlist is recorded as
     // downloaded, a later <N>p/video.m3u8 capture of the SAME stream is a dup.
     for (const c of matchHlsMaster(u)) {
@@ -410,7 +444,9 @@ class DownloadManager {
   }
 
   _markDownloaded(url) {
-    this._downloaded.add(String(url || ""));
+    const u = String(url || "");
+    this._downloaded.add(u);
+    for (const k of canonicalKeys(u)) this._downloaded.add(k);
     this._saveDownloaded();
   }
 
@@ -447,7 +483,15 @@ class DownloadManager {
   // bulk/windowed import (or when the active map grows large), then refill.
   _maybeFinalize(item) {
     if (!item) return;
-    if (item.status === "done") this._markDownloaded(item.url);
+    if (item.status === "done") {
+      this._markDownloaded(item.url);
+    } else if (item.finalPath) {
+      // A failed/aborted run must not leave a zero-byte stub behind — repeated
+      // failures pile up as timestamp-renamed duplicate files in the download dir.
+      fsp.stat(item.finalPath).then((s) => {
+        if (s.size === 0) return fsp.rm(item.finalPath, { force: true });
+      }).catch(() => {});
+    }
     const trim =
       (this._pending && this._pending.length > 0) ||
       this.items.size > (this.config.autoTrimAt || 500);
@@ -549,8 +593,19 @@ class DownloadManager {
     // An HLS quality variant whose master is already downloaded OR queued/running
     // is also a duplicate — the master ships the higher resolution and taking
     // both is wasted bandwidth (the 997MB + 406MB 360p pair).
+    const canon = canonicalKeys(url);
+    let chainDup = false;
+    if (!force) {
+      // Same-content capture already queued/running (rotating signed URLs, or the
+      // exact URL re-sent in a capture storm) must not start a second download.
+      for (const it of this.items.values()) {
+        if (it.status !== "queued" && it.status !== "running") continue;
+        if (it.url === url) { chainDup = true; break; }
+        if (canon.length && it._canon && it._canon.some((c) => canon.includes(c))) { chainDup = true; break; }
+      }
+    }
     const isDup = !force && this.config.skipDuplicates !== false &&
-      (this.isDownloaded(url) || this._hlsMasterInFlight(url));
+      (this.isDownloaded(url) || this._hlsMasterInFlight(url) || chainDup);
     if (isDup && markDuplicate === false) return null;
     const id = "dl-" + (++this._id) + "-" + Date.now();
     // Schedule times arrive as ISO strings / Date objects / ms numbers
@@ -587,6 +642,7 @@ class DownloadManager {
       _lastBytes: 0,
       _pathCreated: false, // true once finalPath was created this run (dedupe-rename guard)
       _proxy: null,
+      _canon: canon, // stable content keys (streamtape id / hls path / cdn dir) for chain dedupe
       refreshCount: 0,
       errorCategory: "",
       duplicate: false,
@@ -1596,4 +1652,4 @@ class DownloadManager {
   }
 }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, isBrowserUiUrl, findFfmpeg };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, isBrowserUiUrl, canonicalKeys, findFfmpeg };
