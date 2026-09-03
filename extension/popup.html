@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <style>
-    body { font-family: system-ui, sans-serif; font-size: 13px; width: 260px; margin: 0; padding: 12px; background: #0f172a; color: #e2e8f0; }
+    body { font-family: system-ui, sans-serif; font-size: 13px; width: 330px; margin: 0; padding: 12px; background: #0f172a; color: #e2e8f0; }
     h1 { font-size: 14px; margin: 0 0 10px; }
     #status { padding: 6px 8px; border-radius: 6px; margin-bottom: 10px; font-weight: 600; background: rgba(255,255,255,0.08); }
     #status.connected { color: #22c55e; }
@@ -15,6 +15,23 @@
     button { width: 100%; background: #3b82f6; color: #fff; border: none; border-radius: 6px; padding: 8px; font-weight: 600; cursor: pointer; }
     button:hover { background: #2563eb; }
     .hint { color: #94a3b8; font-size: 11px; margin-top: 10px; line-height: 1.4; }
+    #found-wrap { margin-top: 12px; }
+    #found-wrap h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #94a3b8; margin: 0 0 6px; }
+    #found-list { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; }
+    #found-list li { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    #found-list li:last-child { border-bottom: none; }
+    #found-list .dv-info { flex: 1; min-width: 0; }
+    #found-list .dv-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #found-list .dv-meta { color: #94a3b8; font-size: 11px; }
+    #found-list .dv-meta.dv-err { color: #ef4444; }
+    #found-list .dv-kind { font-size: 10px; padding: 1px 5px; border-radius: 4px; background: rgba(59,130,246,.2); color: #93c5fd; flex: 0 0 auto; }
+    #found-list .dv-kind.hls { background: rgba(234,179,8,.2); color: #fde047; }
+    #found-list .dv-add { width: auto; padding: 4px 8px; font-size: 11px; flex: 0 0 auto; }
+    #found-list .dv-add.dv-done { background: #334155; color: #94a3b8; cursor: default; }
+    #found-list .dv-empty { justify-content: center; color: #94a3b8; padding: 10px; }
+    #add-all { margin-top: 8px; background: #16a34a; }
+    #add-all:hover { background: #15803d; }
+    #add-all:disabled { background: #334155; color: #64748b; cursor: default; }
   </style>
 </head>
 <body>
@@ -23,6 +40,11 @@
   <label for="url">Video / MP4 URL</label>
   <input id="url" type="text" placeholder="https://…/video.mp4" autofocus>
   <button id="send">Send to desktop app</button>
+  <div id="found-wrap">
+    <h2>Found videos</h2>
+    <ul id="found-list"><li class="dv-empty">…</li></ul>
+    <button id="add-all" disabled>Send all found to desktop</button>
+  </div>
   <div class="hint">Tip: right-click any link or video and choose "Send link / media to Deep Downloader".</div>
   <script src="popup.js"></script>
 </body>

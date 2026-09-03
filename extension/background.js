@@ -568,6 +568,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       break;
 
     case "desktop-status":
+    case "getStatus":
       sendResponse({ ok: wsStatus === "online" });
       break;
 
