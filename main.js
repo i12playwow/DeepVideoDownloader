@@ -931,8 +931,8 @@ ipcMain.handle("downloads-add", async (e, url, dirOverride) => {
 // them all at once.
 ipcMain.handle("downloads-add-many", async (e, urls, dirOverride) => {
   if (!Array.isArray(urls)) return { ok: false, error: "Invalid list" };
-  const n = dm.addPending(urls, typeof dirOverride === "string" && dirOverride.trim() ? dirOverride : null);
-  return { ok: true, count: n };
+  const r = dm.addPending(urls, typeof dirOverride === "string" && dirOverride.trim() ? dirOverride : null);
+  return { ok: true, ...r, count: r.added };
 });
 // Relocate a finished download (and its thumbnail) to another folder.
 ipcMain.handle("download-move", async (e, id, destDir) => {

@@ -17,8 +17,8 @@ const { URL } = require("url");
 const { isExpiredError, isProxyFailure, isRateLimited, isCloudflareBlocked, categorizeError, isHtmlContentType, looksLikeHtmlHead, notVideoError } = require("./lib/errors");
 const { requestWithRedirects, fetchHtml, delay, contentRangeStart, contentRangeTotal, DEFAULT_MAX_RETRIES } = require("./lib/http");
 const { HLS_MASTER_RE, isHlsUrl, parseHlsPlaylist, pickHlsVariant, stripPngPrefix, matchHlsMaster, isAdSegmentUrl } = require("./lib/hls");
-const { sanitizeName, titleFromReferer } = require("./lib/names");
-const { SJ_PLAYER_RE, resolveUrl, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster } = require("./lib/resolvers");
+const { sanitizeName, titleFromReferer, titleFromUrl } = require("./lib/names");
+const { SJ_PLAYER_RE, resolveUrl, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isCfwalledSupjavMovie } = require("./lib/resolvers");
 const { unwrapExtensionUrl } = require("./lib/urls");
 
 // A file must be at least this big to count as a real downloaded video for the
@@ -151,6 +151,34 @@ function findFfmpeg(config = {}) {
 // it never poisons the queue with a doomed item.
 function isFetchableUrl(s) {
   return /^(?:https?|blob):/i.test(s || "");
+}
+
+// Dev/portal/tooling hosts that never serve the JAV media this app downloads.
+// They leak into the queue because the user's real Chrome browses them while
+// Deep Grab is active (github, google accounts/policies/mail, firecrawl, the
+// download managers of record, violentmonkey, etc.). Rejecting the hostname
+// (with any subdomain) keeps them out of enqueue/addPending entirely.
+const JUNK_BASE_RE = /(?:^|\.)(github\.io|github\.com|google\.com|google\.dev|googleapis\.com|firecrawl\.dev|jdownloader\.org|violentmonkey\.github\.io|webextension\.org|internetdownloadmanager\.com|vn-zoom\.com|wikipedia\.org)$/i;
+
+// List-page / browse churn is never media. The observed junk came as supjav
+// group pages (…/category/cast/<name>/page/N) and multi-segment nav paths whose
+// last segment is just a number — distinct from a movie slug (…/<code>.html).
+const JUNK_PATH_SEG = /(?:^|\/)(?:category|categories|genres|genre|cats|tags|tag|actors|actress|cast|studios|studio|search|watch|browse|page|paged|feed|author|date|archives)\b/i;
+
+function isJunkUrl(u) {
+  if (!isFetchableUrl(u)) return false;
+  try {
+    const url = new URL(u);
+    const host = url.hostname.toLowerCase().replace(/^www\./, "");
+    if (host && !/[.:]/.test(host)) return true; // dotless single-word host (https://Mouth)
+    if (/^0\.0\.0\.[0-9]+$/.test(host)) return true; // URL shorthand residuals (https://1 → 0.0.0.1)
+    if (JUNK_BASE_RE.test(host)) return true;
+    // supjav/sextb-style group/browse listing paths are never media.
+    if (/(?:supjav|supremejav|sextb)\.(?:com|ph|net|live)/i.test(host) && JUNK_PATH_SEG.test(url.pathname)) return true;
+    return false;
+  } catch (e) {
+    return false;
+  }
 }
 
 const PART_EXT = ".part";
@@ -571,16 +599,27 @@ class DownloadManager {
   }
 
   // Enqueue a whole batch without materializing all of them at once.
+  // Returns { added, rejected, total, pending } so the UI can report how many
+  // URLs were accepted vs filtered as junk, and how many still await the
+  // windowed loader.
   addPending(urls, dirOverride = null) {
     let added = 0;
+    let rejected = 0;
     for (const u of urls) {
       const s = unwrapExtensionUrl(typeof u === "string" ? u.trim() : "");
-      if (!isFetchableUrl(s) || isJunkNavUrl(s) || isJavNavPage(s) || isJunkHost(s) || isBrowserUiUrl(s)) continue;
+      if (!isFetchableUrl(s) || isJunkUrl(s) || isJunkNavUrl(s) || isJavNavPage(s) || isJunkHost(s) || isBrowserUiUrl(s) || isCfwalledSupjavMovie(s)) { rejected++; continue; }
       this._pending.push(dirOverride ? { url: s, dirOverride } : s);
       added++;
     }
     this.refill();
-    return added;
+    return { added, rejected, total: added + rejected, pending: this._pending.length - this._pendingIdx };
+  }
+
+  // How many URLs are still waiting in the windowed bulk loader (not yet
+  // materialized into active items). Lets the UI show import progress for
+  // thousand-line pastes.
+  pendingCount() {
+    return Math.max(0, (this._pending ? this._pending.length : 0) - this._pendingIdx);
   }
 
   _hostOf(url) {
@@ -615,10 +654,18 @@ class DownloadManager {
     url = unwrapExtensionUrl(url);
     referer = unwrapExtensionUrl(typeof referer === "string" ? referer : "") || "";
     if (!isFetchableUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
-    if (isJunkNavUrl(url) || isJavNavPage(url) || isJunkHost(url) || isBrowserUiUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
+    if (isJunkUrl(url) || isJunkNavUrl(url) || isJavNavPage(url) || isJunkHost(url) || isBrowserUiUrl(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80));
+    // supjav.com movie pages (…/452555.html) are behind a Cloudflare managed
+    // Turnstile no runtime here can clear; the only route is the Deep Grab
+    // extension relaying the supjav.php?l= player out of a CF-cleared real-Chrome
+    // tab. Reject the doomed direct-page enqueue with an actionable message so
+    // the crawl storm stops opening stuck built-in tabs.
+    if (isCfwalledSupjavMovie(url)) throw new Error("Unsupported URL: " + String(url).slice(0, 80) + " — supjav.com movie pages are behind a Cloudflare challenge that cannot be cleared here; open the page in your real Chrome with the Deep Grab extension to auto-capture the player stream");
     if (resolvedUrl) resolvedUrl = unwrapExtensionUrl(resolvedUrl);
-    // Fall back to the streamtape/fstape URL slug when the sender gave no title.
-    const effectiveTitle = title || titleFromReferer(referer);
+    // Fall back to the streamtape/fstape URL slug when the sender gave no title,
+    // then to a title derived straight from the URL (bulk paste / addPending),
+    // so files don't all land as "video.mp4".
+    const effectiveTitle = title || titleFromReferer(referer) || titleFromUrl(url);
     // Duplicate handling: an already-downloaded URL becomes a "duplicate" list
     // entry (so the user can "Download anyway"), unless the bulk/windowed path
     // opts out with markDuplicate:false (skip silently — no item to avoid bloat).
@@ -1686,4 +1733,4 @@ class DownloadManager {
   }
 }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, isBrowserUiUrl, canonicalKeys, findFfmpeg };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, isJunkUrl, isBrowserUiUrl, canonicalKeys, findFfmpeg };

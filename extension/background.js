@@ -43,6 +43,21 @@ function isAdUrl(u) {
   try { return AD_DOMAINS.test(new URL(u).hostname); } catch (e) { return false; }
 }
 
+// Dev/portal/tooling hosts that never serve JAV media. They leak into the
+// capture flow when the user's real Chrome browses them while Deep Grab is
+// active (github, google accounts/policies/mail, firecrawl, download managers,
+// violentmonkey, etc.). Rejecting here keeps them from ever reaching the app.
+const JUNK_BASE_RE = /(?:^|\.)(github\.io|github\.com|google\.com|google\.dev|googleapis\.com|firecrawl\.dev|jdownloader\.org|violentmonkey\.github\.io|webextension\.org|internetdownloadmanager\.com|vn-zoom\.com|wikipedia\.org)$/i;
+function isJunkUrl(u) {
+  if (!u || !/^(?:https?):/i.test(u)) return false;
+  try {
+    const host = new URL(u).hostname.toLowerCase().replace(/^www\./, "");
+    if (host && !/[.:]/.test(host)) return true;
+    if (/^0\.0\.0\.[0-9]+$/.test(host)) return true;
+    return JUNK_BASE_RE.test(host);
+  } catch (e) { return false; }
+}
+
 function persist() {
   chrome.storage.local.set({
     found: found.slice(0, FOUND_CAP),
@@ -194,6 +209,10 @@ function sendToDesktop(url, title, referer) {
     // Only fetchable schemes reach the desktop engine (chrome-extension pages
     // like …/suspended.html#uri=<url> are unwrapped/rejected there).
     if (!/^(?:https?|blob):/i.test(url || "")) {
+      resolve({ ok: false, error: "Unsupported URL" });
+      return;
+    }
+    if (isJunkUrl(url)) {
       resolve({ ok: false, error: "Unsupported URL" });
       return;
     }
