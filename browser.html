@@ -160,6 +160,7 @@
     const gmBtn = tabMenu.querySelector('[data-act="autogroup"]');
     gmBtn.textContent = (gmOn ? "\u2713 " : "") + "Auto group by site";
     window.api.setGroupMode(gmOn);
+    window.api.onGroupMode((on) => { gmOn = on; gmBtn.textContent = (gmOn ? "\u2713 " : "") + "Auto group by site"; });
 
     document.addEventListener("keydown", (e) => {
       if (!(e.ctrlKey || e.metaKey)) return;

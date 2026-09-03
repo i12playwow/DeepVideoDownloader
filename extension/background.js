@@ -228,7 +228,26 @@ function sendToDesktop(url, title, referer) {
   });
 }
 
+// Extract cookies for a list of URLs using the Chrome cookies API.
+// These are forwarded to the desktop engine so it can authenticate
+// requests without needing access to the Electron session.
+async function extractCookies(urls) {
+  const seen = new Set();
+  const parts = [];
+  for (const url of urls) {
+    try {
+      const cookies = await chrome.cookies.getAll({ url });
+      for (const c of cookies) {
+        const pair = c.name + "=" + c.value;
+        if (!seen.has(pair)) { seen.add(pair); parts.push(pair); }
+      }
+    } catch (e) { /* no cookies for this URL */ }
+  }
+  return parts.join("; ");
+}
+
 function sendInner(resolve, url, title, referer) {
+  const cookieHeader = null; // populated asynchronously below
   const timer = setTimeout(() => {
     ws.removeEventListener("message", onMsg);
     resolve({ ok: false, error: "Desktop app timeout" });
@@ -248,13 +267,15 @@ function sendInner(resolve, url, title, referer) {
     }
   }
   ws.addEventListener("message", onMsg);
-  try {
-    ws.send(JSON.stringify({ type: "download", url, title, referer }));
-  } catch (e) {
-    clearTimeout(timer);
-    ws.removeEventListener("message", onMsg);
-    resolve({ ok: false, error: "socket closed" });
-  }
+  extractCookies([url, referer]).then((cookieHeader) => {
+    try {
+      ws.send(JSON.stringify({ type: "download", url, title, referer, cookieHeader }));
+    } catch (e) {
+      clearTimeout(timer);
+      ws.removeEventListener("message", onMsg);
+      resolve({ ok: false, error: "socket closed" });
+    }
+  });
 }
 
 function markCaptured(url, id) {

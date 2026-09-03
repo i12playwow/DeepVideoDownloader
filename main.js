@@ -522,7 +522,6 @@ function bvAddTab(url, opts) {
   entry.view.webContents.loadURL(entry.url).catch(() => {});
   if (activate) bvActivate(id);
   else bvPushTabs();
-  if (bvGroupMode) bvGroupByDomain();
   return id;
 }
 
@@ -1090,7 +1089,7 @@ ipcMain.on("bv-group", () => { bvGroupByDomain(); });
 ipcMain.on("bv-close-others", () => { bvCloseOthers(); });
 ipcMain.on("bv-close-domain", () => { bvCloseDomain(); });
 ipcMain.on("bv-close-all", () => { bvCloseAll(); });
-ipcMain.on("bv-group-mode", (e, on) => { bvGroupMode = !!on; if (bvGroupMode) bvGroupByDomain(); });
+ipcMain.on("bv-group-mode", (e, on) => { bvGroupMode = !!on; if (browserWindow && !browserWindow.isDestroyed()) try { browserWindow.webContents.send("browser-group-mode", bvGroupMode); } catch (e) { /* ignore */ } });
   ipcMain.on("bv-navigate", (e, url) => {
     if (!activeBrowserId) return;
     const en = browserTabs.get(activeBrowserId);

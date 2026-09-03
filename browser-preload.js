@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("api", {
   closeOthers: () => ipcRenderer.send("bv-close-others"),
   closeDomain: () => ipcRenderer.send("bv-close-domain"),
   closeAll: () => ipcRenderer.send("bv-close-all"),
+  onGroupMode: (cb) => ipcRenderer.on("browser-group-mode", (e, on) => cb(on)),
   setGroupMode: (on) => ipcRenderer.send("bv-group-mode", on),
   navigate: (url) => ipcRenderer.send("bv-navigate", url),
   back: () => ipcRenderer.send("bv-back"),

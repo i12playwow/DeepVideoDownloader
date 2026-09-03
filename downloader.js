@@ -208,6 +208,19 @@ function refreshSourceUrl(item) {
   return isSignedRefreshable(item) ? item.referer : item.url;
 }
 
+// A streamtape/fstape get_video URL that returns an HTML page is an expired or
+// per-IP (signed) token — streamtape serves its "video not found" page instead
+// of the fie when the baked-in expires/ip no longer match the caller. It is a
+// refreshable case (re-resolve the original player URL for a fresh token), not
+// a terminal "Not a video". The get_video URL lives on the item's resolved URL
+// (resolved from the supjav/streamtape source page), never as item.url.
+function isSignedGetVideoExpired(item, err) {
+  const u = String(item._resolvedUrl || item.url || "");
+  return /get_video\?/i.test(u) &&
+    /(?:streamtape|fstape)\.com/i.test(u) &&
+    !!(err && err.category === "not-video");
+}
+
 class DownloadManager {
   constructor({ config, proxyManager, onUpdate, cookieProvider, onRequiresBrowser }) {
     this.config = config;
@@ -919,7 +932,7 @@ class DownloadManager {
         }
         // Expired direct URL (e.g. streamtape signed token) �?re-resolve the
         // original page and retry from scratch with the fresh URL.
-        if (!isExpiredError(err)) throw err;
+        if (!isExpiredError(err) && !isSignedGetVideoExpired(item, err)) throw err;
         // A bare HTTP 403/404/410 can mean the *proxy* is Cloudflare-blocked
         // (no cf-chl text in the message) rather than a dead URL. Rotate + clear
         // so the retry re-picks instead of hammering the same blocked proxy
@@ -1733,4 +1746,4 @@ class DownloadManager {
   }
 }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, isJunkUrl, isBrowserUiUrl, canonicalKeys, findFfmpeg };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, isSignedGetVideoExpired, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, isJunkUrl, isBrowserUiUrl, canonicalKeys, findFfmpeg };
