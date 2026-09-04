@@ -87,7 +87,9 @@
 - **Real-time monitor**: `browser-preload.js` exposes `onGroupMode(cb)` listening on `browser-group-mode` IPC; `main.js` broadcasts `browserWindow.webContents.send("browser-group-mode", bvGroupMode)` whenever the toggle changes (in the `bv-group-mode` handler). `browser.html` registers `window.api.onGroupMode(...)` to sync `gmOn` and `gmBtn` text in real-time, keeping the renderer in sync with main.js (source of truth).
 - Channels: `bv-group` (manual group), `bv-group-mode` (toggle → broadcast), `browser-group-mode` (broadcast → renderer sync). Pattern mirrors `browser-tabs-update`/`onTabsUpdate`.
 
-## Recovery if `C:\dvdbak` is lost
+## Recovery (mirror restore; deployed-app fallback)
+- **Primary — restore from the mirror, then `npm ci`** (fresh-clone drill 2026-09-04): `robocopy C:\dvdbak <target-dir> /E /XD dist` restores the full source tree, all 10 `test-*.js` suites, and `build/ffmpeg/ffmpeg.exe` byte-identical — but NEVER trust the mirror's `node_modules`: robocopy silently skips the OneDrive cloud-placeholder reparse points (tag `0x9000201A`, the `RECALL_ON_OPEN` family noted in the Backup bullet) that pollute it, so a naive restore drops e.g. `http-proxy-agent/dist/index.js` while reporting 0 failures and `npm test` dies with `Cannot find module`. Always rebuild deps with `npm ci` from the restored `package-lock.json` (standard fresh-clone step; `node_modules` is excluded from mirror sync anyway). Verified in the drill: after `npm ci`, the restored tree is green — 344/344 tests, 29/29 check.
+- If the mirror is ALSO lost, reconstruct from the deployed app:
 1. Parse `C:\Program Files\DeepVideoDownloader\resources\app.asar` (JSON header at byte 16; `headerSize` from `readUInt32LE(4|8|12)`; `dataStart = jsonStart+headerSize` then skip NUL padding; walk `header.files`, write packed files at `dataStart+offset`).
 2. Extension (unpacked) at `…\app.asar.unpacked\extension` (ignore " - Copy" junk).
 3. Reconstruct `package.json` (scripts + `build.files` incl. `lib`+`extension`, `asarUnpack: ["extension/**/*"]`); `npm install -D electron electron-builder` (electron v43.x).
