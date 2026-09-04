@@ -1,6 +1,6 @@
 {
   "name": "deep-video-downloader",
-  "version": "1.3.8",
+  "version": "1.3.9",
   "description": "Desktop app: WebSocket server + MP4 download manager with advanced control and auto proxy boost.",
   "author": "DeepGrab",
   "main": "main.js",
@@ -8,7 +8,7 @@
     "start": "electron .",
     "dist": "electron-builder --win",
     "check": "node check.js",
-    "test": "node test-config.js && node test-hls.js && node test-proxy.js && node test-e2e-harness.js"
+    "test": "node test-config.js && node test-hls.js && node test-proxy.js && node test-range-server.js --selftest && node test-e2e-harness.js"
   },
   "dependencies": {
     "follow-redirects": "^1.15.6",
