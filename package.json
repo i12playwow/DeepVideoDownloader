@@ -7,7 +7,7 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --win",
-    "check": "node check.js",
+    "check": "node check.js && node .freebuff/sync-demo.js --selftest",
     "test": "node test-config.js && node test-hls.js && node test-proxy.js && node test-range-server.js --selftest && node test-e2e-harness.js"
   },
   "dependencies": {
