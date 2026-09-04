@@ -42,6 +42,12 @@
     "asarUnpack": [
       "extension/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "build/ffmpeg/ffmpeg.exe",
+        "to": "ffmpeg.exe"
+      }
+    ],
     "directories": {
       "output": "dist",
       "buildResources": "build"

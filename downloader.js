@@ -122,20 +122,24 @@ function isJavNavPage(u) {
   }
 }
 
-// First candidate that spawns a working ffmpeg wins. The configured value
-// ("ffmpeg" by default) only resolves through PATH, so on an installed app
-// launched without a dev shell it falls through to a bundled resources copy
-// (if electron-builder ever ships one) and to known install roots.
+// First candidate that spawns a working ffmpeg wins. An explicitly configured
+// ffmpegPath (anything but the default "ffmpeg") wins over everything; a broken
+// explicit value falls through instead of failing the whole download. The
+// default "ffmpeg" is a bare PATH lookup, so an installed app launched without
+// a dev shell probes the BUNDLED resources copy first (electron-builder
+// extraResources -> resources/ffmpeg.exe), then $FFMPEG_PATH, then the legacy
+// JavLuv / Program Files roots, and only then the PATH lookup.
 function findFfmpeg(config = {}) {
   const resourcesPath = typeof process.resourcesPath === "string" ? process.resourcesPath : "";
-  const candidates = [
-    config.ffmpegPath,
+  const explicit = config.ffmpegPath && config.ffmpegPath !== "ffmpeg" ? [config.ffmpegPath] : [];
+  const rest = [
     resourcesPath ? path.join(resourcesPath, "ffmpeg.exe") : null,
     process.env.FFMPEG_PATH || null,
     "C:\\Program Files\\JavLuv\\ffmpeg.exe",
     "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
     "ffmpeg",
   ].filter(Boolean);
+  const candidates = explicit.concat(rest);
   for (const c of candidates) {
     try {
       const v = spawnSync(c, ["-version"], { stdio: "ignore", timeout: 10000 });

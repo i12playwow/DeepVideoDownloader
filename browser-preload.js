@@ -3,8 +3,6 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("api", {
   onTabsUpdate: (cb) => ipcRenderer.on("browser-tabs-update", (e, list, activeId) => cb(list, activeId)),
   onNavState: (cb) => ipcRenderer.on("browser-nav-state", (e, st) => cb(st)),
-  onAddTabs: (cb) => ipcRenderer.on("browser-add-tabs", (e, urls) => cb(urls)),
-  onOpenTabs: (cb) => ipcRenderer.on("browser-open-tabs", (e, urls) => cb(urls)),
   newTab: () => ipcRenderer.send("bv-new-tab"),
   closeTab: (id) => ipcRenderer.send("bv-close", id),
   activate: (id) => ipcRenderer.send("bv-activate", id),
