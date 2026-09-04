@@ -161,38 +161,6 @@
     return /\.m3u8([?#]|$)/i.test(u) ? "m3u8" : "mp4";
   }
 
-  function isHls(u) {
-    if (!u) return false;
-    return /\.m3u8([?#]|$)/i.test(u) || /(^|[/?&])m3u8[^/]*/i.test(u) || /(^|[/?&=])(hls|manifest|playlist)([/?&=]|$)/i.test(u);
-  }
-
-  // Resolution rank: 5 = 4k+, 4 = 1440/2k, 3 = 1080, 2 = 720, 1 = 480/540, 0 = none.
-  // Reads <source> element attrs (res/label/data-quality/data-res/data-height) plus URL markers.
-  function qualityRank(u, sourceEl) {
-    let h = 0;
-    const push = (n) => { if (n && n > h) h = n; };
-    const s = String(u || "");
-    if (sourceEl) {
-      ["res", "data-quality", "data-res", "label", "data-height"].forEach((attr) => {
-        const m = String(sourceEl.getAttribute(attr) || "").match(/\d{3,4}/);
-        if (m) push(parseInt(m[0], 10));
-      });
-    }
-    const xy = s.match(/(\d{3,4})x(\d{3,4})/);
-    if (xy) push(parseInt(xy[2], 10));
-    const p = s.match(/(\d{3,4})p/i);
-    if (p) push(parseInt(p[1], 10));
-    if (/8k|4320/i.test(s)) push(4320);
-    if (/4k|2160/i.test(s)) push(2160);
-    if (/2k|1440/i.test(s)) push(1440);
-    if (h >= 2160) return 5;
-    if (h >= 1440) return 4;
-    if (h >= 1080) return 3;
-    if (h >= 720) return 2;
-    if (h >= 480) return 1;
-    return 0;
-  }
-
   function tryCapture(url, title, sourceEl) {
     if (isAdUrl(url)) return; // bypass ads — never capture ad-network streams
     // a real <video> element's src is video even when the URL has no video markers
@@ -208,44 +176,23 @@
     const pageTitle = slugTitle(location.href) || document.title;
 
     if (config.bestOnly) {
-      // HLS is never dropped in best-only mode: the full movie behind most
-      // Cloudflare/anti-bot players (missav/surrit/supjav masters) is HLS,
-      // while the <video> element only ever exposes an MP4 *highlight* clip.
-      // So an HLS master outweighs any MP4 and becomes the single "best".
-      if (isHls(clean)) {
-        if (found.has(clean)) return;
-        const cur = found.size ? found.values().next().value : null;
-        // HLS (full movie) always beats any MP4 (highlight) currently held;
-        // keep it as the sole best so the full high-quality movie surfaces.
-        const curIsHls = cur && cur.kind === "m3u8";
-        if (cur && (curIsHls || !isHls(cur.url))) {
-          // replace the existing entry (doesn't matter if it's an HLS or MP4
-          // highlight — HLS master is the full movie)
-          found.delete(cur.url);
-          chrome.runtime.sendMessage({ type: "remove-found", urls: [cur.url] }).catch(() => {});
-        }
-        const kind = "m3u8";
-        const titleText = (title || pageTitle || clean.split("/").pop()).trim();
-        found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind, _rank: 99 });
-        chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind }).catch(() => {});
-        maybeAutoDownload(clean);
-        renderFoundList();
-        updateCounts();
-        return;
-      }
+      // Keep exactly ONE entry: an HLS master (the full movie behind most
+      // Cloudflare/anti-bot players) outranks any MP4 highlight and is never
+      // dropped; among MP4s the highest resolution wins and ties keep the
+      // current entry. The keep/replace decision (bestOnlyNext) lives in
+      // best-only.js, shared with test-best-only.js so the test cannot drift.
       if (found.has(clean)) return;
-      const rank = qualityRank(clean, sourceEl);
+      const kind = isHls(clean) ? "m3u8" : "mp4";
+      const _rank = kind === "m3u8" ? BEST_ONLY_HLS_RANK : qualityRank(clean, sourceEl);
       const cur = found.size ? found.values().next().value : null;
-      // A previously-held HLS full movie must NOT be replaced by an MP4 highlight.
-      if (cur && cur.kind === "m3u8") return;
-      if (cur && rank <= (cur._rank || 0)) return; // keep the current best on ties
+      if (cur && bestOnlyNext(cur, { url: clean, kind, _rank }) === cur) return;
       if (cur) {
         found.delete(cur.url);
         chrome.runtime.sendMessage({ type: "remove-found", urls: [cur.url] }).catch(() => {});
       }
       const titleText = (title || pageTitle || clean.split("/").pop()).trim();
-      found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind: "mp4", _rank: rank });
-      chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind: "mp4" }).catch(() => {});
+      found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind, _rank });
+      chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind }).catch(() => {});
       maybeAutoDownload(clean);
       renderFoundList();
       updateCounts();
@@ -1414,22 +1361,39 @@ const acted = clickCloudflareWidget();
     if (IS_TOP) loadConfig();
   });
 
-  // Debounced: on heavy pages a single burst of DOM changes would otherwise
-  // re-run the filter + video scan once per mutation. Top frame only.
+  // Observer scan budget: DOM churn on chatty pages must not stack full
+  // scans. One scan is scheduled per quiet-ish gap; while a scan is pending
+  // or the tab is hidden, further mutations are dropped (each scan re-scans
+  // the whole document, so nothing is lost) and a skipped catch-up scan runs
+  // when the tab becomes visible again. Top frame only.
   if (IS_TOP) {
+    const OBSERVER_SCAN_GAP_MS = 1200;
     let mutationTimer = 0;
-    const observer = new MutationObserver(() => {
-      if (mutationTimer) clearTimeout(mutationTimer);
-      mutationTimer = setTimeout(() => {
-        applyFilter();
-        scanVideoElements();
-      }, 150);
-    });
+    let lastObserverScan = 0;
+    let observerScanDue = false;
+    const runObserverScan = () => {
+      mutationTimer = 0;
+      if (document.hidden) { observerScanDue = true; return; }
+      observerScanDue = false;
+      lastObserverScan = Date.now();
+      applyFilter();
+      scanVideoElements();
+      scanPageLinks();
+    };
+    const scheduleObserverScan = () => {
+      if (mutationTimer) return; // a scan is already pending
+      if (document.hidden) { observerScanDue = true; return; }
+      mutationTimer = setTimeout(runObserverScan, Math.max(150, lastObserverScan + OBSERVER_SCAN_GAP_MS - Date.now()));
+    };
+    const observer = new MutationObserver(scheduleObserverScan);
     observer.observe(document.body, {
       childList: true,
       subtree: true,
       attributes: true,
       attributeFilter: ["src", "data-src", "data-video", "data-mp4"]
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && observerScanDue) scheduleObserverScan();
     });
 
     // Periodic re-scan: catches videos whose src is set as a JS property

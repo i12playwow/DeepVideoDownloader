@@ -16,7 +16,7 @@ const { URL } = require("url");
 
 const { isExpiredError, isProxyFailure, isRateLimited, isCloudflareBlocked, categorizeError, isHtmlContentType, looksLikeHtmlHead, notVideoError } = require("./lib/errors");
 const { requestWithRedirects, fetchHtml, delay, contentRangeStart, contentRangeTotal, DEFAULT_MAX_RETRIES } = require("./lib/http");
-const { HLS_MASTER_RE, isHlsUrl, parseHlsPlaylist, pickHlsVariant, stripPngPrefix, matchHlsMaster, isAdSegmentUrl } = require("./lib/hls");
+const { HLS_MASTER_RE, isHlsUrl, parseHlsPlaylist, pickHlsVariant, pickHlsVariants, isIFrameOnlyPlaylist, stripPngPrefix, matchHlsMaster, isAdSegmentUrl, QUALITY_DIR_RE } = require("./lib/hls");
 const { sanitizeName, titleFromReferer, titleFromUrl } = require("./lib/names");
 const { SJ_PLAYER_RE, resolveUrl, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isCfwalledSupjavMovie } = require("./lib/resolvers");
 const { unwrapExtensionUrl } = require("./lib/urls");
@@ -807,7 +807,7 @@ class DownloadManager {
       this.active++;
       this.emit(next);
       this.run(next)
-        .catch((err) => {
+        .catch(async (err) => {
           if (err.aborted || next.status === "paused" || next.status === "cancelled") return;
           next.status = "error";
           next.error = err.message || String(err);
@@ -820,12 +820,31 @@ class DownloadManager {
             try { this.onRequiresBrowser(next.url); } catch (e) { /* ignore */ }
           }
           this._maybeFinalize(next);
+          await this._dropEmptyTempDir(next);
         })
         .finally(() => {
           this.active--;
           this.pump();
         });
     }
+  }
+
+  // An errored run keeps its temp dir ONLY while it holds partial bytes a
+  // later retry could resume from (HLS segN.part files, streamed partials).
+  // Errors that die before any data was written (probe failure, rejected
+  // playlist, HTTP/DNS refusal) leave an empty dir nothing will ever resume
+  // from — sweep it immediately instead of on item dismissal.
+  async _dropEmptyTempDir(item) {
+    if (!item || !item.tempDir) return;
+    let hasData = false;
+    try {
+      const entries = await fsp.readdir(item.tempDir);
+      for (const name of entries) {
+        const st = await fsp.stat(path.join(item.tempDir, name)).catch(() => null);
+        if (st && st.size > 0) { hasData = true; break; }
+      }
+    } catch (e) { return; } // dir already gone — nothing to sweep
+    if (!hasData) await fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
   }
 
   checkScheduled() {
@@ -1316,7 +1335,7 @@ class DownloadManager {
       const u = new URL(variantUrl);
       const dir = u.pathname.slice(0, u.pathname.lastIndexOf("/") + 1);
       const lastDir = dir.split("/").filter(Boolean).pop() || "";
-      const inQualityDir = /(?:\d{3,4}p|hls|sd|hd|uhd|fhd|v\d+|default|low|high|index)/i.test(lastDir);
+      const inQualityDir = QUALITY_DIR_RE.test(lastDir);
       const fam = /(?:playlist|master|index|manifest|media)\.m3u8$/i.test(u.pathname);
       if (fam && !inQualityDir) return null; // already a canonical playlist name, no parent to probe
       const baseDir = inQualityDir ? dir.slice(0, dir.slice(0, -1).lastIndexOf("/") + 1) : dir;
@@ -1379,13 +1398,26 @@ class DownloadManager {
     }
 
     // Master playlist -> pick the best variant and fetch its media playlist.
+    // A rendition whose media playlist is I-frame-only (#EXT-X-I-FRAMES-ONLY
+    // keyframe index, not video) is skipped for the next-best variant; a
+    // directly-enqueued media playlist that is I-frame-only is rejected.
     if (HLS_MASTER_RE.test(body)) {
-      const variant = pickHlsVariant(body, playlistUrl);
-      if (!variant) throw new Error("HLS: no usable variant in master playlist");
-      await this._paceHost(variant);
-      body = await fetchHtml(variant, agent, await this._reqHeaders(item, baseHeaders, variant, {}), 0, maxRetries);
-      playlistUrl = variant;
-      if (item.status !== "running") this.throwAborted();
+      const variants = pickHlsVariants(body, playlistUrl);
+      if (!variants.length) throw new Error("HLS: no usable variant in master playlist");
+      let chosen = null;
+      for (const variant of variants) {
+        await this._paceHost(variant);
+        const variantBody = await fetchHtml(variant, agent, await this._reqHeaders(item, baseHeaders, variant, {}), 0, maxRetries);
+        if (item.status !== "running") this.throwAborted();
+        if (isIFrameOnlyPlaylist(variantBody)) continue;
+        chosen = { url: variant, body: variantBody };
+        break;
+      }
+      if (!chosen) throw new Error("HLS: all master variants are I-frame-only (keyframe index) playlists");
+      body = chosen.body;
+      playlistUrl = chosen.url;
+    } else if (isIFrameOnlyPlaylist(body)) {
+      throw new Error("HLS: playlist is an I-frame-only (keyframe index) stream");
     }
 
     const segs = parseHlsPlaylist(body, playlistUrl);
@@ -1746,4 +1778,4 @@ class DownloadManager {
   }
 }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, isSignedGetVideoExpired, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, isJunkUrl, isBrowserUiUrl, canonicalKeys, findFfmpeg };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, isSignedGetVideoExpired, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, pickHlsVariants, isIFrameOnlyPlaylist, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, isJunkUrl, isBrowserUiUrl, canonicalKeys, findFfmpeg };
