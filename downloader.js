@@ -764,15 +764,25 @@ class DownloadManager {
           }
           // Automation: requeue failed downloads after autoRetryMinutes.
           // requires-browser is excluded — it needs a real capture session.
+          // autoRetryMax caps consecutive automatic cycles so a permanently
+          // dead URL does not churn the queue forever (0 = unlimited); the
+          // exhausted item falls through to the terminal-error handling below.
           const autoMin = this.config.autoRetryMinutes || 0;
           if (autoMin > 0 && cat !== "requires-browser") {
-            next.retryCount = (next.retryCount || 0) + 1;
-            next.scheduledStart = Date.now() + autoMin * 60000;
-            next.status = "scheduled";
-            this.emit(next);
-            this.checkScheduled();
-            await this._dropEmptyTempDir(next);
-            return;
+            const autoMax = this.config.autoRetryMax || 0;
+            if (autoMax > 0 && (next._autoRetries || 0) >= autoMax) {
+              next.error = "Auto-retry exhausted after " + (next._autoRetries || 0) + " cycles: " + (err.message || String(err));
+              next.errorCategory = cat;
+            } else {
+              next._autoRetries = (next._autoRetries || 0) + 1;
+              next.retryCount = (next.retryCount || 0) + 1;
+              next.scheduledStart = Date.now() + autoMin * 60000;
+              next.status = "scheduled";
+              this.emit(next);
+              this.checkScheduled();
+              await this._dropEmptyTempDir(next);
+              return;
+            }
           }
           next.status = "error";
           this.emit(next);
@@ -1769,6 +1779,7 @@ class DownloadManager {
       item.error = "";
       item.retryCount = 0;
       item._retryAt = null;
+      item._autoRetries = 0; // manual action restarts the auto-retry budget
       item.speed = 0;
       this.emit(item);
       this.pump();
@@ -1827,6 +1838,7 @@ class DownloadManager {
     item.errorCategory = "";
     item.retryCount = 0;
     item._retryAt = null;
+    item._autoRetries = 0; // manual retry restarts the auto-retry budget
     item.status = "queued";
     this._queuedIds.add(item.id);
     item.speed = 0;

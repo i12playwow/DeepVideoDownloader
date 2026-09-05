@@ -180,6 +180,7 @@
           <label><input type="checkbox" id="thumbnails"> Show video thumbnails in the list (requires ffmpeg)</label>
         </div>
           <label>Auto-retry failed downloads after <input type="number" id="autoRetryMinutes" min="0" value="0" style="width:70px;margin:0 6px;"> minutes (0 = off; requeues failures automatically)</label>
+          <label>Max auto-retry cycles <input type="number" id="autoRetryMax" min="0" value="5" style="width:70px;margin:0 6px;"> (0 = unlimited; a dead URL stops churning after N failed cycles)</label>
           <label class="row">Only start new downloads between <input type="time" id="scheduleWindowStart" title="Empty = off"> and <input type="time" id="scheduleWindowEnd" title="Empty = off"> (running downloads finish; a start after end spans midnight)</label>
         <label class="row" style="margin-top:8px;">Auto-suspend idle tabs after
           <input type="number" id="idleTabMinutes" min="0" value="0" style="width:70px;margin:0 6px;">

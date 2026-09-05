@@ -66,6 +66,7 @@
     scheduleWindowStart: "",
     scheduleWindowEnd: "",
     autoRetryMinutes: 0,
+    autoRetryMax: 5,
     siteRules: []
   };
 
@@ -107,7 +108,13 @@
         it.status = "queued"; it.scheduledStart = null;
       }
       if (it.status === "error" && settings.autoRetryMinutes > 0 && it.errorCategory !== "requires-browser" && !it._autoRetryAt) {
-        it._autoRetryAt = now + settings.autoRetryMinutes * 60000;
+        const max = settings.autoRetryMax || 0;
+        if (max > 0 && (it._autoRetries || 0) >= max) {
+          it.error = "Auto-retry exhausted after " + (it._autoRetries || 0) + " cycles";
+        } else {
+          it._autoRetries = (it._autoRetries || 0) + 1;
+          it._autoRetryAt = now + settings.autoRetryMinutes * 60000;
+        }
       }
       if (it.status === "error" && it._autoRetryAt && now >= it._autoRetryAt) {
         it.status = "queued"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null;
@@ -198,7 +205,7 @@
     },
     retry: async (id) => {
       const it = items.find((x) => x.id === id);
-      if (it && it.status === "error") { it.total = it.total || Math.round((30 + Math.random() * 900) * MB); it.status = "running"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null; it.speed = 2 * MB; emit([it]); }
+      if (it && it.status === "error") { it.total = it.total || Math.round((30 + Math.random() * 900) * MB); it.status = "running"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null; it._autoRetries = 0; it.speed = 2 * MB; emit([it]); }
       return { ok: true };
     },
     pauseAll: async () => {
@@ -221,7 +228,7 @@
       let n = 0;
       for (const it of items) {
         if (it.status === "error" && it.errorCategory !== "requires-browser") {
-          it.total = it.total || Math.round((30 + Math.random() * 900) * MB); it.status = "running"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null; it.speed = 2 * MB; n++;
+          it.total = it.total || Math.round((30 + Math.random() * 900) * MB); it.status = "running"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null; it._autoRetries = 0; it.speed = 2 * MB; n++;
         }
       }
       if (n) emit(items.filter((x) => x.status === "running"));

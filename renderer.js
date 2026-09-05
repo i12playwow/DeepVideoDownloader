@@ -464,6 +464,7 @@ async function loadSettings() {
   $("thumbnails").checked = s.thumbnails !== false;
   $("idleTabMinutes").value = s.idleTabMinutes ?? 0;
   $("autoRetryMinutes").value = s.autoRetryMinutes ?? 0;
+  $("autoRetryMax").value = s.autoRetryMax ?? 5;
   $("scheduleWindowStart").value = s.scheduleWindowStart || "";
   $("scheduleWindowEnd").value = s.scheduleWindowEnd || "";
   $("siteRules").value = (s.siteRules || []).map((r) => [r.host, r.folder || "", r.start ? "start" : ""].filter(Boolean).join("\t")).join("\n");
@@ -510,6 +511,7 @@ $("save").addEventListener("click", async () => {
     thumbnails: $("thumbnails").checked,
     idleTabMinutes: Math.max(0, parseInt($("idleTabMinutes").value || "0", 10)),
     autoRetryMinutes: Math.max(0, parseInt($("autoRetryMinutes").value || "0", 10)),
+    autoRetryMax: Math.max(0, parseInt($("autoRetryMax").value || "0", 10)),
     scheduleWindowStart: $("scheduleWindowStart").value || "",
     scheduleWindowEnd: $("scheduleWindowEnd").value || "",
     siteRules: $("siteRules").value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
