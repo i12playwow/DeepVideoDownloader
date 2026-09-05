@@ -14,7 +14,7 @@ const { DownloadManager, requestWithRedirects } = require("./downloader");
 const { ProxyManager } = require("./proxy");
 const browserOpen = require("./lib/browser-open");
 const wsBridge = require("./lib/ws-bridge");
-const { DEFAULT_CONFIG, loadConfig, saveConfig, validateConfig } = require("./config");
+const { createSettings } = require("./lib/settings");
 const { registerIpc } = require("./lib/ipc");
 
 // Dev builds read/write config.json next to main.js (gitignored). Packaged
@@ -49,9 +49,20 @@ async function probeUrl(url) {
   }
 }
 
-let config = loadConfig(CONFIG_PATH);
-let proxyManager = new ProxyManager(config);
-let dm = new DownloadManager({ config, proxyManager, onUpdate: pushUpdate, cookieProvider: (url) => cookieHeaderFor(url), onRequiresBrowser: (url) => browserOpen.queueBrowserOpen(url) });
+// Runtime settings state + the single mutation path live in lib/settings.js.
+// The onApply hook rebuilds the engine singletons below; it is only invoked
+// later, by settings.update from the settings-save IPC, so referencing the
+// `let` bindings declared after this block is safe (no TDZ hit at boot).
+const settings = createSettings({
+  configPath: CONFIG_PATH,
+  onApply: (cfg) => {
+    proxyManager = new ProxyManager(cfg);
+    dm.config = cfg;
+    dm.proxyManager = proxyManager; // drop stale bad/latency proxy state
+  }
+});
+let proxyManager = new ProxyManager(settings.get());
+let dm = new DownloadManager({ config: settings.get(), proxyManager, onUpdate: pushUpdate, cookieProvider: (url) => cookieHeaderFor(url), onRequiresBrowser: (url) => browserOpen.queueBrowserOpen(url) });
 let mainWindow = null;
 let wss = null;
 let tray = null;
@@ -109,7 +120,7 @@ function flushUpdates() {
   }
   // Auto-close the built-in browser tab that produced each finished download
   // and move to the next, when enabled (matches by source page / referer URL).
-  if (config.autoCloseTab && browserWindow && !browserWindow.isDestroyed()) {
+  if (settings.get().autoCloseTab && browserWindow && !browserWindow.isDestroyed()) {
     for (const item of batch) {
       if (item.status === "done" || item.status === "error" || item.status === "cancelled") {
         bvCloseTabForUrl(item.referer || item.url);
@@ -142,7 +153,7 @@ async function gatherCookieHeader(urls) {
 }
 
 function startWsServer() {
-  wss = new WebSocketServer({ host: "127.0.0.1", port: config.port });
+  wss = new WebSocketServer({ host: "127.0.0.1", port: settings.get().port });
 
   const crawlThrottle = wsBridge.makeCrawlThrottle();
 
@@ -157,7 +168,7 @@ function startWsServer() {
       try { ws.close(1008, "origin not allowed"); } catch (e) { /* ignore */ }
       return;
     }
-    ws.send(JSON.stringify({ type: "hello", version: "1.0.0", port: config.port }));
+    ws.send(JSON.stringify({ type: "hello", version: "1.0.0", port: settings.get().port }));
     ws.on("message", async (data) => {
       let msg;
       try {
@@ -186,7 +197,7 @@ function startWsServer() {
   });
 
   wss.on("listening", () => {
-    console.log(`[ws] listening on ws://127.0.0.1:${config.port}`);
+    console.log(`[ws] listening on ws://127.0.0.1:${settings.get().port}`);
   });
 
   wss.on("error", (err) => {
@@ -272,7 +283,7 @@ function browserSession() {
 // __dirname/extension (dev). Returns the real path or null.
 function resolveExtensionDir() {
   const candidates = [
-    config.extensionPath,
+    settings.get().extensionPath,
     app.isPackaged ? path.join(process.resourcesPath, "app.asar.unpacked", "extension") : null,
     path.join(__dirname, "extension")
   ].filter(Boolean);
@@ -654,7 +665,7 @@ function bvCloseAll() {
 // webContents to free memory; the strip entry stays and reloads on click).
 function startIdleTabSweeper() {
   setInterval(() => {
-    const mins = (config && Number(config.idleTabMinutes)) || 0;
+    const mins = Number(settings.get().idleTabMinutes) || 0;
     if (!mins || !browserWindow || browserWindow.isDestroyed()) return;
     const cutoff = Date.now() - mins * 60000;
     [...browserTabs.keys()].forEach((id) => {
@@ -954,21 +965,14 @@ if (gotLock) {
   });
 
   // All renderer/extension channels live in lib/ipc.js; this ctx object is
-  // the seam between the module and the app state main.js owns (config,
+  // the seam between the module and the app state main.js owns (settings,
   // proxyManager, the built-in browser's tabs/timers).
   registerIpc({
     ipcMain,
     shell,
     dialog,
     dm,
-    getConfig: () => config,
-    setConfig: (next) => {
-      config = validateConfig(next);
-      saveConfig(CONFIG_PATH, config);
-      proxyManager = new ProxyManager(config);
-      dm.config = config;
-      dm.proxyManager = proxyManager; // drop stale bad/latency proxy state
-    },
+    settings,
     getProxyManager: () => proxyManager,
     browser: {
       open: (urls) => createBrowserWindow(urls),
