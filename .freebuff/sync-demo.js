@@ -125,6 +125,38 @@ function shimBehaviors() {
   const promptIsNull = typeof window.prompt === "function" && window.prompt("test") === null;
 
   return (async () => {
+    // queue-wide controls: pauseAll freezes running/queued/scheduled,
+    // resumeAll brings paused back; retryFailed skips requires-browser.
+    await api.pauseAll();
+    const afterPauseAll = await list();
+    const pausedAll = afterPauseAll.every((x) => ["paused", "error", "done", "duplicate", "cancelled"].includes(x.status));
+    const pauseCount = afterPauseAll.filter((x) => x.status === "paused").length;
+    await api.resumeAll();
+    const afterResumeAll = await list();
+    const resumedD1 = byId(afterResumeAll, "d1") ? byId(afterResumeAll, "d1").status : null;
+    const resumeCount = afterResumeAll.filter((x) => x.status === "queued").length;
+    const retryFailedCount = (await api.retryFailed()).count;
+    await api.retry("d5");
+    const d5AfterRetry = await statusOf("d5");
+    // global schedule window: outside it new downloads stay queued unless a
+    // site rule carries start (bypass); inside they run. folder rule applies.
+    const two = (d) => String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    const t0 = new Date();
+    await api.saveSettings({
+      scheduleWindowStart: two(new Date(t0.getTime() - 2 * 3600 * 1000)),
+      scheduleWindowEnd: two(new Date(t0.getTime() - 3600 * 1000)),
+      siteRules: [{ host: "bypass.example.com", folder: "D:/RulesFolder", start: true }]
+    });
+    await api.add("https://gated.example.com/v.mp4");
+    const gatedItem = (await list())[0];
+    const closedStatus = gatedItem.status;
+    await api.add("https://bypass.example.com/v.mp4");
+    const bypassItem = (await list())[0];
+    const bypassStatus = bypassItem.status;
+    const folderOverride = bypassItem.dirOverride;
+    await api.saveSettings({ scheduleWindowStart: "", scheduleWindowEnd: "", siteRules: [] });
+    await api.add("https://open.example.com/v.mp4");
+    const openStatus = (await list())[0].status;
     // resume contract per state (seed ids; sandbox ticker is inert so no
     // background advance): d3 queued -> running, then scheduled -> running;
     // d4 paused -> running; d5 error -> running; terminal states rejected.
@@ -154,13 +186,18 @@ function shimBehaviors() {
     const pAutoProxyOff = await addOne("https://supjav.com/p.mp4");
     await api.saveSettings({ autoProxy: true });
 
+
+
+
     return {
       promptIsNull,
       scheduled: sched ? { id: sched.id, status: sched.status, start: sched.scheduledStart, stop: sched.scheduledStop } : null,
       resume: { paused: rPaused, error: rError, scheduled: rScheduled, queued: rQueued,
         done: rDone, duplicate: rDuplicate, cancelled: rCancelled },
       proxy: { exact: pExact, wildcard: pWildcard, directRule: pDirectRule,
-        noRule: pNoRule, autoProxyOff: pAutoProxyOff }
+        noRule: pNoRule, autoProxyOff: pAutoProxyOff },
+      queue: { pausedAll, pauseCount, resumedD1, resumeCount, retryFailedCount, d5AfterRetry },
+      window: { closedStatus, bypassStatus, folderOverride, openStatus }
     };
   })();
 }
@@ -410,16 +447,16 @@ function selColumns(html, handlerIds) {
 // When renderer.js legitimately grows a new action/table/id, update
 // SELF_GOLDEN (the watcher's own drift checks keep exercising the scans live).
 const SELF_GOLDEN = {
-  emitted: ["cancel", "forceDownload", "history-date", "history-error", "move", "pause", "remove", "resume", "schedule"],
+  emitted: ["cancel", "forceDownload", "history-date", "history-error", "move", "pause", "remove", "resume", "retry", "schedule"],
   special: ["history-date", "history-error", "move", "schedule"],
   batch: ["cancel", "pause", "remove", "resume"],
-  apiRouted: ["cancel", "forceDownload", "pause", "remove", "resume"],
+  apiRouted: ["cancel", "forceDownload", "pause", "remove", "resume", "retry"],
   browseTotal: 3,
-  idCount: 52,
+  idCount: 59,
   selHandlers: [{ id: "dlsBody", ref: "closest(input[data-sel])" }],
   selEmitters: [{ fn: "rowHtml", checkbox: true }],
   selPathVia: ["render"],
-  shimExposed: 29
+  shimExposed: 33
 };
 
 const sorted = (xs) => [...xs].sort();
@@ -493,7 +530,22 @@ async function selfTest() {
     const wantProxy = { exact: "http://127.0.0.1:7890", wildcard: "socks5://127.0.0.1:1080",
       directRule: "direct", noRule: "http://127.0.0.1:7890", autoProxyOff: "direct" };
     check("shim proxyFor per class", beh.proxy, wantProxy,
+
+
       !!beh.proxy && JSON.stringify(beh.proxy) === JSON.stringify(wantProxy));
+    // queue-wide controls + retry: pauseAll freezes running/queued/scheduled,
+    // resumeAll brings paused back, retryFailed skips requires-browser but
+    // explicit retry flips an errored item to running.
+    const wantQueue = { pausedAll: true, pauseCount: 4, resumedD1: "queued", resumeCount: 4, retryFailedCount: 0, d5AfterRetry: "running" };
+    check("shim queue-wide controls + retry", beh.queue, wantQueue,
+      !!beh.queue && JSON.stringify(beh.queue) === JSON.stringify(wantQueue));
+    // global schedule window + site rules: outside the window new downloads
+    // stay queued unless a rule carries start (bypass); inside they run;
+    // folder rules apply to the item.
+    const wantWindow = { closedStatus: "queued", bypassStatus: "running", folderOverride: "D:/RulesFolder", openStatus: "running" };
+    check("shim window gating + site rules", beh.window, wantWindow,
+      !!beh.window && JSON.stringify(beh.window) === JSON.stringify(wantWindow));
+
     // real app guard contracts (not the shim): DownloadManager.resume
     // transitions only paused/error/scheduled -> queued (pump starts them),
     // rejects terminal/active states; ProxyManager.pickBest honors per-host

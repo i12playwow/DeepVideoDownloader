@@ -58,6 +58,9 @@
           <input id="search" type="search" class="search" placeholder="Filter by name or URL…">
         </div>
         <div class="toolbar-right">
+          <button id="pauseAll" class="btn ghost" title="Pause every active or queued download">⏸ Pause all</button>
+          <button id="resumeAll" class="btn ghost" title="Resume every paused download">▶ Resume all</button>
+          <button id="retryFailed" class="btn ghost" title="Requeue every failed download (browser-required items are skipped)">↻ Retry failed</button>
           <button id="clearHistory" class="btn ghost">Clear history</button>
           <button id="exportJson" class="btn ghost">Export JSON</button>
           <button id="exportCsv" class="btn ghost">Export CSV</button>
@@ -176,6 +179,8 @@
           <label><input type="checkbox" id="autoCloseTab"> Auto-close the browser tab + go to the next after a download</label>
           <label><input type="checkbox" id="thumbnails"> Show video thumbnails in the list (requires ffmpeg)</label>
         </div>
+          <label>Auto-retry failed downloads after <input type="number" id="autoRetryMinutes" min="0" value="0" style="width:70px;margin:0 6px;"> minutes (0 = off; requeues failures automatically)</label>
+          <label class="row">Only start new downloads between <input type="time" id="scheduleWindowStart" title="Empty = off"> and <input type="time" id="scheduleWindowEnd" title="Empty = off"> (running downloads finish; a start after end spans midnight)</label>
         <label class="row" style="margin-top:8px;">Auto-suspend idle tabs after
           <input type="number" id="idleTabMinutes" min="0" value="0" style="width:70px;margin:0 6px;">
           minutes (0 = off; unloads the tab, reloads on click)
@@ -200,6 +205,17 @@
         </div>
         <label class="rules">Per-host rules (one per line: <code>&lt;host pattern&gt;</code> <code>&lt;proxy url | direct&gt;</code>) — only used when Auto proxy is ON
           <textarea id="proxyRules" rows="5" placeholder="supjav.com http://127.0.0.1:7890&#10;sextb.net socks5://127.0.0.1:1080&#10;*.mayzaent.com socks5://127.0.0.1:1080&#10;go.mnaspm.com direct"></textarea>
+        </label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Automation rules</h2>
+      </div>
+      <div class="group">
+        <label class="rules">Per-site rules for new downloads (one per line: <code>&lt;host&gt;</code> <code>&lt;folder&gt;</code> [<code>start</code>]) — folder sets the destination, <code>start</code> begins the download even outside the schedule window
+          <textarea id="siteRules" rows="4" placeholder="supjav.com D:\Downloads\Supjav&#10;*.mayzaent.com D:\Downloads\Mayzaent start&#10;go.mnaspm.com start"></textarea>
         </label>
       </div>
     </section>

@@ -39,21 +39,33 @@ const DEFAULT_CONFIG = {
   // Each entry: { host: "<pattern>", proxy: "<proxyUrl | 'direct'>" }.
   // Patterns match exact host, "*.suffix", "*" glob, or "/regex/" literal.
   // Rules only apply when autoProxy is ON (see proxy.js pickBest).
-  proxyRules: []
+  proxyRules: [],
+  // Global schedule window: only START new downloads between these local
+  // "HH:MM" times (empty = off). Running downloads are never interrupted; a
+  // start after end (e.g. 23:00 -> 07:00) spans midnight.
+  scheduleWindowStart: "",
+  scheduleWindowEnd: "",
+  // Auto-retry failed downloads: after an item reaches a terminal error
+  // (anything except requires-browser), requeue it after N minutes (0 = off).
+  autoRetryMinutes: 0,
+  // Per-site automation rules for NEW downloads, matched by host:
+  // { host, folder, start } — folder overrides the destination (unless the
+  // caller picked one), start lets the item begin even outside the window.
+  siteRules: []
 };
 
 // Numeric fields that should be numbers — coerce stringy values coming from a
 // hand-edited config.json.
 const NUMERIC_FIELDS = [
   "port", "minFreeMB", "concurrency", "segments", "speedLimitKB",
-  "maxRetries", "maxRefresh", "hostDelayMs", "idleTabMinutes", "maxHistory", "autoTrimAt", "liveWindow"
+  "maxRetries", "maxRefresh", "hostDelayMs", "idleTabMinutes", "maxHistory", "autoTrimAt", "liveWindow", "autoRetryMinutes"
 ];
 // Boolean toggles.
 const BOOLEAN_FIELDS = [
   "autoProxy", "saveHistory", "skipDuplicates", "autoCloseTab", "thumbnails"
 ];
 // String path fields.
-const STRING_FIELDS = ["downloadDir", "downloadDir2", "downloadDir3", "ffmpegPath", "theme"];
+const STRING_FIELDS = ["downloadDir", "downloadDir2", "downloadDir3", "ffmpegPath", "theme", "scheduleWindowStart", "scheduleWindowEnd"];
 
 // Parse raw config text (already read from disk) into a config object.
 // Strips a leading UTF-8 BOM (a Notepad/PowerShell save artifact that would
@@ -131,6 +143,31 @@ function validateConfig(config) {
     c.proxyRules = cleanedRules;
   } else {
     c.proxyRules = [];
+  }
+
+
+  // Schedule window: keep only sane "HH:MM" times; anything else disables the
+  // window for that edge (both empty = window off).
+  for (const edge of ["scheduleWindowStart", "scheduleWindowEnd"]) {
+    const v = c[edge];
+    const m = typeof v === "string" ? /^([0-9]{1,2}):([0-9]{2})$/.exec(v) : null;
+    if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) c[edge] = "";
+  }
+
+  // Per-site automation rules: array of { host, folder?, start? }. host is
+  // required; folder may be empty (rule then only controls the window bypass).
+  if (Array.isArray(c.siteRules)) {
+    const cleanedRules = [];
+    for (const r of c.siteRules) {
+      if (!r || typeof r !== "object" || Array.isArray(r)) continue;
+      const host = typeof r.host === "string" ? r.host.trim() : "";
+      if (!host) continue;
+      const folder = typeof r.folder === "string" ? r.folder.trim() : "";
+      cleanedRules.push({ host, folder, start: !!r.start });
+    }
+    c.siteRules = cleanedRules;
+  } else {
+    c.siteRules = [];
   }
 
   return c;

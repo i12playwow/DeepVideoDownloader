@@ -64,6 +64,10 @@ function updateBatchBar() {
   selAll.indeterminate = visSel > 0 && visSel < visibleIds.size;
 }
 
+$("pauseAll").addEventListener("click", () => window.api.pauseAll());
+$("resumeAll").addEventListener("click", () => window.api.resumeAll());
+$("retryFailed").addEventListener("click", () => window.api.retryFailed());
+
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -105,12 +109,12 @@ function rowHtml(it, showing) {
       <td>${fmtBytes(it.total)}</td>
       <td class="wide">
         <div class="bar-wrap"><div class="bar" style="width:${pct}%"></div></div>
-        <div class="pct">${pct.toFixed(1)}%${it.error ? ' — <span style="color:' + errorColor(it) + '">' + esc(it.error) + '</span>' : ""}${it.refreshCount ? '<div class="refreshed">↻ refreshed ' + it.refreshCount + '×</div>' : ""}</div>
+        <div class="pct">${pct.toFixed(1)}%${it.error ? ' — <span style="color:' + errorColor(it) + '">' + esc(it.error) + '</span>' : ""}${it.refreshCount ? '<div class="refreshed">↻ refreshed ' + it.refreshCount + '×</div>' : ""}${it.retryCount ? '<div class="refreshed">↻ retry ' + it.retryCount + '×</div>' : ""}</div>
       </td>
       <td class="speed">${done ? "—" : fmtSpeed(it.speed)}</td>
       <td class="proxy" title="${esc(it.proxy)}">${esc(it.proxy)}</td>
       <td class="sched">${fmtSched(it)}</td>
-      <td class="status ${statusClass(it.status)}">${esc(it.status)}</td>
+      <td class="status"><span class="badge ${statusClass(it.status)}">${esc(it.status)}</span></td>
       <td class="actions">${showing === "history" ? histActionButtons(it) : actionButtons(it)}</td>`;
 }
 
@@ -213,24 +217,27 @@ function scheduleRender() {
 function actionButtons(it) {
   let html = "";
   if (it.status === "running") {
-    html += `<button data-act="pause" data-id="${it.id}">⏸</button>`;
+    html += `<button data-act="pause" data-id="${it.id}" title="Pause">⏸</button>`;
   }
-  if (it.status === "paused" || it.status === "error" || it.status === "scheduled") {
-    html += `<button data-act="resume" data-id="${it.id}">▶</button>`;
+  if (it.status === "paused" || it.status === "scheduled") {
+    html += `<button data-act="resume" data-id="${it.id}" title="Resume">▶</button>`;
+  }
+  if (it.status === "error") {
+    html += `<button data-act="retry" data-id="${it.id}" title="Retry now (fresh resolve, backoff reset)">↻</button>`;
   }
   if (it.status === "queued") {
     html += `<button data-act="pause" data-id="${it.id}">⏸</button>`;
   }
   const showSched = ["queued", "scheduled", "paused"].includes(it.status);
   if (showSched) {
-    html += `<button data-act="schedule" data-id="${it.id}" class="ghost">📅</button>`;
+    html += `<button data-act="schedule" data-id="${it.id}" class="ghost" title="Schedule start/stop times">📅</button>`;
   }
   if (["running", "queued", "paused", "scheduled", "error"].includes(it.status)) {
-    html += `<button data-act="cancel" data-id="${it.id}" class="danger">✕</button>`;
+    html += `<button data-act="cancel" data-id="${it.id}" class="danger" title="Cancel">✕</button>`;
   }
   if (["done", "error", "cancelled"].includes(it.status)) {
     if (it.status === "done") html += `<button data-act="move" data-id="${it.id}" title="Move file to another folder">&#8646;</button>`;
-    html += `<button data-act="remove" data-id="${it.id}">🗑</button>`;
+    html += `<button data-act="remove" data-id="${it.id}" title="Remove">🗑</button>`;
   }
   if (it.status === "duplicate") {
     html += `<button data-act="forceDownload" data-id="${it.id}" title="Download anyway">▶</button>`;
@@ -362,7 +369,7 @@ function historyRowHtml(it) {
     </td>
     <td>${fmtBytes(it.total)}</td>
     <td class="wide">${fmtDate(it.endTime || it.timestamp)}</td>
-    <td class="status ${statusClass(it.status)}">${esc(it.status)}</td>
+    <td class="status"><span class="badge ${statusClass(it.status)}">${esc(it.status)}</span></td>
     <td class="actions">${histActionButtons(it)}</td>
   </tr>`;
 }
@@ -456,6 +463,10 @@ async function loadSettings() {
   $("autoCloseTab").checked = s.autoCloseTab !== false;
   $("thumbnails").checked = s.thumbnails !== false;
   $("idleTabMinutes").value = s.idleTabMinutes ?? 0;
+  $("autoRetryMinutes").value = s.autoRetryMinutes ?? 0;
+  $("scheduleWindowStart").value = s.scheduleWindowStart || "";
+  $("scheduleWindowEnd").value = s.scheduleWindowEnd || "";
+  $("siteRules").value = (s.siteRules || []).map((r) => [r.host, r.folder || "", r.start ? "start" : ""].filter(Boolean).join("\t")).join("\n");
   $("proxies").value = (s.proxies || []).join("\n");
   $("proxyRules").value = (s.proxyRules || []).map((r) => r.host + "\t" + r.proxy).join("\n");
   applyTheme(s.theme || "dark");
@@ -498,6 +509,13 @@ $("save").addEventListener("click", async () => {
     autoCloseTab: $("autoCloseTab").checked,
     thumbnails: $("thumbnails").checked,
     idleTabMinutes: Math.max(0, parseInt($("idleTabMinutes").value || "0", 10)),
+    autoRetryMinutes: Math.max(0, parseInt($("autoRetryMinutes").value || "0", 10)),
+    scheduleWindowStart: $("scheduleWindowStart").value || "",
+    scheduleWindowEnd: $("scheduleWindowEnd").value || "",
+    siteRules: $("siteRules").value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
+      const t = l.split(/\s+/);
+      return { host: t[0] || "", folder: t[1] || "", start: t.includes("start") };
+    }).filter((r) => r.host),
     proxies: $("proxies").value.split("\n").map((p) => p.trim()).filter(Boolean),
     proxyRules: $("proxyRules").value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
       const i = l.search(/\s/);
