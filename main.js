@@ -54,6 +54,7 @@ async function probeUrl(url) {
 // later, by settings.update from the settings-save IPC, so referencing the
 // `let` bindings declared after this block is safe (no TDZ hit at boot).
 const settings = createSettings({
+  watch: true, // external config.json edits apply live (lib/settings.js)
   configPath: CONFIG_PATH,
   onApply: (cfg) => {
     proxyManager = new ProxyManager(cfg);
@@ -1054,6 +1055,7 @@ if (gotLock) {
 
   app.on("quit", () => {
     stopClipboardMonitor();
+    settings.close(); // stop the config.json watcher
     if (tray) tray.destroy();
     if (dm && typeof dm.flush === "function") dm.flush();
     if (wss) wss.close();
@@ -1061,3 +1063,4 @@ if (gotLock) {
 } else {
   app.quit();
 }
+
