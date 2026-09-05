@@ -87,7 +87,7 @@ function shimMethods() {
     clearInterval: () => {},
     setTimeout: () => 0,
     clearTimeout: () => {},
-    Date, Math, JSON, Array, String, Number, Object, Promise, RegExp, isNaN
+    Date, Math, JSON, Array, String, Number, Object, Promise, RegExp, isNaN, decodeURIComponent
   };
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox, { filename: "demo-api-shim.js" });
@@ -110,23 +110,59 @@ function shimBehaviors() {
     clearInterval: () => {},
     setTimeout: () => 0,
     clearTimeout: () => {},
-    Date, Math, JSON, Array, String, Number, Object, Promise, RegExp, isNaN
+    Date, Math, JSON, Array, String, Number, Object, Promise, RegExp, isNaN, decodeURIComponent
   };
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox, { filename: "demo-api-shim.js" });
+  const api = window.api;
+  const list = () => api.list();
+  const byId = (items, id) => items.find((i) => i.id === id);
+  const statusOf = async (id) => {
+    const it = byId(await list(), id);
+    return it ? it.status : null;
+  };
+  const resume = (id) => api.resume(id).then(() => statusOf(id));
   const promptIsNull = typeof window.prompt === "function" && window.prompt("test") === null;
-  return window.api
-    .schedule({ id: "d3", mode: "set", scheduledStart: "2026-09-05T10:00", scheduledStop: "2026-09-05T12:00" })
-    .then(() => window.api.list())
-    .then((items) => {
-      const it = items.find((i) => i.id === "d3") || null;
-      return {
-        promptIsNull,
-        scheduled: it
-          ? { id: it.id, status: it.status, start: it.scheduledStart, stop: it.scheduledStop }
-          : null
-      };
-    });
+
+  return (async () => {
+    // resume contract per state (seed ids; sandbox ticker is inert so no
+    // background advance): d3 queued -> running, then scheduled -> running;
+    // d4 paused -> running; d5 error -> running; terminal states rejected.
+    const rQueued = await resume("d3");
+    await api.schedule({ id: "d3", mode: "set", scheduledStart: "2026-09-05T10:00", scheduledStop: "2026-09-05T12:00" });
+    const sched = byId(await list(), "d3");
+    const rScheduled = await resume("d3");
+    const rPaused = await resume("d4");
+    const rError = await resume("d5");
+    const rDone = await resume("d7");
+    const rDuplicate = await resume("d6");
+    await api.cancel("d2");
+    const rCancelled = await resume("d2");
+
+    // proxy contract per rule class (proxy.js pickBest semantics), then OFF.
+    await api.saveSettings({ autoProxy: true });
+    const addOne = async (url) => {
+      await api.addMany([url]);
+      const items = await list();
+      return items[0].proxy;
+    };
+    const pExact = await addOne("https://supjav.com/p.mp4");
+    const pWildcard = await addOne("https://cdn2.mayzaent.com/p.mp4");
+    const pDirectRule = await addOne("https://go.mnaspm.com/p.mp4");
+    const pNoRule = await addOne("https://example.com/p.mp4");
+    await api.saveSettings({ autoProxy: false });
+    const pAutoProxyOff = await addOne("https://supjav.com/p.mp4");
+    await api.saveSettings({ autoProxy: true });
+
+    return {
+      promptIsNull,
+      scheduled: sched ? { id: sched.id, status: sched.status, start: sched.scheduledStart, stop: sched.scheduledStop } : null,
+      resume: { paused: rPaused, error: rError, scheduled: rScheduled, queued: rQueued,
+        done: rDone, duplicate: rDuplicate, cancelled: rCancelled },
+      proxy: { exact: pExact, wildcard: pWildcard, directRule: pDirectRule,
+        noRule: pNoRule, autoProxyOff: pAutoProxyOff }
+    };
+  })();
 }
 
 
@@ -383,6 +419,17 @@ async function selfTest() {
     check("shim schedule stores start/stop as scheduled", gotSched, wantSched,
       !!gotSched && gotSched.id === wantSched.id && gotSched.status === wantSched.status &&
         gotSched.start === wantSched.start && gotSched.stop === wantSched.stop);
+    // resume guard contract: resumable states flip to running, terminal states
+    // are rejected with state unchanged (mirrors downloader.js resume()).
+    const wantResume = { paused: "running", error: "running", scheduled: "running", queued: "running",
+      done: "done", duplicate: "duplicate", cancelled: "cancelled" };
+    check("shim resume per state", beh.resume, wantResume,
+      !!beh.resume && JSON.stringify(beh.resume) === JSON.stringify(wantResume));
+    // proxy contract per rule class (mirrors proxy.js pickBest).
+    const wantProxy = { exact: "http://127.0.0.1:7890", wildcard: "socks5://127.0.0.1:1080",
+      directRule: "direct", noRule: "http://127.0.0.1:7890", autoProxyOff: "direct" };
+    check("shim proxyFor per class", beh.proxy, wantProxy,
+      !!beh.proxy && JSON.stringify(beh.proxy) === JSON.stringify(wantProxy));
   } else {
     skipped++;
     console.error("selftest: skipping shim-method assertions (" + SHIM_JS + " not present)");
