@@ -62,7 +62,11 @@
       { host: "*.mayzaent.com", proxy: "socks5://127.0.0.1:1080" },
       { host: "go.mnaspm.com", proxy: "direct" }
     ],
-    theme: "dark"
+    theme: "dark",
+    scheduleWindowStart: "",
+    scheduleWindowEnd: "",
+    autoRetryMinutes: 0,
+    siteRules: []
   };
 
   // ---- bandwidth ring ---------------------------------------------------
@@ -95,12 +99,35 @@
   // ---- live simulation --------------------------------------------------
   let seq = 0;
   setInterval(() => {
+    const now = Date.now();
+    // automation: scheduled items whose start passed become queued; errored
+    // items requeue after autoRetryMinutes (requires-browser is excluded)
+    for (const it of items) {
+      if (it.status === "scheduled" && it.scheduledStart && now >= new Date(it.scheduledStart).getTime()) {
+        it.status = "queued"; it.scheduledStart = null;
+      }
+      if (it.status === "error" && settings.autoRetryMinutes > 0 && it.errorCategory !== "requires-browser" && !it._autoRetryAt) {
+        it._autoRetryAt = now + settings.autoRetryMinutes * 60000;
+      }
+      if (it.status === "error" && it._autoRetryAt && now >= it._autoRetryAt) {
+        it.status = "queued"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null;
+      }
+    }
+    // global schedule window: only START new downloads inside the window
+    const inWin = windowOpen();
+    let runningCount = items.filter((x) => x.status === "running").length;
+    for (const it of items) {
+      if (it.status !== "queued") continue;
+      if (runningCount >= settings.concurrency) break;
+      if (!inWin && !it._windowBypass) continue;
+      it.status = "running"; it.speed = 2 * MB; runningCount++;
+    }
     const batch = [];
     let terminal = false;
     for (const it of items) {
       if (it.status !== "running") continue;
       seq++;
-      it.speed = Math.round((2 + Math.random() * 8) * MB); // 2–10 MB/s
+      it.speed = Math.round((2 + Math.random() * 8) * MB); // 2-10 MB/s
       it.received = Math.min(it.total, it.received + it.speed);
       const done = it.received >= it.total;
       if (done) { it.status = "done"; it.speed = 0; pushHistory(it); terminal = true; }
@@ -169,6 +196,37 @@
       if (it) { it.status = "running"; it.speed = 2 * MB; it.received = 0; emit([it]); }
       return { ok: true };
     },
+    retry: async (id) => {
+      const it = items.find((x) => x.id === id);
+      if (it && it.status === "error") { it.total = it.total || Math.round((30 + Math.random() * 900) * MB); it.status = "running"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null; it.speed = 2 * MB; emit([it]); }
+      return { ok: true };
+    },
+    pauseAll: async () => {
+      let n = 0;
+      for (const it of items) {
+        if (it.status === "running" || it.status === "queued" || it.status === "scheduled") { it.status = "paused"; it.speed = 0; n++; }
+      }
+      if (n) emit(items.filter((x) => x.status === "paused"));
+      return { ok: true, count: n };
+    },
+    resumeAll: async () => {
+      let n = 0;
+      for (const it of items) {
+        if (it.status === "paused") { it.status = "queued"; it.speed = 0; n++; }
+      }
+      if (n) emit(items.filter((x) => x.status === "queued"));
+      return { ok: true, count: n };
+    },
+    retryFailed: async () => {
+      let n = 0;
+      for (const it of items) {
+        if (it.status === "error" && it.errorCategory !== "requires-browser") {
+          it.total = it.total || Math.round((30 + Math.random() * 900) * MB); it.status = "running"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null; it.speed = 2 * MB; n++;
+        }
+      }
+      if (n) emit(items.filter((x) => x.status === "running"));
+      return { ok: true, count: n };
+    },
     resumeLast: async () => {
       const last = history.find((h) => h.status === "done");
       if (!last) return { ok: true, id: null };
@@ -194,6 +252,35 @@
   // entry wins (exact, "*.suffix", glob, or "/regex/" pattern, case-insensitive;
   // an explicit "direct" rule wins too), and with no rule the pool first proxy
   // stands in for latency testing.
+  // Global schedule window mirror (real app: DownloadManager._inScheduleWindow)
+  function windowOpen(now) {
+    const s = settings.scheduleWindowStart, e = settings.scheduleWindowEnd;
+    if (!s || !e) return true;
+    const mins = (t) => { const p = String(t).split(":").map(Number); return p[0] * 60 + p[1]; };
+    const d = now || new Date();
+    const nm = d.getHours() * 60 + d.getMinutes();
+    const sm = mins(s), em = mins(e);
+    return sm <= em ? (nm >= sm && nm < em) : (nm >= sm || nm < em);
+  }
+
+  // Per-site automation rule for a URL host (exact or *.suffix)
+  function siteRuleFor(url) {
+    let host = "";
+    const u = String(url || "");
+    const at = u.indexOf("://");
+    if (at > 0) {
+      const rest = u.slice(at + 3);
+      host = rest.split("/")[0].split("?")[0].split("#")[0].split(":")[0].toLowerCase();
+    }
+    for (const r of settings.siteRules || []) {
+      const pat = String(r.host || "").trim().toLowerCase();
+      if (!pat) continue;
+      if (pat.startsWith("*.")) { if (host.endsWith(pat.slice(1))) return r; }
+      else if (host === pat) return r;
+    }
+    return null;
+  }
+
   function proxyFor(url) {
     if (!settings.autoProxy) return "direct";
     let host = "";
@@ -235,10 +322,15 @@
     for (const raw of urls) {
       const u = String(raw);
       const name = decodeURIComponent((u.split("/").pop() || "download").split("?")[0]) || "download";
+      const rule = siteRuleFor(u);
+      const inWin = windowOpen();
+      const startNow = items.filter((x) => x.status === "running").length < settings.concurrency && (inWin || (rule && rule.start));
       items.unshift({ id: "d" + Date.now() + Math.floor(Math.random() * 1e4), url: u,
         fileName: /\.(mp4|mkv|m3u8|ts|webm)$/i.test(name) ? name : name + ".mp4",
         total: Math.round((30 + Math.random() * 900) * MB), received: 0, speed: 0,
-        status: items.filter((i) => i.status === "running").length < settings.concurrency ? "running" : "queued",
+        status: startNow ? "running" : "queued",
+        dirOverride: rule && rule.folder ? rule.folder : null,
+        _windowBypass: !!(rule && rule.start),
         proxy: proxyFor(u) });
     }
     emit(clone(items.slice(0, urls.length)));

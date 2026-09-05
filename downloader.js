@@ -214,6 +214,10 @@ class DownloadManager {
     this._queuedIds = new Set(); // ids of items with status="queued" (O(1) pump lookup)
     this._hostLast = new Map();   // hostname -> last request time (per-host pacing)
     this._paceChains = new Map(); // hostname -> promise chain serializing _paceHost callers
+    this._hostRun = new Map();   // hostname -> active download count (per-host cap)
+    this._retryBackoffMs = 5000; // item-level transient-retry backoff base (tests override)
+    this._retryTimer = null;     // wake for items waiting out _retryAt
+    this._windowTimer = null;    // wake for the global schedule window opening
     this._speedBytes = 0;
     this._speedStart = Date.now();
     this._connBusy = 0;           // in-flight segmented connections
@@ -499,6 +503,8 @@ class DownloadManager {
     if (!item) return false;
     if (item.status === "duplicate") {
       item.duplicate = false;
+      item.retryCount = 0;
+      item._retryAt = null;
       item.status = "queued";
       this._queuedIds.add(item.id);
       item.error = "";
@@ -580,6 +586,16 @@ class DownloadManager {
     // then to a title derived straight from the URL (bulk paste / addPending),
     // so files don't all land as "video.mp4".
     const effectiveTitle = title || titleFromReferer(referer) || titleFromUrl(url);
+    // Per-site automation rules: matched by host, applied to new downloads
+    // without an explicit destination. folder overrides the target dir; start
+    // lets the item begin even outside the global schedule window.
+    let effDirOverride = typeof dirOverride === "string" && dirOverride.trim() ? dirOverride.trim() : null;
+    let windowBypass = false;
+    const siteRule = this._siteRuleFor(url);
+    if (siteRule) {
+      if (siteRule.folder && !effDirOverride) effDirOverride = siteRule.folder;
+      windowBypass = !!siteRule.start;
+    }
     // Duplicate handling: an already-downloaded URL becomes a "duplicate" list
     // entry (so the user can "Download anyway"), unless the bulk/windowed path
     // opts out with markDuplicate:false (skip silently — no item to avoid bloat).
@@ -620,7 +636,8 @@ class DownloadManager {
       referer,
       label,
       cookieHeader: cookieHeader || null,
-      dirOverride: typeof dirOverride === "string" && dirOverride.trim() ? dirOverride.trim() : null,
+      dirOverride: effDirOverride,
+      _windowBypass: windowBypass,
       kind: hls ? "hls" : "mp4",
       fileName: sanitizeName(effectiveTitle) + (label ? "[" + sanitizeName(label) + "]" : "") + ".mp4",
       status: "queued",
@@ -661,6 +678,7 @@ class DownloadManager {
           error: this.error,
           errorCategory: this.errorCategory,
           refreshCount: this.refreshCount,
+          retryCount: this.retryCount || 0,
           finalPath: this.finalPath,
           thumb: this.thumb || "",
           dirOverride: this.dirOverride || "",
@@ -692,32 +710,75 @@ class DownloadManager {
 
   async pump() {
     while (this.active < (this.config.concurrency || 3)) {
+      // Fair pick: prefer candidates with partial bytes (resume momentum),
+      // then oldest-first; cap concurrent downloads per host so one site's
+      // slow bulk import can't starve the rest of the queue.
+      const HOST_CAP = 2;
       let next = null;
+      let gated = false; // queued but waiting on the window / retry backoff
       for (const id of this._queuedIds) {
         const candidate = this.items.get(id);
-        if (candidate && candidate.status === "queued" && !candidate._running) { next = candidate; break; }
+        if (!candidate || candidate.status !== "queued" || candidate._running) continue;
+        if (candidate._retryAt && Date.now() < candidate._retryAt) { gated = true; continue; }
+        if (!this._inScheduleWindow() && !candidate._windowBypass) { gated = true; continue; }
+        if ((this._hostRun.get(this._hostOf(candidate.url)) || 0) >= HOST_CAP) continue;
+        if (!next || (candidate.received > 0 && next.received === 0)) next = candidate;
       }
-      if (!next) break;
+      if (!next) {
+        if (gated) { this._armWindowWake(); this._armRetryWake(); }
+        break;
+      }
       if (next.scheduledStart && Date.now() < next.scheduledStart) {
         next.status = "scheduled";
         this.emit(next);
         continue;
       }
+      const host = this._hostOf(next.url);
+      this._hostRun.set(host, (this._hostRun.get(host) || 0) + 1);
       next.status = "running";
+      next._retryAt = null;
       this._queuedIds.delete(next.id);
       this.active++;
       this.emit(next);
       this.run(next)
         .catch(async (err) => {
           if (err.aborted || next.status === "paused" || next.status === "cancelled") return;
-          next.status = "error";
+          const cat = categorizeError(err);
           next.error = err.message || String(err);
-          next.errorCategory = categorizeError(err);
+          next.errorCategory = cat;
           next.speed = 0;
+          // Transient failures (network / rate-limit / cloudflare / 5xx) retry
+          // automatically with exponential backoff before ever landing in
+          // error; terminal categories go straight to error.
+          const transient = cat === "network" || cat === "rate-limited" || cat === "blocked" ||
+            (cat === "http" && err.status >= 500);
+          if (transient && (next.retryCount || 0) < (this.config.maxRetries ?? 3)) {
+            next.retryCount = (next.retryCount || 0) + 1;
+            next._retryAt = Date.now() + this._retryBackoffMs * Math.pow(2, next.retryCount - 1);
+            next.status = "queued";
+            this._queuedIds.add(next.id);
+            this.emit(next);
+            this._armRetryWake();
+            await this._dropEmptyTempDir(next);
+            return;
+          }
+          // Automation: requeue failed downloads after autoRetryMinutes.
+          // requires-browser is excluded — it needs a real capture session.
+          const autoMin = this.config.autoRetryMinutes || 0;
+          if (autoMin > 0 && cat !== "requires-browser") {
+            next.retryCount = (next.retryCount || 0) + 1;
+            next.scheduledStart = Date.now() + autoMin * 60000;
+            next.status = "scheduled";
+            this.emit(next);
+            this.checkScheduled();
+            await this._dropEmptyTempDir(next);
+            return;
+          }
+          next.status = "error";
           this.emit(next);
           // Site needs a real browser (Cloudflare/anti-bot): hand the URL to the
           // built-in browser so the Deep Grab extension can capture the stream.
-          if (next.errorCategory === "requires-browser") {
+          if (cat === "requires-browser") {
             try { this.onRequiresBrowser(next.url); } catch (e) { /* ignore */ }
           }
           this._maybeFinalize(next);
@@ -725,9 +786,86 @@ class DownloadManager {
         })
         .finally(() => {
           this.active--;
+          const n = (this._hostRun.get(host) || 1) - 1;
+          if (n <= 0) this._hostRun.delete(host); else this._hostRun.set(host, n);
           this.pump();
         });
     }
+  }
+
+  // Global schedule window: only NEW downloads start between the configured
+  // "HH:MM" times (both empty = off). A start after end (23:00 -> 07:00)
+  // spans midnight. Running downloads are never interrupted.
+  _inScheduleWindow(now = new Date()) {
+    const s = this.config.scheduleWindowStart, e = this.config.scheduleWindowEnd;
+    if (!s || !e) return true;
+    const mins = (t) => { const p = t.split(":").map(Number); return p[0] * 60 + p[1]; };
+    const sm = mins(s), em = mins(e);
+    const nm = now.getHours() * 60 + now.getMinutes();
+    return sm <= em ? (nm >= sm && nm < em) : (nm >= sm || nm < em);
+  }
+
+  // Milliseconds until the window opens (0 when already inside). Arms the wake
+  // timer so gated queued items start the moment the window opens.
+  _msUntilWindowOpen(now = new Date()) {
+    const s = this.config.scheduleWindowStart, e = this.config.scheduleWindowEnd;
+    if (!s || !e) return 0;
+    const mins = (t) => { const p = t.split(":").map(Number); return p[0] * 60 + p[1]; };
+    const sm = mins(s), em = mins(e), nm = now.getHours() * 60 + now.getMinutes();
+    if (sm <= em) {
+      if (nm >= sm && nm < em) return 0;
+      return (nm < sm ? sm - nm : 24 * 60 - nm + sm) * 60000;
+    }
+    if (nm >= sm || nm < em) return 0;
+    return (sm - nm) * 60000;
+  }
+
+  _armWindowWake() {
+    clearTimeout(this._windowTimer);
+    this._windowTimer = null;
+    const wait = this._msUntilWindowOpen();
+    if (!wait) return;
+    // Short cap keeps the timer self-correcting when the window config changes.
+    this._windowTimer = setTimeout(() => {
+      this._windowTimer = null;
+      this.pump();
+    }, Math.min(30000, Math.max(500, wait)) + 1000);
+  }
+
+  // Wake for queued items waiting out their exponential backoff (_retryAt).
+  _armRetryWake() {
+    clearTimeout(this._retryTimer);
+    this._retryTimer = null;
+    const now = Date.now();
+    let earliest = Infinity;
+    for (const it of this.items.values()) {
+      if (it._retryAt && it._retryAt > now && it.status === "queued") earliest = Math.min(earliest, it._retryAt);
+    }
+    if (!Number.isFinite(earliest)) return;
+    this._retryTimer = setTimeout(() => {
+      this._retryTimer = null;
+      let due = false;
+      for (const it of this.items.values()) {
+        if (it._retryAt && it._retryAt <= Date.now()) { it._retryAt = null; due = true; }
+      }
+      if (due) this.pump();
+      else this._armRetryWake();
+    }, Math.min(30000, Math.max(200, earliest - now)));
+  }
+
+  // Per-site automation rule for a URL host (exact or "*.suffix" pattern).
+  _siteRuleFor(url) {
+    const rules = this.config.siteRules || [];
+    if (!rules.length) return null;
+    let host = "";
+    try { host = new URL(url).hostname; } catch (e) { return null; }
+    for (const r of rules) {
+      const pat = r.host;
+      if (!pat) continue;
+      if (pat.startsWith("*.")) { if (host.endsWith(pat.slice(1))) return r; }
+      else if (host === pat) return r;
+    }
+    return null;
   }
 
   // An errored run keeps its temp dir ONLY while it holds partial bytes a
@@ -1616,6 +1754,7 @@ class DownloadManager {
     const item = this.items.get(id);
     if (!item || (item.status !== "running" && item.status !== "scheduled" && item.status !== "queued")) return;
     if (item.status === "queued") this._queuedIds.delete(item.id);
+    item._retryAt = null;
     item.status = "paused";
     this.abort(item);
     this.emit(item);
@@ -1628,6 +1767,8 @@ class DownloadManager {
       item.status = "queued";
       this._queuedIds.add(item.id);
       item.error = "";
+      item.retryCount = 0;
+      item._retryAt = null;
       item.speed = 0;
       this.emit(item);
       this.pump();
@@ -1636,6 +1777,64 @@ class DownloadManager {
       if (item.scheduledStart || item.scheduledStop) this.checkScheduled();
     }
   }
+
+  pauseAll() {
+    let n = 0;
+    for (const it of this.items.values()) {
+      if (it.status === "running" || it.status === "queued" || it.status === "scheduled") {
+        this.pause(it.id);
+        n++;
+      }
+    }
+    return n;
+  }
+
+  resumeAll() {
+    let n = 0;
+    for (const it of this.items.values()) {
+      if (it.status !== "paused") continue;
+      it.status = "queued";
+      this._queuedIds.add(it.id);
+      it.error = "";
+      it.speed = 0;
+      it._retryAt = null;
+      this.emit(it);
+      n++;
+    }
+    this.pump();
+    this.checkScheduled();
+    return n;
+  }
+
+  // Requeue every failed download. requires-browser is excluded - those need
+  // a real capture session, not another headless attempt.
+  retryFailed() {
+    let n = 0;
+    for (const it of this.items.values()) {
+      if (it.status === "error" && it.errorCategory !== "requires-browser") {
+        if (this.retry(it.id)) n++;
+      }
+    }
+    return n;
+  }
+
+  // Explicit retry of a failed download: fresh backoff/resolve, straight back
+  // into the queue.
+  retry(id) {
+    const item = this.items.get(id);
+    if (!item || item.status !== "error") return false;
+    item.error = "";
+    item.errorCategory = "";
+    item.retryCount = 0;
+    item._retryAt = null;
+    item.status = "queued";
+    this._queuedIds.add(item.id);
+    item.speed = 0;
+    this.emit(item);
+    this.pump();
+    return true;
+  }
+
 
   // Re-queue the most recent finished download (active list or history), using
   // its saved URL/title/referer. Handles interrupted/failed links without the
@@ -1662,6 +1861,7 @@ class DownloadManager {
       this.abort(item);
     } else if (item.status === "queued" || item.status === "paused") {
       if (item.status === "queued") this._queuedIds.delete(item.id);
+      item._retryAt = null;
       item.status = "cancelled";
     }
     fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});

@@ -384,3 +384,71 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
 .notify-title { font-size: 12px; line-height: 1.4; }
 .notify-actions { display: flex; gap: 6px; }
 .notify-actions .btn { font-size: 11px; padding: 5px 10px; }
+/* ---------------- modern polish (1.4) ---------------- */
+/* Status pills: soft translucent badge per state instead of bare colored text */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: capitalize;
+  line-height: 1.5;
+}
+.st-queued { color: var(--muted); background: color-mix(in srgb, var(--muted) 16%, transparent); }
+.st-paused { color: var(--muted); background: color-mix(in srgb, var(--muted) 24%, transparent); }
+.st-cancelled { color: var(--muted); background: color-mix(in srgb, var(--muted) 10%, transparent); }
+.st-running { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.st-scheduled { color: var(--blue); background: color-mix(in srgb, var(--blue) 14%, transparent); }
+.st-done { color: var(--green); background: color-mix(in srgb, var(--green) 14%, transparent); }
+.st-error { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
+.st-duplicate { color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent); }
+.st-done, .st-cancelled { opacity: 1; } /* badges carry their own tone */
+
+/* Row accent on the active download: subtle left bar */
+#dls tr:has(td .st-running) td { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* Row actions: tighter, consistent icon buttons with visible focus */
+td.actions button { border-radius: 7px; padding: 3px 7px; line-height: 1.6; }
+td.actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Buttons: press feedback + keyboard focus ring */
+.btn { transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s, transform 0.05s; }
+.btn:active { transform: translateY(1px); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Progress bar: soft shimmer while a download is actively writing */
+.bar { position: relative; overflow: hidden; }
+.bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  animation: bar-shimmer 1.8s linear infinite;
+}
+@keyframes bar-shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+
+/* Typography: tabular numbers for sizes/speeds, micro-caps headers */
+td { font-variant-numeric: tabular-nums; }
+th {
+  text-transform: uppercase;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  padding: 9px 10px;
+}
+.panel-head { padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.panel-head h2 { letter-spacing: 0.01em; }
+
+/* Form controls: consistent height + clearer focus */
+input[type="text"], input[type="number"], input[type="search"], select { min-height: 32px; }
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* Empty states: roomier, calmer */
+.empty { padding: 34px 16px; font-size: 12.5px; line-height: 1.5; }
