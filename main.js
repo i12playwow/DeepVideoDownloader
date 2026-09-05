@@ -4,7 +4,7 @@ process.on("unhandledRejection", (err) => {
   console.error("[unhandledRejection]", err);
 });
 
-const { app, BrowserWindow, BrowserView, ipcMain, shell, clipboard, session, Tray, Menu, nativeImage } = require("electron");
+const { app, BrowserWindow, BrowserView, ipcMain, shell, clipboard, session, Tray, Menu, nativeImage, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -15,6 +15,7 @@ const { ProxyManager } = require("./proxy");
 const browserOpen = require("./lib/browser-open");
 const wsBridge = require("./lib/ws-bridge");
 const { DEFAULT_CONFIG, loadConfig, saveConfig, validateConfig } = require("./config");
+const { registerIpc } = require("./lib/ipc");
 
 // Dev builds read/write config.json next to main.js (gitignored). Packaged
 // apps must NOT write into the read-only app.asar — use the writable userData
@@ -145,7 +146,17 @@ function startWsServer() {
 
   const crawlThrottle = wsBridge.makeCrawlThrottle();
 
-  wss.on("connection", (ws) => {
+    wss.on("connection", (ws, req) => {
+    // Pairing policy: only the Deep Grab extension (chrome-/moz-extension://)
+    // and native loopback clients (no Origin header) may talk to the local
+    // server. A website can open ws://127.0.0.1:<port> freely, so any other
+    // Origin is refused at the handshake (see lib/ws-bridge.js).
+    const origin = (req && req.headers && req.headers.origin) || "";
+    if (!wsBridge.isAllowedWsOrigin(origin)) {
+      console.warn("[ws] rejected connection from origin: " + (origin || "(none)"));
+      try { ws.close(1008, "origin not allowed"); } catch (e) { /* ignore */ }
+      return;
+    }
     ws.send(JSON.stringify({ type: "hello", version: "1.0.0", port: config.port }));
     ws.on("message", async (data) => {
       let msg;
@@ -860,142 +871,6 @@ function stopClipboardMonitor() {
   }
 }
 
-// ---------------- IPC ----------------
-ipcMain.handle("settings-get", () => config);
-ipcMain.handle("settings-save", (e, next) => {
-  const allowed = new Set(Object.keys(DEFAULT_CONFIG));
-  const clean = {};
-  if (next && typeof next === "object") {
-    for (const k of Object.keys(next)) if (allowed.has(k)) clean[k] = next[k];
-  }
-  config = validateConfig({ ...config, ...clean });
-  saveConfig(CONFIG_PATH, config);
-  proxyManager = new ProxyManager(config);
-  dm.config = config;
-  dm.proxyManager = proxyManager; // drop stale bad/latency proxy state
-  return { ok: true };
-});
-
-ipcMain.handle("downloads-list", () => dm.list());
-ipcMain.handle("downloads-history", () => dm.listHistory());
-ipcMain.handle("bandwidth-stats", () => dm.getBandwidthStats());
-ipcMain.handle("downloads-clear-history", () => {
-  dm.history = [];
-  dm._saveHistory();
-  return { ok: true };
-});
-ipcMain.handle("downloads-export", async (e, format = "json") => {
-  const data = dm.exportHistory(format);
-  const { dialog } = require("electron");
-  const result = await dialog.showSaveDialog({
-    title: "Export Download History",
-    defaultPath: format === "csv" ? "downloads-history.csv" : "downloads-history.json",
-    filters: [{ name: format === "csv" ? "CSV" : "JSON", pattern: format === "csv" ? "*.csv" : "*.json" }]
-  });
-  if (!result.canceled && result.filePath) {
-    fs.writeFileSync(result.filePath, data, "utf8");
-    return { ok: true, path: result.filePath };
-  }
-  return { ok: false, canceled: true };
-});
-
-ipcMain.handle("download-pause", (e, id) => { dm.pause(id); return { ok: true }; });
-ipcMain.handle("download-resume", (e, id) => { dm.resume(id); return { ok: true }; });
-ipcMain.handle("download-resume-last", async () => {
-  try {
-    const id = await dm.resumeLast();
-    return { ok: true, id };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-ipcMain.handle("download-cancel", (e, id) => { dm.cancel(id); return { ok: true }; });
-ipcMain.handle("download-remove", (e, id) => { dm.remove(id); return { ok: true }; });
-ipcMain.handle("downloads-add", async (e, url, dirOverride) => {
-  if (!url || typeof url !== "string") return { ok: false, error: "Invalid URL" };
-  try {
-    let title = "video";
-    try {
-      const u = new URL(url);
-      title = u.pathname.split("/").filter(Boolean).pop() || u.hostname;
-    } catch (err) { /* keep default title */ }
-    const id = await dm.enqueue({ url, title, referer: "", dirOverride: typeof dirOverride === "string" && dirOverride.trim() ? dirOverride : null });
-    return { ok: true, id, duplicate: id !== null && dm.isDownloaded(url) };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-// Batch import — hands URLs to the windowed loader (addPending) so thousands of
-// URLs are pulled into the active map a few at a time instead of materializing
-// them all at once.
-ipcMain.handle("downloads-add-many", async (e, urls, dirOverride) => {
-  if (!Array.isArray(urls)) return { ok: false, error: "Invalid list" };
-  const r = dm.addPending(urls, typeof dirOverride === "string" && dirOverride.trim() ? dirOverride : null);
-  return { ok: true, ...r, count: r.added };
-});
-// Relocate a finished download (and its thumbnail) to another folder.
-ipcMain.handle("download-move", async (e, id, destDir) => {
-  if (!id || typeof destDir !== "string" || !destDir.trim()) return { ok: false, error: "missing id or folder" };
-  try { fs.statSync(destDir); } catch (err) { /* created on demand */ }
-  return await dm.moveDownloaded(id, destDir);
-});
-ipcMain.handle("downloads-force", (e, id) => ({ ok: dm.forceDownload(id) }));
-ipcMain.handle("download-schedule", (e, { id, mode, scheduledStart, scheduledStop }) => {
-  const item = dm.items.get(id);
-  if (!item) return { ok: false, error: "Item not found" };
-  if (mode === "set") {
-    item.scheduledStart = scheduledStart ? new Date(scheduledStart).getTime() : null;
-    item.scheduledStop = scheduledStop ? new Date(scheduledStop).getTime() : null;
-  } else if (mode === "clear") {
-    item.scheduledStart = null;
-    item.scheduledStop = null;
-    if (item.status === "scheduled") item.status = "queued";
-  }
-  dm.emit(item);
-  dm.checkScheduled(); // arms the stop-time sweep even for a running item
-  return { ok: true };
-});
-
-ipcMain.handle("test-proxies", async (e, target) => {
-  const testUrl = target && /^https?:/.test(target) ? target : "https://www.google.com";
-  const list = proxyManager.list();
-  const results = [];
-  await Promise.all(list.map(async (p) => {
-    const lat = await proxyManager.testLatency(p, testUrl, 6000);
-    results.push({
-      proxy: p.url,
-      ms: lat ? lat.ms : null,
-      status: lat ? lat.status : "fail"
-    });
-  }));
-  return results;
-});
-
-ipcMain.handle("get-active-dir", () => dm.dir);
-// Native folder picker for the Settings storage inputs (returns "" on cancel).
-ipcMain.handle("select-dir", async () => {
-  const { dialog } = require("electron");
-  const res = await dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"] });
-  if (res.canceled || !res.filePaths || !res.filePaths.length) return "";
-  return res.filePaths[0];
-});
-ipcMain.handle("open-dir", () => {
-  try {
-    const active = dm.dir; // opens the folder downloads currently land in
-    fs.mkdirSync(active, { recursive: true });
-    shell.openPath(active);
-    return { ok: true, dir: active };
-  } catch (e) {
-    return { ok: false, dir: "", error: String(e.message || e) };
-  }
-});
-
-ipcMain.handle("open-path", (e, p) => {
-  if (!p || typeof p !== "string") return { ok: false };
-  shell.showItemInFolder(p);
-  return { ok: true };
-});
-
 // ---------------- File associations (open .mp4/.m3u8/... with this app) ----------------
 const ASSOC_EXT_LIST = ["mp4", "m4v", "webm", "mov", "mkv", "flv", "m3u8"];
 const ASSOC_EXT = /\.(mp4|m4v|webm|mov|mkv|flv|m3u8)$/i;
@@ -1078,45 +953,67 @@ if (gotLock) {
     if (target) handleOpenedFile(target);
   });
 
-  ipcMain.handle("browser-open", (e, urls) => { createBrowserWindow(urls); });
-  ipcMain.handle("browser-nav", (e, url) => { createBrowserWindow(url); });
-  ipcMain.handle("browser-get-tabs", () => { const t = pendingTabs; pendingTabs = []; return t; });
-  ipcMain.on("bv-new-tab", () => { if (browserWindow && !browserWindow.isDestroyed()) bvAddTab("https://www.google.com"); });
-ipcMain.on("bv-close", (e, id) => { bvCloseTab(id); });
-ipcMain.on("bv-activate", (e, id) => { bvActivate(id); });
-ipcMain.on("bv-dupes", () => { bvCloseDuplicates(); });
-ipcMain.on("bv-group", () => { bvGroupByDomain(); });
-ipcMain.on("bv-close-others", () => { bvCloseOthers(); });
-ipcMain.on("bv-close-domain", () => { bvCloseDomain(); });
-ipcMain.on("bv-close-all", () => { bvCloseAll(); });
-ipcMain.on("bv-group-mode", (e, on) => { bvGroupMode = !!on; if (browserWindow && !browserWindow.isDestroyed()) try { browserWindow.webContents.send("browser-group-mode", bvGroupMode); } catch (e) { /* ignore */ } });
-  ipcMain.on("bv-navigate", (e, url) => {
-    if (!activeBrowserId) return;
-    const en = browserTabs.get(activeBrowserId);
-    if (!en) return;
-    let u = String(url || "").trim();
-    if (!u) return;
-    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) u = "https://" + u;
-    en.view.webContents.loadURL(u).catch(() => {});
-  });
-  ipcMain.on("bv-back", () => { if (activeBrowserId) { const en = browserTabs.get(activeBrowserId); if (en) en.view.webContents.goBack(); } });
-  ipcMain.on("bv-forward", () => { if (activeBrowserId) { const en = browserTabs.get(activeBrowserId); if (en) en.view.webContents.goForward(); } });
-  ipcMain.on("bv-reload", () => { if (activeBrowserId) { const en = browserTabs.get(activeBrowserId); if (en) en.view.webContents.reload(); } });
-  ipcMain.on("bv-content-rect", (e, rect) => {
-    if (rect && typeof rect.width === "number" && typeof rect.height === "number") {
-      browserContentRect = { x: rect.x || 0, y: rect.y || 0, width: rect.width, height: rect.height };
-      bvPositionActive();
+  // All renderer/extension channels live in lib/ipc.js; this ctx object is
+  // the seam between the module and the app state main.js owns (config,
+  // proxyManager, the built-in browser's tabs/timers).
+  registerIpc({
+    ipcMain,
+    shell,
+    dialog,
+    dm,
+    getConfig: () => config,
+    setConfig: (next) => {
+      config = validateConfig(next);
+      saveConfig(CONFIG_PATH, config);
+      proxyManager = new ProxyManager(config);
+      dm.config = config;
+      dm.proxyManager = proxyManager; // drop stale bad/latency proxy state
+    },
+    getProxyManager: () => proxyManager,
+    browser: {
+      open: (urls) => createBrowserWindow(urls),
+      getTabs: () => { const t = pendingTabs; pendingTabs = []; return t; },
+      external: (url, b) => openInExternalBrowser(url, b),
+      install: (b) => launchExtensionInBrowser(b)
+    },
+    bv: {
+      newTab: () => { if (browserWindow && !browserWindow.isDestroyed()) bvAddTab("https://www.google.com"); },
+      close: (id) => bvCloseTab(id),
+      activate: (id) => bvActivate(id),
+      dupes: () => bvCloseDuplicates(),
+      group: () => bvGroupByDomain(),
+      closeOthers: () => bvCloseOthers(),
+      closeDomain: () => bvCloseDomain(),
+      closeAll: () => bvCloseAll(),
+      groupMode: (on) => { bvGroupMode = !!on; if (browserWindow && !browserWindow.isDestroyed()) try { browserWindow.webContents.send("browser-group-mode", bvGroupMode); } catch (e) { /* ignore */ } },
+      navigate: (url) => {
+        if (!activeBrowserId) return;
+        const en = browserTabs.get(activeBrowserId);
+        if (!en) return;
+        let u = String(url || "").trim();
+        if (!u) return;
+        if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) u = "https://" + u;
+        en.view.webContents.loadURL(u).catch(() => {});
+      },
+      back: () => { if (activeBrowserId) { const en = browserTabs.get(activeBrowserId); if (en) en.view.webContents.goBack(); } },
+      forward: () => { if (activeBrowserId) { const en = browserTabs.get(activeBrowserId); if (en) en.view.webContents.goForward(); } },
+      reload: () => { if (activeBrowserId) { const en = browserTabs.get(activeBrowserId); if (en) en.view.webContents.reload(); } },
+      contentRect: (rect) => {
+        if (rect && typeof rect.width === "number" && typeof rect.height === "number") {
+          browserContentRect = { x: rect.x || 0, y: rect.y || 0, width: rect.width, height: rect.height };
+          bvPositionActive();
+        }
+      },
+      newtabMode: (on) => { bvNewTabMode = !!on; },
+      autoscroll: () => {
+        if (!activeBrowserId) return;
+        if (autoScrollTimers.has(activeBrowserId)) stopAutoScroll(activeBrowserId);
+        else startAutoScroll(activeBrowserId);
+        bvPushNav();
+      }
     }
   });
-  ipcMain.on("bv-newtab-mode", (e, on) => { bvNewTabMode = !!on; });
-  ipcMain.on("bv-autoscroll", () => {
-    if (!activeBrowserId) return;
-    if (autoScrollTimers.has(activeBrowserId)) stopAutoScroll(activeBrowserId);
-    else startAutoScroll(activeBrowserId);
-    bvPushNav();
-  });
-  ipcMain.handle("browser-external", (e, url, browser) => openInExternalBrowser(url, browser));
-  ipcMain.handle("extension-install", (e, browser) => launchExtensionInBrowser(browser));
+
 
   app.whenReady().then(() => {
     startWsServer();
