@@ -87,12 +87,48 @@ function shimMethods() {
     clearInterval: () => {},
     setTimeout: () => 0,
     clearTimeout: () => {},
-    Date, Math, JSON, Array, String, Number, Object, Promise, isNaN
+    Date, Math, JSON, Array, String, Number, Object, Promise, RegExp, isNaN
   };
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox, { filename: "demo-api-shim.js" });
   return Object.keys(window.api || {});
 }
+
+function shimBehaviors() {
+  // Two demo-critical invariants of the shim runtime, exercised together in
+  // the live schedule flow: (1) window.prompt is stubbed to return null so
+  // native dialogs never block the preview, and (2) api.schedule stores the
+  // start/stop times on the item and flips it to "scheduled" — the API is
+  // the surface renderer.js drives after its prompt() dialog (which the stub
+  // intentionally aborts), so the storing side is what must stay healthy.
+  const code = fs.readFileSync(SHIM_JS, "utf8");
+  const window = {};
+  const sandbox = {
+    window,
+    console: { log() {}, error() {} },
+    setInterval: () => 0,
+    clearInterval: () => {},
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    Date, Math, JSON, Array, String, Number, Object, Promise, RegExp, isNaN
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(code, sandbox, { filename: "demo-api-shim.js" });
+  const promptIsNull = typeof window.prompt === "function" && window.prompt("test") === null;
+  return window.api
+    .schedule({ id: "d3", mode: "set", scheduledStart: "2026-09-05T10:00", scheduledStop: "2026-09-05T12:00" })
+    .then(() => window.api.list())
+    .then((items) => {
+      const it = items.find((i) => i.id === "d3") || null;
+      return {
+        promptIsNull,
+        scheduled: it
+          ? { id: it.id, status: it.status, start: it.scheduledStart, stop: it.scheduledStop }
+          : null
+      };
+    });
+}
+
 
 function neededMethods(src) {
   const called = new Set();
@@ -292,7 +328,7 @@ const sorted = (xs) => [...xs].sort();
 const same = (a, b) =>
   a.length === b.length && a.every((v) => b.some((w) => JSON.stringify(v) === JSON.stringify(w)));
 
-function selfTest() {
+async function selfTest() {
   const src = fs.readFileSync(SRC_JS, "utf8");
   const html = fs.readFileSync(SRC_HTML, "utf8");
   let pass = 0, fail = 0, skipped = 0;
@@ -340,6 +376,13 @@ function selfTest() {
     const needed = sorted(neededMethods(src));
     const missing = needed.filter((m) => !exposed.includes(m));
     check("neededMethods ⊆ shim", missing, [], missing.length === 0);
+    const beh = await shimBehaviors();
+    check("shim prompt stub returns null (dialog-safe)", beh.promptIsNull, true, beh.promptIsNull === true);
+    const wantSched = { id: "d3", status: "scheduled", start: "2026-09-05T10:00", stop: "2026-09-05T12:00" };
+    const gotSched = beh.scheduled;
+    check("shim schedule stores start/stop as scheduled", gotSched, wantSched,
+      !!gotSched && gotSched.id === wantSched.id && gotSched.status === wantSched.status &&
+        gotSched.start === wantSched.start && gotSched.stop === wantSched.stop);
   } else {
     skipped++;
     console.error("selftest: skipping shim-method assertions (" + SHIM_JS + " not present)");
@@ -462,12 +505,12 @@ if (require.main === module) {
       });
     }
   } else if (process.argv.includes("--selftest")) {
-    try {
-      process.exit(selfTest() ? 0 : 1);
-    } catch (e) {
-      console.error("selftest failed: " + e.message);
-      process.exit(1);
-    }
+    selfTest()
+      .then((ok) => process.exit(ok ? 0 : 1))
+      .catch((e) => {
+        console.error("selftest failed: " + e.message);
+        process.exit(1);
+      });
   } else {
     try {
       process.exit(sync() ? 0 : 1);

@@ -147,7 +147,9 @@
     },
     resume: async (id) => {
       const it = items.find((i) => i.id === id);
-      if (it && it.status !== "running") { it.status = "running"; it.speed = 2 * MB; emit([it]); }
+      if (it && (it.status === "paused" || it.status === "error" || it.status === "scheduled" || it.status === "queued")) {
+        it.status = "running"; it.speed = 2 * MB; emit([it]);
+      }
       return { ok: true };
     },
     cancel: async (id) => {
@@ -187,6 +189,48 @@
     exportHistory: async (fmt) => { toast("Exported " + history.length + " history entries as " + fmt.toUpperCase() + " (demo)"); return { ok: true }; }
   };
 
+  // Mirror the real app per-host proxy assignment (proxy.js pickBest): with
+  // autoProxy OFF every download is direct; ON, the first matching proxyRules
+  // entry wins (exact, "*.suffix", glob, or "/regex/" pattern, case-insensitive;
+  // an explicit "direct" rule wins too), and with no rule the pool first proxy
+  // stands in for latency testing.
+  function proxyFor(url) {
+    if (!settings.autoProxy) return "direct";
+    let host = "";
+    const u = String(url || "");
+    const at = u.indexOf("://");
+    if (at > 0) {
+      const rest = u.slice(at + 3);
+      host = rest.split("/")[0].split("?")[0].split("#")[0].split(":")[0].toLowerCase();
+    }
+    if (!host) return "direct";
+    for (const r of settings.proxyRules || []) {
+      const pat = String(r.host || "").trim().toLowerCase();
+      if (!pat) continue;
+      let match = false;
+      if (pat.length > 1 && pat.startsWith("/") && pat.endsWith("/")) {
+        try { match = new RegExp(pat.slice(1, -1), "i").test(host); } catch (e) { match = false; }
+      } else if (pat.startsWith("*.") && !pat.slice(2).includes("*")) {
+        const suffix = pat.slice(1);
+        match = host === suffix.slice(1) || host.endsWith(suffix);
+      } else if (pat.includes("*")) {
+        const segs = pat.split("*");
+        match = host.startsWith(segs[0]);
+        let rest = host.slice(segs[0].length);
+        for (let k = 1; match && k < segs.length; k++) {
+          const idx = rest.indexOf(segs[k]);
+          if (idx === -1) match = false;
+          else rest = rest.slice(idx + segs[k].length);
+        }
+      } else {
+        match = host === pat;
+      }
+      if (match) return r.proxy;
+    }
+    const pool = (settings.proxies || []).filter((p) => typeof p === "string" && p.trim());
+    return pool.length ? pool[0] : "direct";
+  }
+
   function enqueue(urls) {
     for (const raw of urls) {
       const u = String(raw);
@@ -195,7 +239,7 @@
         fileName: /\.(mp4|mkv|m3u8|ts|webm)$/i.test(name) ? name : name + ".mp4",
         total: Math.round((30 + Math.random() * 900) * MB), received: 0, speed: 0,
         status: items.filter((i) => i.status === "running").length < settings.concurrency ? "running" : "queued",
-        proxy: "direct" });
+        proxy: proxyFor(u) });
     }
     emit(clone(items.slice(0, urls.length)));
   }
