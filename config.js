@@ -47,7 +47,10 @@ const DEFAULT_CONFIG = {
   scheduleWindowEnd: "",
   // Auto-retry failed downloads: after an item reaches a terminal error
   // (anything except requires-browser), requeue it after N minutes (0 = off).
+  // autoRetryMax caps consecutive automatic retries so a permanently dead
+  // URL does not churn the queue forever (0 = unlimited).
   autoRetryMinutes: 0,
+  autoRetryMax: 5,
   // Per-site automation rules for NEW downloads, matched by host:
   // { host, folder, start } — folder overrides the destination (unless the
   // caller picked one), start lets the item begin even outside the window.
@@ -58,7 +61,7 @@ const DEFAULT_CONFIG = {
 // hand-edited config.json.
 const NUMERIC_FIELDS = [
   "port", "minFreeMB", "concurrency", "segments", "speedLimitKB",
-  "maxRetries", "maxRefresh", "hostDelayMs", "idleTabMinutes", "maxHistory", "autoTrimAt", "liveWindow", "autoRetryMinutes"
+  "maxRetries", "maxRefresh", "hostDelayMs", "idleTabMinutes", "maxHistory", "autoTrimAt", "liveWindow", "autoRetryMinutes", "autoRetryMax"
 ];
 // Boolean toggles.
 const BOOLEAN_FIELDS = [

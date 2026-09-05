@@ -452,7 +452,7 @@ const SELF_GOLDEN = {
   batch: ["cancel", "pause", "remove", "resume"],
   apiRouted: ["cancel", "forceDownload", "pause", "remove", "resume", "retry"],
   browseTotal: 3,
-  idCount: 59,
+  idCount: 60,
   selHandlers: [{ id: "dlsBody", ref: "closest(input[data-sel])" }],
   selEmitters: [{ fn: "rowHtml", checkbox: true }],
   selPathVia: ["render"],
