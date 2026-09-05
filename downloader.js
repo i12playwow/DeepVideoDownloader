@@ -20,6 +20,7 @@ const { HLS_MASTER_RE, isHlsUrl, parseHlsPlaylist, pickHlsVariant, pickHlsVarian
 const { sanitizeName, titleFromReferer, titleFromUrl } = require("./lib/names");
 const { SJ_PLAYER_RE, resolveUrl, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isCfwalledSupjavMovie } = require("./lib/resolvers");
 const { unwrapExtensionUrl } = require("./lib/urls");
+const { HistoryStore, canonicalKeys } = require("./lib/history-store");
 
 // A file must be at least this big to count as a real downloaded video for the
 // on-disk duplicate check. Smaller files are partials/stubs (failed CF probes,
@@ -68,36 +69,6 @@ function isBrowserUiUrl(u) {
   }
 }
 
-// Signed / rotating media URLs (streamtape get_video expires/token, tapecontent
-// blob paths, signed m3u8 query tokens) are a brand-new string on every capture
-// of the SAME stream, so exact-URL dedupe never matches and the movie re-downloads
-// under a timestamped name. canonicalKeys() returns stable keys that describe the
-// CONTENT a URL points at; the downloader dedupes on them alongside the raw URL.
-// Returns [] for everything with no stable identity (plain mp4s, page URLs).
-function canonicalKeys(u) {
-  const s = String(u || "");
-  const out = [];
-  if (!s) return out;
-  try {
-    const url = new URL(s);
-    const host = url.hostname.toLowerCase().replace(/^www\./, "");
-    // streamtape/fstape get_video: the id is stable, expires/token rotate.
-    if (/^(?:[^/]+\.)?(?:streamtape|fstape)\.com$/i.test(host) && /^\/get_video\/?$/i.test(url.pathname)) {
-      const id = url.searchParams.get("id");
-      if (id) out.push("st:" + id);
-    }
-    // HLS playlists: forget the query so a re-captured master/variant with a
-    // fresh signed token still dedupes against the recorded one.
-    if (/\.m3u8([?#]|$)/i.test(url.pathname)) out.push("hls:" + url.origin + url.pathname);
-    // streamtape CDN: the deep radosgw parent dir is unique per file, so keying
-    // on it catches the resolved tapecontent capture without keying on the tail.
-    if (/(?:^|\.)tapecontent\.net$/i.test(host)) {
-      const p = url.pathname.split("/").filter(Boolean).slice(0, -1).join("/");
-      if (p) out.push("cdn:" + url.origin + "/" + p + "/");
-    }
-  } catch (e) { /* malformed URL: no canonical identity */ }
-  return out;
-}
 
 // JAV tube site navigation pages masquerade as movie slugs (invite-ads, genres,
 // new-releases, dmca, ...). Real sextb/supjav movie pages always carry a numeric
@@ -238,21 +209,32 @@ class DownloadManager {
     this.items = new Map();
     this.active = 0;
     this._id = 0;
-    this.history = [];
     this._pending = [];       // bulk-import URLs waiting to be loaded into items
     this._pendingIdx = 0;     // front-of-queue index (avoids O(n) shift)
     this._queuedIds = new Set(); // ids of items with status="queued" (O(1) pump lookup)
-    this._downloaded = new Set(); // URLs that reached "done" (for duplicate handling)
     this._hostLast = new Map();   // hostname -> last request time (per-host pacing)
     this._paceChains = new Map(); // hostname -> promise chain serializing _paceHost callers
-    this._persistTimer = null;    // debounced writer for history/downloaded.json
     this._speedBytes = 0;
     this._speedStart = Date.now();
     this._connBusy = 0;           // in-flight segmented connections
     this._connWaiters = [];       // semaphore waiters for the global conn cap
-    this._loadHistory();
-    this._loadDownloaded();
+    this.store = new HistoryStore({
+      dir: () => this.dir,
+      saveHistory: () => this.config.saveHistory !== false
+    });
+    this.store.load();
     this._sweepOrphanTempDirs();
+  }
+
+  // History/dedupe state lives in the HistoryStore (lib/history-store.js); the
+  // getter/setter keep `this.history` reads and the ipc clear-history write
+  // working unchanged.
+  get history() {
+    return this.store.history;
+  }
+
+  set history(v) {
+    this.store.history = v;
   }
 
   // Pick the cookie header for a specific request URL. Prefer a live lookup from
@@ -281,38 +263,13 @@ class DownloadManager {
   }
 
   listHistory() {
-    return this.history.map((i) => ({
-      ...i,
-      status: i.status,
-      timestamp: i.timestamp
-    }));
+    return this.store.list();
   }
 
   exportHistory(format = "json") {
-    if (format === "csv") {
-      const csv = [
-        "ID,File,Size,Status,Started,Completed,Duration(s)",
-        ...this.history.map((h) =>
-          [h.id, `"${h.fileName}"`, h.total, h.status,
-           new Date(h.timestamp).toISOString(),
-           h.endTime ? new Date(h.endTime).toISOString() : "",
-           h.endTime ? Math.round((h.endTime - h.timestamp) / 1000) : ""
-          ].join(",")
-        )
-      ];
-      return csv.join("\n");
-    }
-    return JSON.stringify(this.history, null, 2);
+    return format === "csv" ? this.store.exportCSV() : this.store.exportJSON();
   }
 
-  _loadHistory() {
-    try {
-      const data = fs.readFileSync(this.historyPath, "utf8");
-      this.history = JSON.parse(data);
-    } catch (e) {
-      this.history = [];
-    }
-  }
 
   // Remove orphaned segmented/HLS temp dirs (dl-*) left behind when the app was
   // killed mid-run (taskkill /F, crash). Paused state doesn't survive a restart,
@@ -330,32 +287,13 @@ class DownloadManager {
     } catch (e) { /* sweep is best-effort */ }
   }
 
-  _saveHistoryNow() {
-    if (this.config.saveHistory === false) return; // history persistence toggle
-    try {
-      fsp.writeFile(this.historyPath, JSON.stringify(this.history), "utf8").catch(() => {});
-    } catch (e) { /* ignore */ }
-  }
 
-  _saveDownloadedNow() {
-    try {
-      fsp.writeFile(this.downloadedPath, JSON.stringify(Array.from(this._downloaded)), "utf8").catch(() => {});
-    } catch (e) { /* ignore */ }
-  }
 
   // Debounced persistence: coalesce the many per-completion history/downloaded
   // writes during a bulk run into one disk write every ~500ms.
-  _persistSoon() {
-    if (this._persistTimer) return;
-    this._persistTimer = setTimeout(() => {
-      this._persistTimer = null;
-      this._saveHistoryNow();
-      this._saveDownloadedNow();
-    }, 500);
-  }
 
   _saveHistory() {
-    this._persistSoon();
+    this.store.saveSoon();
   }
 
   getBandwidthStats() {
@@ -432,54 +370,19 @@ class DownloadManager {
     return this.dir;
   }
 
-  get historyPath() {
-    return path.join(this.dir, "history.json");
-  }
 
-  get downloadedPath() {
-    return path.join(this.dir, "downloaded.json");
-  }
 
-  _loadDownloaded() {
-    try {
-      const data = JSON.parse(fs.readFileSync(this.downloadedPath, "utf8"));
-      if (Array.isArray(data)) this._downloaded = new Set(data);
-    } catch (e) {
-      this._downloaded = new Set();
-    }
-  }
 
-  _saveDownloaded() {
-    this._persistSoon();
-  }
 
   // Write any pending history/downloaded changes immediately (e.g. on quit).
   // Synchronous so a graceful quit deterministically persists the latest
   // state before teardown (a pending debounce timer otherwise loses <500ms).
   flush() {
-    if (this._persistTimer) { clearTimeout(this._persistTimer); this._persistTimer = null; }
-    try {
-      if (this.config.saveHistory !== false) {
-        fs.writeFileSync(this.historyPath, JSON.stringify(this.history), "utf8");
-      }
-    } catch (e) { /* ignore */ }
-    try {
-      fs.writeFileSync(this.downloadedPath, JSON.stringify(Array.from(this._downloaded)), "utf8");
-    } catch (e) { /* ignore */ }
+    this.store.flushSync();
   }
 
   isDownloaded(url) {
-    const u = String(url || "");
-    if (this._downloaded.has(u)) return true;
-    for (const k of canonicalKeys(u)) {
-      if (this._downloaded.has(k)) return true;
-    }
-    // Redundant quality variant: once its master playlist is recorded as
-    // downloaded, a later <N>p/video.m3u8 capture of the SAME stream is a dup.
-    for (const c of matchHlsMaster(u)) {
-      if (this._downloaded.has(c)) return true;
-    }
-    return false;
+    return this.store.isDownloaded(url);
   }
 
   // True when a family master playlist for `url` is currently queued/running
@@ -494,10 +397,7 @@ class DownloadManager {
   }
 
   _markDownloaded(url) {
-    const u = String(url || "");
-    this._downloaded.add(u);
-    for (const k of canonicalKeys(u)) this._downloaded.add(k);
-    this._saveDownloaded();
+    this.store.markDownloaded(url);
   }
 
   // A real (non-stub) file already sits on disk under the name a download of
@@ -543,10 +443,7 @@ class DownloadManager {
       endTime: Date.now(),
       _samples: item._samples.slice(-120)
     };
-    this.history.push(histEntry);
-    const cap = this.config.maxHistory || 500;
-    if (this.history.length > cap) this.history = this.history.slice(-cap);
-    this._saveHistory();
+    this.store.push(histEntry, this.config.maxHistory || 500);
     this._queuedIds.delete(item.id);
     this.items.delete(item.id);
     if (item.tempDir) fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
