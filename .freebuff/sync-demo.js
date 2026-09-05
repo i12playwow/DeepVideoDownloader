@@ -164,8 +164,72 @@ function shimBehaviors() {
     };
   })();
 }
+// Drive the REAL app modules (downloader.js DownloadManager.resume, proxy.js
+// ProxyManager.pickBest) headlessly, so the selftest guards the app itself
+// rather than only the demo shim. Both are plain CommonJS with npm deps only.
+function appGuards() {
+  const os = require("os");
+  const { DownloadManager } = require(path.join(ROOT, "downloader.js"));
+  const { ProxyManager } = require(path.join(ROOT, "proxy.js"));
 
+  // DownloadManager.resume per state. A fresh temp download dir keeps the
+  // constructor's history/downloaded loads on an empty tree; pump and
+  // checkScheduled are stubbed so resume never starts real downloads.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deepgrab-selftest-"));
+  const dm = new DownloadManager({
+    config: { downloadDir: dir, saveHistory: false },
+    proxyManager: null,
+    onUpdate: () => {}
+  });
+  dm.pump = () => {};
+  dm.checkScheduled = () => {};
+  const states = ["paused", "error", "scheduled", "queued", "running", "done", "duplicate", "cancelled"];
+  const resume = {};
+  for (const st of states) {
+    // public() exists on real items; emit(item) calls it (onUpdate is a no-op).
+    const item = { id: st, status: st, public: function () { return this; } };
+    if (st === "error") item.error = "stale";
+    dm.items.set(st, item);
+    dm.resume(st);
+    resume[st] = item.status;
+  }
+  // an error resume must also clear the error and re-arm the queue pump
+  const errItem = dm.items.get("error");
+  const errorCleared = errItem.error === "" && dm._queuedIds.has("error") && errItem.speed === 0;
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* best effort */ }
 
+  // ProxyManager.pickBest per rule class, latency stubbed so no network is
+  // touched: the dead rule proxy exercises the fall-back-to-pool branch.
+  const pm = new (class extends ProxyManager {
+    constructor() {
+      super({
+        proxies: ["http://127.0.0.1:7890", "socks5://127.0.0.1:1080"],
+        proxyRules: [
+          { host: "supjav.com", proxy: "http://127.0.0.1:7890" },
+          { host: "*.mayzaent.com", proxy: "socks5://127.0.0.1:1080" },
+          { host: "go.mnaspm.com", proxy: "direct" },
+          { host: "dead.example.com", proxy: "http://127.0.0.1:9999" }
+        ],
+        ua: "DeepGrab-selftest"
+      });
+    }
+    testLatency(p) { return Promise.resolve(p.url.includes("9999") ? null : { ms: 1, status: 200 }); }
+  })();
+  const pick = async (url) => {
+    const p = await pm.pickBest(url, 100);
+    return p ? p.url.replace(/\/$/, "") : null; // URL.href adds a trailing slash
+  };
+  return (async () => {
+    const proxy = {
+      exact: await pick("https://supjav.com/452555.html"),
+      wildcard: await pick("https://cdn2.mayzaent.com/p.mp4"),
+      directRule: await pick("https://go.mnaspm.com/p.mp4"),
+      deadRule: await pick("https://dead.example.com/p.mp4"),
+      noRule: await pick("https://example.com/p.mp4")
+    };
+    return { resume, errorCleared, proxy };
+  })();
+}
 function neededMethods(src) {
   const called = new Set();
   for (const m of src.matchAll(/window\.api\.([A-Za-z_$][\w$]*)/g)) called.add(m[1]);
@@ -430,6 +494,19 @@ async function selfTest() {
       directRule: "direct", noRule: "http://127.0.0.1:7890", autoProxyOff: "direct" };
     check("shim proxyFor per class", beh.proxy, wantProxy,
       !!beh.proxy && JSON.stringify(beh.proxy) === JSON.stringify(wantProxy));
+    // real app guard contracts (not the shim): DownloadManager.resume
+    // transitions only paused/error/scheduled -> queued (pump starts them),
+    // rejects terminal/active states; ProxyManager.pickBest honors per-host
+    // rules with pool fallback. These assert the app code itself.
+    const app = await appGuards();
+    const wantAppResume = { paused: "queued", error: "queued", scheduled: "queued", queued: "queued",
+      running: "running", done: "done", duplicate: "duplicate", cancelled: "cancelled" };
+    check("app resume per state (real DownloadManager)", app.resume, wantAppResume,
+      !!app.resume && JSON.stringify(app.resume) === JSON.stringify(wantAppResume) && app.errorCleared === true);
+    const wantAppProxy = { exact: "http://127.0.0.1:7890", wildcard: "socks5://127.0.0.1:1080",
+      directRule: null, deadRule: "http://127.0.0.1:7890", noRule: "http://127.0.0.1:7890" };
+    check("app pickBest per class (real ProxyManager)", app.proxy, wantAppProxy,
+      !!app.proxy && JSON.stringify(app.proxy) === JSON.stringify(wantAppProxy));
   } else {
     skipped++;
     console.error("selftest: skipping shim-method assertions (" + SHIM_JS + " not present)");
