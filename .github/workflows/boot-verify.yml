@@ -44,6 +44,9 @@ jobs:
       - name: Install dependencies (with Electron binary)
         run: npm ci
 
+      - name: Install electron binary (postinstall blocked on maintainer machine)
+        run: node node_modules/electron/install.js
+
       - name: Run boot drill
         run: npm run boot-verify
 
