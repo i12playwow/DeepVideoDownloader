@@ -186,7 +186,7 @@ function render() {
   const total = displayItems.length;
 
   if (!total) {
-    tbody.innerHTML = `<tr id="emptyRow"><td class="empty" colspan="9">No downloads yet. Find an MP4 in the browser and it will appear here.</td></tr>`;
+    tbody.innerHTML = `<tr id="emptyRow"><td class="empty" colspan="9">${searchQuery ? "No downloads match your filter." : "No downloads yet. Find an MP4 in the browser and it will appear here."}</td></tr>`;
     updateBatchBar();
     updateSummary();
     return;
