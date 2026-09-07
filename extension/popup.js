@@ -1,4 +1,5 @@
 const statusEl = document.getElementById("status");
+const feedbackEl = document.getElementById("feedback");
 const rescanBtn = document.getElementById("rescan");
 const urlInput = document.getElementById("url");
 const sendBtn = document.getElementById("send");
@@ -11,6 +12,18 @@ let found = []; // {url, title, pageUrl, kind, size, mime, added, error}
 function setStatus(s) {
   statusEl.textContent = s;
   statusEl.className = s;
+}
+
+// Operation feedback (Send / Add / Send all). The status pill is reserved for
+// the WS link state — an operation rejection (Desktop app offline, unsupported
+// URL, pace limit) must never masquerade as a link failure, so the real reason
+// from the reply is surfaced here instead.
+let feedbackTimer = 0;
+function showFeedback(text, isError) {
+  clearTimeout(feedbackTimer);
+  feedbackEl.textContent = text || "";
+  feedbackEl.className = text ? (isError ? "fb-err" : "fb-ok") : "";
+  if (text) feedbackTimer = setTimeout(() => { feedbackEl.textContent = ""; feedbackEl.className = ""; }, 5000);
 }
 
 function fmtSize(b) {
@@ -89,7 +102,8 @@ function foundItem(v) {
     btn.textContent = "…";
     chrome.runtime.sendMessage({ type: "add-to-list", url: v.url, title: v.title || "", pageUrl: v.pageUrl || "" }, (r) => {
       if (r && r.ok) { v.added = true; renderFound(); }
-      else { btn.disabled = false; btn.textContent = "+ Add"; setStatus("disconnected"); }
+      else if (r) { btn.disabled = false; btn.textContent = "+ Add"; showFeedback("✕ " + (r.error || "Could not add"), true); }
+      else { btn.disabled = false; btn.textContent = "+ Add"; refreshStatus(); } // no SW reply — show the true link state
     });
   });
   li.appendChild(btn);
@@ -103,7 +117,9 @@ addAllBtn.addEventListener("click", () => {
   addAllBtn.textContent = "Sending…";
   chrome.runtime.sendMessage({ type: "add-all-found", urls }, (r) => {
     loadFound();
-    setStatus(r && r.ok ? "connected" : "disconnected");
+    if (r && r.ok) { showFeedback("Sent " + r.added + " of " + r.total + " to desktop ✓", false); }
+    else if (r) { showFeedback("✕ " + (r.error || "Nothing sent"), true); }
+    else { refreshStatus(); } // no SW reply — show the true link state
   });
 });
 
@@ -115,10 +131,14 @@ sendBtn.addEventListener("click", () => {
     sendBtn.disabled = false;
     if (r && r.ok) {
       urlInput.value = "";
-      setStatus("connected");
+      showFeedback("Sent to desktop app ✓", false);
       loadFound();
+    } else if (r) {
+      // The app answered and refused — surface the real reason; do NOT flip the
+      // status pill, which reflects the WS link, not the operation's outcome.
+      showFeedback("✕ " + (r.error || "Not sent"), true);
     } else {
-      setStatus("disconnected");
+      refreshStatus(); // no reply at all — show the true link state
     }
   });
 });

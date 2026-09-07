@@ -14,6 +14,9 @@
     input:focus { border-color: #3b82f6; }
     button { width: 100%; background: #3b82f6; color: #fff; border: none; border-radius: 6px; padding: 8px; font-weight: 600; cursor: pointer; }
     button:hover { background: #2563eb; }
+    #feedback { min-height: 16px; margin: 2px 0 8px; font-size: 11px; line-height: 1.4; }
+    #feedback.fb-ok { color: #22c55e; }
+    #feedback.fb-err { color: #f87171; }
     #rescan { margin-bottom: 10px; background: #1e293b; color: #cbd5e1; }
     #rescan:hover { background: #334155; }
     #rescan:disabled { background: #334155; color: #64748b; cursor: default; }
@@ -47,6 +50,7 @@
   <label for="url">Video / MP4 URL</label>
   <input id="url" type="text" placeholder="https://…/video.mp4" autofocus>
   <button id="send">Send to desktop app</button>
+  <div id="feedback"></div>
   <button id="monitor" class="monitor-off" title="When on, every video the extension finds is sent to the desktop app automatically — no per-item clicks.">Auto monitor: OFF</button>
   <div id="found-wrap">
     <h2>Found videos</h2>
