@@ -127,3 +127,9 @@
 ## Do NOT
 - Add code comments unless explicitly asked.
 - Revert the built-in browser to `<webview>` (the 1/5 sizing bug).
+
+## Release checklist — confirm a green boot-verify drill before ANY 1.3.x dist build
+Before bumping the version or running `npm run dist`, a green real-app drill is MANDATORY — `npm test` and `npm run check` are static/offline gates and do not boot the app. A drill run is green when it is **8/8 checks, exit 0**. Two acceptable ways to get one (either counts):
+1. **Local (fastest):** `npm run boot-verify` from a clean tree (no `config.json`; the script aborts if port 8766 is busy or `config.json` exists without `--force`). Takes ~5–6 min: boot/WS hello on isolated port 8766, byte-exact download, schedule-window gating (runtime-derived closed window), site-rule bypass + folder override, auto-retry timing, cap exhaustion, CDP-driven budget reset, fair per-host pump. The prod app on 8765 is never touched; the sandbox is cleaned up on success.
+2. **CI:** dispatch **Actions → boot-verify (optional) → Run workflow → master** (or `POST /actions/workflows/boot-verify.yml/dispatches {"ref":"master"}`). Watch it through to `success` — a skipped/locked run (e.g. the account billing lock seen on run 34074382106) does NOT count as green.
+If the drill fails on a release candidate, treat it as a release blocker: download the CI `boot-verify-sandbox` artifact (or keep the local `scripts/bv-*` sandbox with `--keep`) and fix the engine before shipping — do not re-run until green. Record the run (local output or CI run URL) in the release notes for that 1.3.x version.
