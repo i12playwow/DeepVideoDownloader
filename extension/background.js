@@ -598,6 +598,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       })();
       return true;
 
+    case "dv-rescan":
+      // Popup's Re-scan button. The tab's content script runs its scanners and
+      // reports the videos it holds on this page; ingest that report into the
+      // canonical `found` list (dedupe by url), then answer with the SW's own
+      // count so the button feedback and the panel list can never diverge.
+      (async () => {
+        const tabId = msg.tabId;
+        let r = null;
+        if (tabId) {
+          try { r = await chrome.tabs.sendMessage(tabId, { type: "dv-rescan" }); }
+          catch (e) { r = null; }
+        }
+        if (!r || !r.ok) {
+          try { sendResponse({ ok: false, error: "Page has no Deep Grab content script" }); } catch (e) {}
+          return;
+        }
+        if (Array.isArray(r.videos)) {
+          for (const v of r.videos) {
+            if (!v || !v.url) continue;
+            addFound({
+              url: v.url,
+              title: v.title || "",
+              pageUrl: v.pageUrl || "",
+              kind: v.kind === "m3u8" ? "m3u8" : "mp4",
+              tabId
+            });
+          }
+        }
+        try { sendResponse({ ok: true, count: found.length }); } catch (e) {}
+      })();
+      return true;
+
     case "dv-monitor-get":
       sendResponse({ on: autoGrab });
       break;
@@ -686,11 +718,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 chrome.runtime.onInstalled.addListener(() => { connect(); });
 chrome.runtime.onStartup.addListener(() => { connect(); });
-
-// Toolbar icon: re-scan the active tab's page (content.js answers "dv-rescan").
-chrome.action.onClicked.addListener((tab) => {
-  if (tab && tab.id > 0) chrome.tabs.sendMessage(tab.id, { type: "dv-rescan" }).catch(() => {});
-});
 
 connect();
 loadPersisted();

@@ -37,6 +37,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Preflight drill port 8766 (buffy-runner shares this machine)
+        # Fail near-instantly when a local task-2 sandbox / dev app holds the
+        # drill port, instead of after npm ci with a bare "port in use" (the
+        # npm run boot-verify abort also names the holder; see its
+        # describePortHolder()). 8766 is NOT auto-reassigned: a silent port
+        # change could mask a wedged sandbox app.
+        run: |
+          node -e "const net=require('net'),cp=require('child_process');const s=net.connect({host:'127.0.0.1',port:8766});s.on('connect',()=>{s.destroy();let pid='';try{const o=cp.execSync('netstat -ano',{encoding:'utf8'});for(const l of o.split(/\r?\n/)){if(l.includes('127.0.0.1:8766')&&l.includes('LISTENING')){const m=/\s([0-9]+)\s*$/.exec(l);if(m){pid=m[1];break}}}}catch(e){}console.error('ABORT port 8766 is busy (pid '+(pid||'?')+') - a local sandbox/dev app holds the drill port on buffy-runner. Kill it (taskkill //PID '+(pid||'<pid>')+' //T //F) and re-dispatch.');process.exit(1)});s.on('error',()=>{});"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
