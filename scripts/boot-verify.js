@@ -1,4 +1,3 @@
-// boot-verify.js — repeatable real-app boot drill for the 1.3.10
 // download/automation batch (run via: npm run boot-verify). Writes the sandbox config.json, launches the
 // real Electron app (isolated port 8766 + temp dirs; prod app on 8765 is
 // never touched), then drives three WS phases against the live app and
@@ -11,6 +10,8 @@
 //   D cap exhaustion — with autoRetryMax 2 the item requeues at +60s for
 //                     each capped cycle, then terminal error with the
 //                     "Auto-retry exhausted after 2 cycles" message + category
+//   F fair pump      — 3 stalled downloads on host A + 2 on host B: A runs
+//                     exactly 2 (per-host cap), B runs both (no starvation)
 //   E budget reset   — a CDP-driven manual window.api.retry(id) on the
 //                     exhausted item gives a fresh budget: re-run, re-arm,
 //                     requeue ~+60s (observed passively by item id)
@@ -42,6 +43,8 @@ const dl2Dir = path.join(sandbox, "dl2");
 const udDir = path.join(sandbox, "ud");
 const appLog = path.join(sandbox, "app.log");
 const appErr = path.join(sandbox, "app.log.err");
+
+
 
 let fixture;
 let appPid = null;
@@ -82,6 +85,45 @@ function startFixture() {
     fixture.listen(0, "127.0.0.1", () => resolve(fixture.address().port));
   });
 }
+
+// Three loopback aliases give three distinct URL hosts on one machine
+
+// Two ready-made loopback hosts - 127.0.0.1 (IPv4) and [::1] (IPv6) - give the
+// fairness drill distinct URL hosts with zero setup (works on CI too).
+let fixA = null, fixB = null; // { host, port, server }
+async function startFairFixture(mp4) {
+  const serve = (req, res) => {
+    const p = req.url.split("?")[0];
+    if (p.startsWith("/v/stall") && !req.headers.range) {
+      // Real (fresh) GET: send 2 bytes then hold the rest for ~44s so the
+      // transfer is provably still running during the observation window.
+      res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": mp4.length, "Accept-Ranges": "bytes" });
+      res.write(mp4.subarray(0, 2));
+      const finish = () => { try { res.end(mp4.subarray(2)); } catch (e) {} };
+      setTimeout(finish, 44000);
+      req.on("close", () => { try { res.destroy(); } catch (e) {} });
+      return;
+    }
+    const m = /bytes=([0-9]+)-([0-9]*)/.exec(req.headers.range || "");
+    if (m) {
+      const start = parseInt(m[1], 10);
+      const end = m[2] ? parseInt(m[2], 10) : mp4.length - 1;
+      res.writeHead(206, { "Content-Type": "video/mp4", "Content-Range": "bytes " + start + "-" + end + "/" + mp4.length, "Content-Length": end - start + 1, "Accept-Ranges": "bytes" });
+      res.end(mp4.subarray(start, end + 1));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": mp4.length, "Accept-Ranges": "bytes" });
+    res.end(mp4);
+  };
+  const listen = (host) => new Promise((resolve, reject) => {
+    const s = http.createServer(serve);
+    s.on("error", reject);
+    s.listen(0, host, () => resolve({ host, port: s.address().port, server: s }));
+  });
+  const [a, b] = await Promise.all([listen("127.0.0.1"), listen("::1")]);
+  fixA = a; fixB = b;
+}
+function stopFairFixture() { for (const x of [fixA, fixB]) { try { x && x.server.close(); } catch (e) {} } }
 
 function writeConfig(patch) {
   const base = {
@@ -341,6 +383,80 @@ async function phaseE(port, itemId) {
   pass("E budget reset", "manual retry -> re-run -> re-armed -> requeue ~+60s (" + seq() + ")");
 }
 
+// Phase F: fair per-host concurrency pump. Enqueue 2 downloads on each of
+// three distinct hosts at once, with one deliberately stalled transfer per
+// host (stalls end at ~44s). Assert every host got up to its share while
+// stalls held, no host ever starved: every host's second item is running
+// within 10s of enqueue ( HOST_CAP=2 per host, global concurrency 8 ).
+// Phase F: fair per-host concurrency pump. Enqueue 2 downloads on each of
+// up to three distinct hosts at once, with one deliberately stalled transfer
+// per host (stalls end at ~44s). While the stalls hold, every host must have
+// BOTH its items running (HOST_CAP=2 per host, global concurrency 8) - no
+// host starves behind another host's bulk. On alias-less fallback (single
+// host), only the weaker "every item ran" assertion is meaningful.
+// Phase F: fair per-host concurrency pump. Two distinct URL hosts (127.0.0.1
+// and [::1], zero setup): enqueue 3 stalled downloads on A + 2 on B at once.
+// With HOST_CAP=2 per host and global concurrency 8, fairness means: host A
+// runs EXACTLY 2 while stalls hold (never 3 - the cap holds), and host B runs
+// both of its items (no starvation behind A's bulk). Stall ends at ~44s.
+// Phase F: fair per-host concurrency pump. Two distinct URL hosts (127.0.0.1
+// and [::1], zero setup): 3 stalled downloads on A + 2 on B, each a distinct
+// path (the engine's chain-dup guard collapses identical queued/running URLs).
+// With HOST_CAP=2 per host and global concurrency 8, fairness means: host A
+// runs EXACTLY 2 while stalls hold (never 3 - the cap holds), and host B runs
+// both of its items (no starvation behind A's bulk). Stalls end at ~44s.
+async function phaseF() {
+  console.log("--- Phase F: fair per-host concurrency (no starvation) ---");
+  // Global concurrency must exceed 4 or the GLOBAL cap (not the per-host cap)
+  // becomes the binding constraint and B starves legitimately.
+  writeConfig({ concurrency: 8 });
+  await sleep(3500); // watcher applies the edit
+  const urlA = (p) => "http://127.0.0.1:" + fixA.port + p;
+  const urlB = (p) => "http://[::1]:" + fixB.port + p;
+  const aUrls = [urlA("/v/stall-1.mp4"), urlA("/v/stall-2.mp4"), urlA("/v/stall-3.mp4")];
+  const bUrls = [urlB("/v/stall-4.mp4"), urlB("/v/stall-5.mp4")];
+  const urls = aUrls.concat(bUrls);
+  const byId = new Map();     // id -> url
+  const firstRunAt = new Map(); // id -> seconds of first running
+  const lastStatus = new Map(); // id -> last status seen (stalled transfers go silent)
+  const states = [];
+  const t0 = Date.now();
+  const obs = new WebSocket("ws://127.0.0.1:" + WS_PORT);
+  obs.on("message", (d) => {
+    const m = JSON.parse(d.toString());
+    if (m.type !== "status") return;
+    const sec = Math.round((Date.now() - t0) / 1000);
+    if (!byId.has(m.id)) byId.set(m.id, String(m.url));
+    if (m.status === "running" && !firstRunAt.has(m.id)) firstRunAt.set(m.id, sec);
+    lastStatus.set(m.id, m.status);
+    states.push(sec + " " + String(m.url || "").replace("http://", "").replace("http://[::1]:", "[::1]:") + " -> " + m.status);
+  });
+  obs.on("error", () => {});
+  await sleep(700);
+  const send = (url, title) => new Promise((resolve) => {
+    const w = new WebSocket("ws://127.0.0.1:" + WS_PORT);
+    w.on("open", () => w.send(JSON.stringify({ type: "download", url, title })));
+    w.on("message", (d) => { const m = JSON.parse(d.toString()); if (m.type === "accepted") { try { w.close(); } catch (e) {} resolve(m.id); } });
+    w.on("error", () => resolve(null));
+  });
+  const ids = [];
+  for (let i = 0; i < urls.length; i++) ids.push(await send(urls[i], "bv-f-" + i));
+  if (ids.some((x) => !x)) { try { obs.close(); } catch (e) {} return fail("F enqueued", "an enqueue was not accepted"); }
+  // Stalls hold until ~44s; observe at ~35s while everything is stuck
+  await sleep(35000);
+  try { obs.close(); } catch (e) {}
+  const seq = states.join("; ");
+  const stillRunning = (list) => list.filter((u) => {
+    const id = ids.find((x) => byId.get(x) === u);
+    return id && firstRunAt.has(id) && firstRunAt.get(id) <= 15 && lastStatus.get(id) === "running";
+  }).length;
+  const aCount = stillRunning(aUrls);
+  const bCount = stillRunning(bUrls);
+  if (aCount !== 2) return fail("F host cap holds on A", "A still running at 35s: " + aCount + " (need exactly 2): " + seq);
+  if (bCount !== 2) return fail("F no starvation on B", "B still running at 35s: " + bCount + " (need exactly 2): " + seq);
+  pass("F fair pump", "A stalled x3 -> exactly 2 running (cap holds); B x2 -> 2 running (no starvation); observed at t+35s");
+}
+
 async function main() {
   if (!fs.existsSync(ELECTRON)) { console.log("ABORT electron not found: " + ELECTRON); process.exit(1); }
   const busy = await new Promise((resolve) => {
@@ -359,6 +475,7 @@ async function main() {
     fs.copyFileSync(CONFIG_PATH, configBackup);
   }
   const port = await startFixture();
+  await startFairFixture(MP4);
   writeConfig({});
   console.log("sandbox: " + sandbox + "\nfixture on 127.0.0.1:" + port);
   launchApp();
@@ -373,6 +490,7 @@ async function main() {
     await phaseC(port);
     await phaseD(port);
     await phaseE(port, lastExhaustedId);
+    await phaseF();
   } catch (e) {
     fail("uncaught", (e && e.stack) || String(e));
   }
@@ -381,6 +499,7 @@ async function main() {
 
 main().then(async (code) => {
   killApp();
+  stopFairFixture();
   try { if (fixture) fixture.close(); } catch (e) { /* ignore */ }
   if (configBackup) {
     try { fs.copyFileSync(configBackup, CONFIG_PATH); fs.unlinkSync(configBackup); } catch (e) { /* ignore */ }
