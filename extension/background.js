@@ -282,15 +282,37 @@ function sendToDesktop(url, title, referer) {
       resolve({ ok: false, error: "Unsupported URL" });
       return;
     }
-    const state = ws ? ws.readyState : -1;
-    if (state !== WebSocket.OPEN && state !== WebSocket.CONNECTING) {
-      // SW wake or dropped socket: start (re)connecting instead of failing fast
-      connect();
+    const finishSend = (ref) => {
+      const state = ws ? ws.readyState : -1;
+      if (state !== WebSocket.OPEN && state !== WebSocket.CONNECTING) {
+        // SW wake or dropped socket: start (re)connecting instead of failing fast
+        connect();
+      }
+      waitForOpen(6000).then((opened) => {
+        if (!opened) { resolve({ ok: false, error: "Desktop app offline" }); return; }
+        sendInner(resolve, url, title, ref);
+      });
+    };
+    if (!referer) {
+      // The capture path persists the entry first and backfills pageUrl from
+      // chrome.tabs.get afterwards — an MV3 SW eviction can kill the worker
+      // between the two, leaving pageUrl "" in storage forever. The desktop
+      // item then carries referer "" and the app skips its dv-close-tab
+      // auto-close relay, so resolve the referer from the live tab at SEND
+      // time (the SW is guaranteed alive here) and persist it.
+      const entry = found.find((x) => x.url === url);
+      if (entry && entry.tabId > 0) {
+        chrome.tabs.get(entry.tabId).then((tab) => {
+          if (tab && tab.url) {
+            referer = tab.url;
+            if (!entry.pageUrl) { entry.pageUrl = tab.url; persist(); broadcastFound(); }
+          }
+          finishSend(referer);
+        }).catch(() => finishSend(referer));
+        return;
+      }
     }
-    waitForOpen(6000).then((opened) => {
-      if (!opened) { resolve({ ok: false, error: "Desktop app offline" }); return; }
-      sendInner(resolve, url, title, referer);
-    });
+    finishSend(referer);
   });
 }
 

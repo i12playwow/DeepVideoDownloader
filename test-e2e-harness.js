@@ -967,6 +967,89 @@ function startServer(portRef, segBytesFn) {
   const negResB7 = await dB7.rescan();
   assert("P7 NEGATIVE: content-length reply yields count 2 (guard bites)", negResB7 && negResB7.count === 2, "reply=" + JSON.stringify(negResB7));
 
+  // ---- P8: send-time pageUrl survival across an MV3 SW eviction ----
+  // The webRequest capture path persists the found entry FIRST and backfills
+  // pageUrl from chrome.tabs.get afterwards; an MV3 eviction can kill the
+  // service worker between the two, so the persisted entry keeps pageUrl ""
+  // forever. A harvest then sends referer "" to the desktop app, which skips
+  // its dv-close-tab auto-close relay (the auto-close-movies-tab F5 FAIL). The
+  // SW must resolve referer from the LIVE tab at send time (it is guaranteed
+  // alive there) and persist the resolved pageUrl back into the entry.
+  console.log("-- P8: send-time pageUrl survival (SW-death race) --");
+  const fs8 = require("fs");
+  const bgSrc8 = fs8.readFileSync("extension/background.js", "utf8").replace(/\r\n/g, "\n");
+  const neg8 = bgSrc8.replace(/    if \(!referer\) \{[\s\S]*?\n    \}\n    finishSend\(referer\);/, "    finishSend(referer);");
+  assert("P8 negative source strips only the send-time resolution", neg8 !== bgSrc8 && !neg8.includes("if (!referer) {"), "strip failed");
+  const runHarvest8 = async (bgSource) => {
+    let listener = null;
+    let wreq = null;
+    let allowGet = false;
+    const downloads = [];
+    const persisted = [];
+    const TAB = "http://127.0.0.1:9/movies/close-me/";
+    const wsInstance = {
+      readyState: 1, // WebSocket.OPEN
+      _msg: [],
+      onmessage: null,
+      addEventListener(type, cb) { (this._msg[type] = this._msg[type] || []).push(cb); },
+      removeEventListener() {},
+      send(data) {
+        let m; try { m = JSON.parse(data); } catch (e) { return; }
+        if (m.type === "download") downloads.push(m);
+      },
+      close() {},
+    };
+    const chrome8 = {
+      storage: { local: { get() { return Promise.resolve({}); }, set(obj) { persisted.push(JSON.stringify(obj)); return Promise.resolve(); } } },
+      runtime: {
+        sendMessage() { return Promise.resolve(); },
+        onMessage: { addListener(fn) { listener = fn; } },
+        onInstalled: { addListener() {} },
+        onStartup: { addListener() {} },
+      },
+      action: { onClicked: { addListener() {} } },
+      tabs: {
+        onRemoved: { addListener() {} },
+        // While the SW is "dead" (before the harvest) every tabs.get hangs —
+        // the capture-time pageUrl backfill is exactly the call an MV3 eviction
+        // kills mid-flight. At harvest/send time the SW is alive and resolves.
+        get() {
+          if (!allowGet) return new Promise(() => {});
+          return Promise.resolve({ id: 7, url: TAB, title: "close-me" });
+        },
+      },
+      tabGroups: {}, windows: {},
+      cookies: { getAll() { return Promise.resolve([]); } },
+      webRequest: { onBeforeRequest: { addListener(fn) { wreq = fn; } }, onHeadersReceived: { addListener() {} } },
+    };
+    function WsStub8() { return wsInstance; }
+    WsStub8.OPEN = 1; WsStub8.CONNECTING = 0; WsStub8.CLOSING = 2; WsStub8.CLOSED = 3;
+    WsStub8.prototype.addEventListener = function () {};
+    WsStub8.prototype.removeEventListener = function () {};
+    new Function("chrome", "WebSocket", "self", "console", bgSource + "\n;return true;")(chrome8, WsStub8, {}, console);
+    if (!wreq) throw new Error("P8 webRequest listener not captured");
+    if (!wsInstance.onmessage) throw new Error("P8 ws.onmessage not wired");
+    // webRequest capture of the tab's video: addFound persists pageUrl "" and
+    // the capture-time tabs.get backfill hangs (the eviction under test).
+    wreq({ url: "http://127.0.0.1:9/v/mov-close-me.mp4", tabId: 7, type: "media" });
+    await new Promise((r) => setTimeout(r, 50));
+    allowGet = true; // the SW is alive at harvest/send time
+    // the desktop app drives the harvest over the WS (dv-monitor-grab)
+    wsInstance.onmessage({ data: JSON.stringify({ type: "dv-monitor-grab" }) });
+    await waitForCondition(() => downloads.length >= 1, 2000);
+    return { downloads, persisted };
+  };
+  const pos8 = await runHarvest8(bgSrc8);
+  const dl8 = pos8.downloads.find((m) => m.type === "download");
+  assert("P8 harvest sends referer resolved from the live tab (not \"\")",
+    dl8 && dl8.referer === "http://127.0.0.1:9/movies/close-me/", "referer=" + JSON.stringify(dl8 && dl8.referer));
+  assert("P8 resolved pageUrl persisted back into the found entry",
+    pos8.persisted.length > 0 && pos8.persisted[pos8.persisted.length - 1].includes('"pageUrl":"http://127.0.0.1:9/movies/close-me/"'), "not persisted");
+  const negRes8 = await runHarvest8(neg8);
+  const dlNeg8 = negRes8.downloads.find((m) => m.type === "download");
+  assert("P8 NEGATIVE: send-time resolution stripped -> referer \"\" (guard bites)",
+    dlNeg8 && dlNeg8.referer === "", "referer=" + JSON.stringify(dlNeg8 && dlNeg8.referer));
+
   // ---- P5: preload / renderer IPC contract ----
   // Every window.api.<method> a renderer file calls must exist in the preload
   // it runs under, and every ipc channel a preload touches must have an ipcMain
