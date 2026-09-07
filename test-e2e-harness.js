@@ -819,6 +819,65 @@ function startServer(portRef, segBytesFn) {
     }
   }
 
+  // ---- P6: popup Send message contract ----
+  // popup.js's Send button dispatches {type:"send", url, title, referer} to the
+  // background SW. The SW MUST reply through grabUrl; a future edit that removes
+  // the "send" case leaves the callback undefined and the popup falsely shows
+  // "disconnected" — the exact defect this guards.
+  console.log("-- P6: background.js send-case contract --");
+  const fs6 = require("fs");
+  const bgSrc6 = fs6.readFileSync("extension/background.js", "utf8");
+  assert("P6 background.js has a send case", bgSrc6.includes('case "send":'), "missing");
+  const neg6 = bgSrc6.replace(/\n    case "send":[\s\S]*?\n      return true;/, "");
+  assert("P6 negative source strips only the send case", neg6 !== bgSrc6 && !neg6.includes('case "send":'), "strip failed");
+  const runSend6 = (bgSource) => {
+    let listener = null;
+    const wsInstance = {
+      readyState: 1, // WebSocket.OPEN
+      _msg: [],
+      addEventListener(type, cb) { (this._msg[type] = this._msg[type] || []).push(cb); },
+      removeEventListener() {},
+      send(data) {
+        // act like the desktop app: ack the download request immediately
+        let m; try { m = JSON.parse(data); } catch (e) { return; }
+        if (m.type === "download") {
+          const reply = JSON.stringify({ type: "accepted", url: m.url, id: "P6-test" });
+          for (const cb of this._msg.message || []) cb({ data: reply });
+        }
+      },
+      close() {},
+    };
+    const chrome6 = {
+      storage: { local: { get() {}, set() { return Promise.resolve(); } } },
+      runtime: {
+        sendMessage() { return Promise.resolve(); },
+        onMessage: { addListener(fn) { listener = fn; } },
+        onInstalled: { addListener() {} },
+        onStartup: { addListener() {} },
+      },
+      action: { onClicked: { addListener() {} } },
+      tabs: { onRemoved: { addListener() {} } },
+      tabGroups: {}, windows: {},
+      cookies: { getAll() { return Promise.resolve([]); } },
+      webRequest: { onBeforeRequest: { addListener() {} }, onHeadersReceived: { addListener() {} } },
+    };
+    function WsStub6() { return wsInstance; }
+    WsStub6.OPEN = 1; WsStub6.CONNECTING = 0; WsStub6.CLOSING = 2; WsStub6.CLOSED = 3;
+    WsStub6.prototype.addEventListener = function () {};
+    WsStub6.prototype.removeEventListener = function () {};
+    new Function("chrome", "WebSocket", "self", "console", bgSource + "\n;return true;")(chrome6, WsStub6, {}, console);
+    if (!listener) throw new Error("P6 listener not captured");
+    return Promise.race([
+      new Promise((resolve) => {
+        listener({ type: "send", url: "http://127.0.0.1:9/x.mp4", title: "", referer: "http://127.0.0.1:9/page/" }, {}, resolve);
+      }),
+      new Promise((resolve) => setTimeout(() => resolve(undefined), 1500)),
+    ]);
+  };
+  const before6 = await runSend6(neg6);
+  assert("P6 pre-fix (case removed) replies nothing", before6 === undefined, "got " + JSON.stringify(before6));
+  const after6 = await runSend6(bgSrc6);    assert("P6 send case replies ok through grabUrl", after6 && after6.ok === true && after6.error === "", JSON.stringify(after6));
+
   // ---- P5: preload / renderer IPC contract ----
   // Every window.api.<method> a renderer file calls must exist in the preload
   // it runs under, and every ipc channel a preload touches must have an ipcMain

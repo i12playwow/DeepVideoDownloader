@@ -589,6 +589,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       })();
       return true; // keep the channel open for the async reply
 
+    case "send":
+      // popup "Send" button: hand a raw URL to the desktop app, same path as
+      // add-to-list (the popup sends the origin page as `referer`).
+      (async () => {
+        const r = await grabUrl(msg.url, msg.title || "", msg.pageUrl || msg.referer || "");
+        sendResponse(r);
+      })();
+      return true;
+
     case "dv-monitor-get":
       sendResponse({ on: autoGrab });
       break;
