@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Deep Grab",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Find the best video on the current page and send its download link to the Deep Video Downloader app running on your computer.",
   "permissions": [
     "storage",
@@ -42,7 +42,8 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "Deep Grab — click to re-scan the page",
+    "default_title": "Deep Grab — open download panel",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",
       "48": "icons/icon-48.png",

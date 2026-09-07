@@ -1,4 +1,5 @@
 const statusEl = document.getElementById("status");
+const rescanBtn = document.getElementById("rescan");
 const urlInput = document.getElementById("url");
 const sendBtn = document.getElementById("send");
 const foundListEl = document.getElementById("found-list");
@@ -124,6 +125,33 @@ sendBtn.addEventListener("click", () => {
 
 urlInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendBtn.click();
+});
+
+// Re-scan the active tab. The action icon used to re-scan on click; with the
+// panel wired to the icon, the button keeps the behavior reachable.
+rescanBtn.addEventListener("click", () => {
+  rescanBtn.disabled = true;
+  rescanBtn.textContent = "Scanning…";
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs && tabs[0];
+    if (tab && tab.id != null) {
+      chrome.tabs.sendMessage(tab.id, { type: "dv-rescan" }, (r) => {
+        void chrome.runtime.lastError; // content script may be absent (chrome:// etc.)
+        if (r && r.ok) {
+          rescanBtn.textContent = "Found " + (r.count || 0) + " video" + (r.count === 1 ? "" : "s") + " ✓";
+        }
+        setTimeout(() => {
+          rescanBtn.disabled = false;
+          rescanBtn.textContent = "Re-scan this page";
+        }, 1200);
+      });
+    } else {
+      setTimeout(() => {
+        rescanBtn.disabled = false;
+        rescanBtn.textContent = "Re-scan this page";
+      }, 200);
+    }
+  });
 });
 
 // Auto-monitor toggle: reflects/sets the background's dv_monitor flag.
