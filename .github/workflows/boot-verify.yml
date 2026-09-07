@@ -1,7 +1,9 @@
 # Optional real-app gate: boots the actual Electron app in a sandbox and
 # drives the download/automation surface through the WS bridge. Windows runner
 # required: the drill launches node_modules electron's Windows binary and uses
-# taskkill. GUI apps run headless-capable on windows-latest (no xvfb needed).
+# taskkill. Jobs target the repo's self-hosted runner (buffy-runner: Windows,
+# GUI-session capable, no xvfb needed) - hosted windows-latest is currently
+# unusable for this account (GitHub refuses runner allocation; see run.md).
 # Manual trigger only. Two jobs run in parallel: tests (offline gates) and
 # boot-verify (the real-app drill, ~5-6 min of auto-retry timer phases).
 name: boot-verify (optional)
@@ -11,7 +13,7 @@ on:
 
 jobs:
   tests:
-    runs-on: windows-latest
+    runs-on: [self-hosted, windows, x64]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +32,7 @@ jobs:
         run: npm run check
 
   boot-verify:
-    runs-on: windows-latest
+    runs-on: [self-hosted, windows, x64]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
