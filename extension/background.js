@@ -91,6 +91,10 @@ function broadcastStatus() {
   chrome.runtime.sendMessage({ type: "desktop-status", ok: wsStatus === "online" }).catch(() => {});
 }
 
+function sendHello() {
+  try { ws.send(JSON.stringify({ type: "hello", v: "1.0.2" })); } catch (e) { /* ignore */ }
+}
+
 function broadcastFound() {
   chrome.runtime.sendMessage({ type: "dv-found-updated" }).catch(() => {});
 }
@@ -133,6 +137,40 @@ function setStatus(status) {
   broadcastStatus();
 }
 
+// ----- auto grab (app-driven) -----
+// The DESKTOP APP owns the autoGrab setting (its settings UI and the popup
+// button both flip it over the WS bridge). The background mirrors the last
+// known state so the popup can render instantly, even while offline.
+let autoGrab = false;
+let pendingMonitorReply = null;
+function setAutoGrabState(on) {
+  autoGrab = on === true;
+  if (pendingMonitorReply) { try { pendingMonitorReply({ on: autoGrab }); } catch (e) {} pendingMonitorReply = null; }
+  chrome.runtime.sendMessage({ type: "dv-monitor-changed", on: autoGrab }).catch(() => {});
+}
+
+// One grab of a found video: dedupe check, send to desktop, mark captured.
+// Returns { ok, skipped?, error? }. Used by the popup's add-to-list and by
+// the app-initiated dv-monitor-grab message.
+async function grabUrl(url, title, pageUrl) {
+  if (isDuplicate(url)) {
+    const entry = found.find((x) => x.url === url);
+    if (entry) {
+      entry.added = true;
+      maybeCloseTab(entry);
+      pipelineTabDone(entry.tabId);
+      persist();
+      broadcastFound();
+    }
+    return { ok: true, skipped: true };
+  }
+  pendingSend.add(url);
+  const r = await sendToDesktop(url, title || "", pageUrl || "");
+  pendingSend.delete(url);
+  if (r.ok) { markCaptured(url, r.id); removeFound(url); }
+  return { ok: r.ok, error: r.error || "" };
+}
+
 function scheduleReconnect() {
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(() => {
@@ -157,12 +195,29 @@ function connect() {
     setStatus("online");
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     reQueueUnknownSizes();
+    sendHello();
   };
 
   ws.onmessage = (ev) => {
     let m;
     try { m = JSON.parse(ev.data); } catch (e) { return; }
-    if (m && m.type === "status") {
+    if (m && m.type === "dv-auto-grab") {
+      setAutoGrabState(m.on === true);
+    } else if (m && m.type === "dv-close-tab") {
+      // Auto-grab lifecycle: a download whose referer is this page finished.
+      // Close the matching movie tab (scheme+host+path match; query/hash vary).
+      const target = String(m.pageUrl || "").split("#")[0];
+      if (target) {
+        let base = target;
+        try { const u = new URL(target); base = u.origin + u.pathname; } catch (e) {}
+        chrome.tabs.query({}, (tabs) => {
+          const hit = (tabs || []).find((t) => {
+            try { const u2 = new URL(t.url || ""); return u2.origin + u2.pathname === base; } catch (e) { return false; }
+          });
+          if (hit) chrome.tabs.remove(hit.id).catch(() => {});
+        });
+      }
+    } else if (m && m.type === "status") {
       // Desktop app reports download progress; update matching entry's size/error.
       const entry = found.find((x) => x.url === m.url);
       if (!entry) return;
@@ -180,6 +235,17 @@ function connect() {
         persist();
         broadcastFound();
       }
+    } else if (m && m.type === "dv-monitor-grab") {
+      // App-driven harvest (autoGrab): send every found (not yet grabbed) video.
+      (async () => {
+        let sent = 0;
+        for (const f of found) {
+          if (f.added || isDuplicate(f.url)) continue;
+          const r = await grabUrl(f.url, f.title, f.pageUrl);
+          if (r.ok && !r.skipped) sent++;
+        }
+        try { ws.send(JSON.stringify({ type: "dv-monitor-result", sent, remaining: found.length })); } catch (e) { /* ignore */ }
+      })();
     }
   };
 
@@ -518,25 +584,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       (async () => {
         const entry = found.find((x) => x.url === msg.url);
         if (entry && sender.tab && !entry.tabId) entry.tabId = sender.tab.id;
-        if (isDuplicate(msg.url)) {
-          // already captured/downloaded: close the tab, skip re-sending
-          if (entry) {
-            entry.added = true;
-            maybeCloseTab(entry);
-            pipelineTabDone(entry.tabId);
-            persist();
-            broadcastFound();
-          }
-          sendResponse({ ok: true, skipped: true });
-          return;
-        }
-        pendingSend.add(msg.url);
-        const r = await sendToDesktop(msg.url, msg.title || "", msg.pageUrl || "");
-        pendingSend.delete(msg.url);
-        if (r.ok) { markCaptured(msg.url, r.id); removeFound(msg.url); }
-        sendResponse({ ok: r.ok, error: r.error || "" });
+        const r = await grabUrl(msg.url, msg.title, msg.pageUrl);
+        sendResponse(r);
       })();
       return true; // keep the channel open for the async reply
+
+    case "dv-monitor-get":
+      sendResponse({ on: autoGrab });
+      break;
+
+    case "dv-monitor-set":
+      // The desktop app owns the setting; forward over WS and wait for the
+      // authoritative echo (hello carries autoGrab after the app applies it).
+      (async () => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) { sendResponse({ on: autoGrab, offline: true }); return; }
+        ws.send(JSON.stringify({ type: "dv-monitor-set", on: msg.on === true }));
+        pendingMonitorReply = sendResponse;
+        setTimeout(() => { if (pendingMonitorReply === sendResponse) { try { sendResponse({ on: autoGrab, stale: true }); } catch (e) {} pendingMonitorReply = null; } }, 4000);
+      })();
+      return true;
 
     case "add-all-found": {
       const list = Array.isArray(msg.urls) && msg.urls.length
@@ -638,18 +704,48 @@ function slugTitle(url) {
   }
 }
 
-// ----- auto-group tabs that play video (so they're easy to find) -----
-const groupedTabs = new Set();
-function groupVideoTab(tabId) {
-  if (tabId <= 0 || groupedTabs.has(tabId)) return;
-  groupedTabs.add(tabId);
-  chrome.tabs.get(tabId).then((tab) => {
-    if (!tab || tab.groupId !== -1) return;
-    return chrome.tabs.group({ tabIds: [tabId] });
-  }).then((groupId) => {
-    if (groupId) return chrome.tabGroups.update(groupId, { title: "Deep Grab", color: "blue" });
-  }).catch(() => {});
+// ----- auto-group tabs by category: actress / tag / movies -----
+// Video-playing tabs are filed into a named group per page category so long
+// browsing sessions stay findable: pages whose path looks like an actress /
+// cast listing group under "Actress", tag/genre listing pages under "Tags",
+// and everything else (watch pages, unknown layouts) under "Movies".
+const groupedTabs = new Map(); // tabId -> category it was filed under
+function classifyTabGroup(url) {
+  try {
+    const p = new URL(url).pathname.toLowerCase();
+    if (/\/(?:actress|actor|cast|star|idol|model)s?\//.test(p)) return "actress";
+    if (/\/(?:tag|tags|genre|genres|category|categories)(?:\/|$)/.test(p)) return "tag";
+  } catch (e) { /* fall through */ }
+  return "movies";
 }
+const GROUP_STYLES = {
+  actress: { title: "Actress", color: "purple" },
+  tag: { title: "Tags", color: "cyan" },
+  movies: { title: "Movies", color: "blue" }
+};
+async function groupVideoTab(tabId) {
+  if (tabId <= 0) return;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab) return;
+    const cat = classifyTabGroup(tab.url || "");
+    const prev = groupedTabs.get(tabId);
+    if (prev === cat) return; // already filed correctly
+    if (!prev && tab.groupId !== -1) return; // the user grouped it themselves
+    if (prev && tab.groupId !== -1) await chrome.tabs.ungroup(tabId).catch(() => {});
+    groupedTabs.set(tabId, cat);
+    const style = GROUP_STYLES[cat] || GROUP_STYLES.movies;
+    const groups = await chrome.tabGroups.query({ title: style.title }).catch(() => []);
+    if (groups.length) {
+      await chrome.tabs.group({ tabIds: [tabId], groupId: groups[0].id });
+    } else {
+      const groupId = await chrome.tabs.group({ tabIds: [tabId] });
+      await chrome.tabGroups.update(groupId, { title: style.title, color: style.color });
+    }
+  } catch (e) { /* tab gone mid-flight */ }
+}
+// Keep the map from growing forever across long sessions.
+chrome.tabs.onRemoved.addListener((tabId) => groupedTabs.delete(tabId));
 
 // ----- network capture (works for suspended/background tabs, like IDM) -----
 chrome.webRequest.onBeforeRequest.addListener((details) => {

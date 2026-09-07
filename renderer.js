@@ -114,7 +114,7 @@ function rowHtml(it, showing) {
       <td class="speed">${done ? "—" : fmtSpeed(it.speed)}</td>
       <td class="proxy" title="${esc(it.proxy)}">${esc(it.proxy)}</td>
       <td class="sched">${fmtSched(it)}</td>
-      <td class="status"><span class="badge ${statusClass(it.status)}">${esc(it.status)}</span></td>
+      <td class="status"><span class="badge ${statusClass(it.status)}">${esc(it.status)}${it.resolving ? " ⟳" : ""}</span></td>
       <td class="actions">${showing === "history" ? histActionButtons(it) : actionButtons(it)}</td>`;
 }
 
@@ -227,6 +227,7 @@ function actionButtons(it) {
   }
   if (it.status === "queued") {
     html += `<button data-act="pause" data-id="${it.id}">⏸</button>`;
+    if (!it.priority) html += `<button data-act="prioritize" data-id="${it.id}" title="Jump the queue — start as soon as a slot frees up">⏫</button>`;
   }
   const showSched = ["queued", "scheduled", "paused"].includes(it.status);
   if (showSched) {
@@ -273,6 +274,7 @@ $("dlsBody").addEventListener("click", (e) => {
   if (!btn) return;
   const id = btn.dataset.id;
   const act = btn.dataset.act;
+  if (act === "prioritize") { window.api.prioritize(id); return; }
   if (act === "schedule") {
     e.preventDefault();
     const it = items.get(id);
@@ -368,8 +370,7 @@ function historyRowHtml(it) {
       <div class="name-col"><div class="name">${esc(it.fileName)}</div><div class="sub">${esc(it.url)}</div></div>
     </td>
     <td>${fmtBytes(it.total)}</td>
-    <td class="wide">${fmtDate(it.endTime || it.timestamp)}</td>
-    <td class="status"><span class="badge ${statusClass(it.status)}">${esc(it.status)}</span></td>
+    <td class="wide">${fmtDate(it.endTime || it.timestamp)}</td>     <td class="status"><span class="badge ${statusClass(it.status)}">${esc(it.status)}${it.resolving ? " ⟳" : ""}</span></td>
     <td class="actions">${histActionButtons(it)}</td>
   </tr>`;
 }
@@ -461,6 +462,7 @@ async function loadSettings() {
   $("saveHistory").checked = s.saveHistory !== false;
   $("skipDuplicates").checked = s.skipDuplicates !== false;
   $("autoCloseTab").checked = s.autoCloseTab !== false;
+  $("autoGrab").checked = !!s.autoGrab;
   $("thumbnails").checked = s.thumbnails !== false;
   $("idleTabMinutes").value = s.idleTabMinutes ?? 0;
   $("autoRetryMinutes").value = s.autoRetryMinutes ?? 0;
@@ -508,6 +510,7 @@ $("save").addEventListener("click", async () => {
     saveHistory: $("saveHistory").checked,
     skipDuplicates: $("skipDuplicates").checked,
     autoCloseTab: $("autoCloseTab").checked,
+    autoGrab: $("autoGrab").checked,
     thumbnails: $("thumbnails").checked,
     idleTabMinutes: Math.max(0, parseInt($("idleTabMinutes").value || "0", 10)),
     autoRetryMinutes: Math.max(0, parseInt($("autoRetryMinutes").value || "0", 10)),

@@ -208,6 +208,11 @@
       if (it && it.status === "error") { it.total = it.total || Math.round((30 + Math.random() * 900) * MB); it.status = "running"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null; it._autoRetries = 0; it.speed = 2 * MB; emit([it]); }
       return { ok: true };
     },
+    prioritize: async (id) => {
+      const it = items.find((x) => x.id === id);
+      if (it && it.status === "queued") { it.priority = true; emit([it]); }
+      return { ok: true };
+    },
     pauseAll: async () => {
       let n = 0;
       for (const it of items) {

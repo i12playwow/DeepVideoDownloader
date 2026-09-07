@@ -3,6 +3,7 @@ const urlInput = document.getElementById("url");
 const sendBtn = document.getElementById("send");
 const foundListEl = document.getElementById("found-list");
 const addAllBtn = document.getElementById("add-all");
+const monitorBtn = document.getElementById("monitor");
 
 let found = []; // {url, title, pageUrl, kind, size, mime, added, error}
 
@@ -125,12 +126,31 @@ urlInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendBtn.click();
 });
 
+// Auto-monitor toggle: reflects/sets the background's dv_monitor flag.
+function renderMonitor(on) {
+  monitorBtn.textContent = "Auto monitor: " + (on ? "ON" : "OFF");
+  monitorBtn.className = on ? "monitor-on" : "monitor-off";
+}
+function loadMonitor() {
+  chrome.runtime.sendMessage({ type: "dv-monitor-get" }, (r) => {
+    if (r) renderMonitor(r.on === true);
+  });
+}
+monitorBtn.addEventListener("click", () => {
+  const next = !monitorBtn.classList.contains("monitor-on");
+  chrome.runtime.sendMessage({ type: "dv-monitor-set", on: next }, (r) => {
+    if (r) renderMonitor(r.on === true);
+  });
+});
+
 // background broadcasts dv-found-updated whenever the found list / sizes change,
 // and desktop-status when the WS link changes. Refresh live while the popup is open.
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "dv-found-updated") loadFound();
   else if (msg && msg.type === "desktop-status") setStatus(msg.ok ? "connected" : "disconnected");
+  else if (msg && msg.type === "dv-monitor-changed") renderMonitor(msg.on === true);
 });
 
 refreshStatus();
 loadFound();
+loadMonitor();

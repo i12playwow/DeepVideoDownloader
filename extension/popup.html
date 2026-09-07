@@ -32,6 +32,9 @@
     #add-all { margin-top: 8px; background: #16a34a; }
     #add-all:hover { background: #15803d; }
     #add-all:disabled { background: #334155; color: #64748b; cursor: default; }
+    #monitor { margin-top: 8px; background: #334155; color: #94a3b8; font-weight: 600; }
+    #monitor.monitor-on { background: #16a34a; color: #fff; }
+    #monitor.monitor-on:hover { background: #15803d; }
   </style>
 </head>
 <body>
@@ -40,6 +43,7 @@
   <label for="url">Video / MP4 URL</label>
   <input id="url" type="text" placeholder="https://…/video.mp4" autofocus>
   <button id="send">Send to desktop app</button>
+  <button id="monitor" class="monitor-off" title="When on, every video the extension finds is sent to the desktop app automatically — no per-item clicks.">Auto monitor: OFF</button>
   <div id="found-wrap">
     <h2>Found videos</h2>
     <ul id="found-list"><li class="dv-empty">…</li></ul>

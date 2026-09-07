@@ -657,6 +657,7 @@ class DownloadManager {
       _canon: canon, // stable content keys (streamtape id / hls path / cdn dir) for chain dedupe
       refreshCount: 0,
       errorCategory: "",
+      priority: false,
       duplicate: false,
       _activeRes: new Set(),
       _samples: [],
@@ -670,6 +671,7 @@ class DownloadManager {
           kind: this.kind || "mp4",
           fileName: this.fileName,
           status: this.status,
+          priority: !!this.priority,
           duplicate: !!this.duplicate,
           total: this.total,
           received: this.received,
@@ -678,6 +680,8 @@ class DownloadManager {
           error: this.error,
           errorCategory: this.errorCategory,
           refreshCount: this.refreshCount,
+          resolving: !!this._resolving,
+          resolveAttempt: this._resolveAttempt || 0,
           retryCount: this.retryCount || 0,
           finalPath: this.finalPath,
           thumb: this.thumb || "",
@@ -722,7 +726,9 @@ class DownloadManager {
         if (candidate._retryAt && Date.now() < candidate._retryAt) { gated = true; continue; }
         if (!this._inScheduleWindow() && !candidate._windowBypass) { gated = true; continue; }
         if ((this._hostRun.get(this._hostOf(candidate.url)) || 0) >= HOST_CAP) continue;
-        if (!next || (candidate.received > 0 && next.received === 0)) next = candidate;
+        // Priority items (user "jump the queue") outrank resume momentum but
+        // never displace running downloads.
+        if (!next || (candidate.priority && !next.priority) || (candidate.priority === next.priority && candidate.received > 0 && next.received === 0)) next = candidate;
       }
       if (!next) {
         if (gated) { this._armWindowWake(); this._armRetryWake(); }
@@ -743,8 +749,13 @@ class DownloadManager {
       this.run(next)
         .catch(async (err) => {
           if (err.aborted || next.status === "paused" || next.status === "cancelled") return;
-          const cat = categorizeError(err);
+          let cat = categorizeError(err);
+          // Expired-link relabel: a signed token died and every re-resolution
+          // attempt failed. Label it "expired" so the UI and retryFailed can
+          // treat it as a refreshable-expiry case rather than a generic error.
+          if (err._expired) cat = "expired";
           next.error = err.message || String(err);
+          if (err._expired) next.error = "Link expired: " + next.error;
           next.errorCategory = cat;
           next.speed = 0;
           // Transient failures (network / rate-limit / cloudflare / 5xx) retry
@@ -976,16 +987,44 @@ class DownloadManager {
     }
   }
 
+  // Overridable in tests: re-resolve an expired URL's source page.
+  async _resolveFresh(item, baseHeaders) {
+    return resolveUrl(refreshSourceUrl(item), { proxyManager: this.proxyManager, config: this.config, paceHost: (u) => this._paceHost(u) }, baseHeaders);
+  }
+
   async _runGuarded(item) {
     const baseHeaders = item.referer ? { Referer: item.referer } : {};
     const maxRefresh = this.config.maxRefresh ?? MAX_REFRESH;
+
+    // Keep the UI truthful while an expired URL is being re-resolved: the
+    // refresh attempts below can take many seconds (proxy rotation, page
+    // fetches), so the item would look like a running download with zero
+    // progress. Surface a "resolving" status (and progress by attempt, so the
+    // bar doesn't jump 0→100 on success) before/after each attempt.
+    const _emitResolving = (attempt) => {
+      item._resolving = true;
+      item._resolveAttempt = attempt;
+      item.speed = 0;
+      this.emit(item);
+    };
+    const _emitResolved = () => {
+      item._resolving = false;
+      this.emit(item);
+    };
 
     for (let attempt = 0; ; attempt++) {
       try {
         await this._runOnce(item, baseHeaders);
         break;
       } catch (err) {
-        if (err.aborted || attempt >= maxRefresh) throw err;
+        if (err.aborted) throw err;
+        if (attempt >= maxRefresh) {
+          // Only signed, refreshable links (streamtape get_video tokens, signed
+          // m3u8 segments) are "expired" when re-resolution keeps failing. A
+          // plain dead URL that 404s stays its original category (http).
+          if (isSignedRefreshable(item) || isSignedGetVideoExpired(item, err)) err._expired = true;
+          throw err;
+        }
         // Rate-limited / Cloudflare-blocked: rotate proxy, back off, and retry
         // the same URL �?the video isn't dead and re-resolving the (also blocked)
         // source page would just waste requests.
@@ -1001,6 +1040,7 @@ class DownloadManager {
         // Expired direct URL (e.g. streamtape signed token) �?re-resolve the
         // original page and retry from scratch with the fresh URL.
         if (!isExpiredError(err) && !isSignedGetVideoExpired(item, err)) throw err;
+        _emitResolving(attempt);
         // A bare HTTP 403/404/410 can mean the *proxy* is Cloudflare-blocked
         // (no cf-chl text in the message) rather than a dead URL. Rotate + clear
         // so the retry re-picks instead of hammering the same blocked proxy
@@ -1012,12 +1052,19 @@ class DownloadManager {
         // with a streamtape/fstape referer is still refreshable �?from the page.
         const refreshable =
           (item._resolvedUrl && item._resolvedUrl !== item.url) || isSignedRefreshable(item);
+        // Not refreshable: the URL is exactly what it is, so a bare 403/404/410
+        // is just that status, not a lapsed signed token. Keep the original
+        // error/category (the auto-retry cap's preserved-category contract).
         if (!refreshable) throw err;
         let fresh = null;
         try {
-          fresh = await resolveUrl(refreshSourceUrl(item), { proxyManager: this.proxyManager, config: this.config, paceHost: (u) => this._paceHost(u) }, baseHeaders);
+          fresh = await this._resolveFresh(item, baseHeaders);
         } catch (e) { /* re-resolution failed �?keep original error */ }
-        if (!fresh || fresh === item._resolvedUrl) throw err;
+        _emitResolved();
+        if (!fresh || fresh === item._resolvedUrl) {
+          if (isSignedRefreshable(item) || isSignedGetVideoExpired(item, err)) err._expired = true;
+          throw err;
+        }
         item._resolvedUrl = fresh;
         await fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
         await fsp.rm(item.finalPath, { force: true }).catch(() => {});
@@ -1818,15 +1865,36 @@ class DownloadManager {
   }
 
   // Requeue every failed download. requires-browser is excluded - those need
-  // a real capture session, not another headless attempt.
+  // a real capture session, not another headless attempt. Terminal errors
+  // (auto-retry exhausted, expired links) requeue first — they are the oldest
+  // failures — so "retry failed" resuscitates the most-dead items first.
   retryFailed() {
-    let n = 0;
+    const failed = [];
     for (const it of this.items.values()) {
-      if (it.status === "error" && it.errorCategory !== "requires-browser") {
-        if (this.retry(it.id)) n++;
-      }
+      if (it.status === "error" && it.errorCategory !== "requires-browser") failed.push(it);
+    }
+    failed.sort((a, b) =>
+      ((b.errorCategory === "expired") - (a.errorCategory === "expired")) ||
+      ((a.scheduledStart || 0) - (b.scheduledStart || 0)) ||
+      ((a.timestamp || 0) - (b.timestamp || 0))
+    );
+    let n = 0;
+    for (const it of failed) {
+      if (this.retry(it.id)) n++;
     }
     return n;
+  }
+
+  // User "jump the queue": a queued item starts as soon as a slot frees up,
+  // ahead of non-priority queued items (still capped by per-host limit and
+  // global concurrency). No-ops on anything not currently queued.
+  prioritize(id) {
+    const item = this.items.get(id);
+    if (!item || item.status !== "queued") return false;
+    item.priority = true;
+    this.emit(item);
+    this.pump();
+    return true;
   }
 
   // Explicit retry of a failed download: fresh backoff/resolve, straight back

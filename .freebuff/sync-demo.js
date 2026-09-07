@@ -447,16 +447,16 @@ function selColumns(html, handlerIds) {
 // When renderer.js legitimately grows a new action/table/id, update
 // SELF_GOLDEN (the watcher's own drift checks keep exercising the scans live).
 const SELF_GOLDEN = {
-  emitted: ["cancel", "forceDownload", "history-date", "history-error", "move", "pause", "remove", "resume", "retry", "schedule"],
-  special: ["history-date", "history-error", "move", "schedule"],
+  emitted: ["cancel", "forceDownload", "history-date", "history-error", "move", "pause", "prioritize", "remove", "resume", "retry", "schedule"],
+  special: ["history-date", "history-error", "move", "prioritize", "schedule"],
   batch: ["cancel", "pause", "remove", "resume"],
   apiRouted: ["cancel", "forceDownload", "pause", "remove", "resume", "retry"],
   browseTotal: 3,
-  idCount: 60,
+  idCount: 61,
   selHandlers: [{ id: "dlsBody", ref: "closest(input[data-sel])" }],
   selEmitters: [{ fn: "rowHtml", checkbox: true }],
   selPathVia: ["render"],
-  shimExposed: 33
+  shimExposed: 34
 };
 
 const sorted = (xs) => [...xs].sort();

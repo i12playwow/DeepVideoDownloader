@@ -326,6 +326,98 @@ const netErr = () => { const e = new Error("network down"); e.category = "networ
     cleanup(dir);
   })();
 
+  // ---- priority queue-jump -------------------------------------------------
+  await (async () => {
+    const { dm, dir } = makeDm({ concurrency: 1 });
+    const order = [];
+    // "first" holds the only slot past the prioritize() calls so the
+    // priority pick is exercised when the slot actually frees.
+    dm.run = async (item) => { order.push(item.id); await sleep(item.title === "first" ? 150 : 40); item.status = "done"; };
+    const first = await dm.enqueue({ url: "https://p.example.com/1.mp4", title: "first" });
+    const a = await dm.enqueue({ url: "https://q.example.com/a.mp4", title: "a" });
+    const b = await dm.enqueue({ url: "https://r.example.com/b.mp4", title: "b" });
+    await sleep(60); // first fills the only slot
+    t("prioritize rejects non-queued items", () => {
+      assert.strictEqual(dm.prioritize(first), false);
+      assert.strictEqual(dm.prioritize("no-such-id"), false);
+    });
+    t("prioritize jumps the queue", () => {
+      assert.strictEqual(dm.prioritize(b), true);
+      assert.strictEqual(dm.items.get(b).priority, true);
+    });
+    await waitFor(dm, b, ["done"]);
+    await waitFor(dm, a, ["done"]);
+    t("priority item starts before older queued ones", () => {
+      assert.ok(order.indexOf(b) < order.indexOf(a), "b should start before a");
+    });
+    cleanup(dir);
+  })();
+
+  // ---- expired relabel is signed-only (plain 404 keeps its category) ----
+  await (async () => {
+    const { dm, dir } = makeDm({ maxRefresh: 2 });
+    // A plain dead URL whose resolved URL differs from the input (e.g. URL
+    // normalization or proxy pass-through) still enters the refresh path.
+    // Re-resolution keeps 404ing, but the item must land in terminal error
+    // with the ORIGINAL http category — only signed refreshable links
+    // (streamtape get_video / signed m3u8) relabel to "expired".
+    dm._runOnce = async (item) => {
+      item._resolvedUrl = "http://127.0.0.1:9999/v/fail2.mp4";
+      const e = new Error("404 Not Found");
+      e.status = 404;
+      e.category = "http";
+      throw e;
+    };
+    dm._resolveFresh = async () => { throw new Error("player page gone"); };
+    const id = await dm.enqueue({ url: "http://127.0.0.1:9999/v/fail.mp4", title: "plain-404" });
+    await waitFor(dm, id, ["error", "done"], 4000);
+    const it = dm.items.get(id);
+    t("plain 404 through refresh path keeps http category", () => {
+      assert.strictEqual(it.status, "error");
+      assert.strictEqual(it.errorCategory, "http");
+      assert.ok(!/expired/i.test(it.error), "no expired relabel for plain 404: " + it.error);
+    });
+    cleanup(dir);
+  })();
+
+    // ---- link-expired handler -------------------------------------------------
+  await (async () => {
+    const { dm, dir } = makeDm({ maxRefresh: 1, concurrency: 1 });
+    const resolvingSeen = [];
+    let attempts = 0;
+    // Stub at the _runOnce layer so the real _runGuarded refresh logic runs:
+    // a streamtape get_video link fails not-video (signed-refreshable), and
+    // re-resolution keeps failing, so the item must land in terminal error
+    // with the "expired" category after the resolving status was surfaced.
+    dm._runOnce = async (item) => {
+      attempts++;
+      item._resolvedUrl = "https://streamtape.com/get_video?id=xyz&e=" + attempts;
+      const e = new Error("HTML page instead of video");
+      e.category = "not-video";
+      throw e;
+    };
+    dm._resolveFresh = async () => { throw new Error("player page gone"); };
+    const dmEmit = dm.emit.bind(dm);
+    dm.emit = (item) => {
+      const p = item.public ? item.public() : item;
+      if (p.resolving) resolvingSeen.push(p.resolveAttempt);
+      dmEmit(item);
+    };
+    const id = await dm.enqueue({ url: "https://streamtape.com/get_video?id=xyz", referer: "https://streamtape.com/v/abc/", title: "expired-test" });
+    await waitFor(dm, id, ["error"], 4000);
+    const it = dm.items.get(id);
+    t("expired URL lands in terminal error with expired category", () => {
+      assert.strictEqual(it.status, "error");
+      assert.strictEqual(it.errorCategory, "expired");
+      assert.ok(/expired/i.test(it.error), "error text mentions expiry: " + it.error);
+    });
+    t("resolving status was surfaced during refresh", () => {
+      assert.ok(resolvingSeen.length > 0, "no resolving emits seen");
+      assert.strictEqual(it.public().resolving, false, "resolving cleared when terminal");
+    });
+    cleanup(dir);
+  })();
+
   console.log("\n" + pass + " passed, " + fail + " failed");
   process.exit(fail ? 1 : 0);
 })();

@@ -769,7 +769,7 @@ function startServer(portRef, segBytesFn) {
     storage: { local: { get: function () {}, set: function () { return Promise.resolve(); } } },
     runtime: { sendMessage: function () { return Promise.resolve(); }, onMessage: { addListener: function () {} }, onInstalled: { addListener: function () {} }, onStartup: { addListener: function () {} } },
     action: { onClicked: { addListener: function () {} } },
-    tabs: {}, tabGroups: {}, windows: {}, cookies: {},
+    tabs: { onRemoved: { addListener: function () {} } }, tabGroups: {}, windows: {}, cookies: {},
     webRequest: { onBeforeRequest: { addListener: function () {} }, onHeadersReceived: { addListener: function () {} } }
   };
   function WsStub4() {}

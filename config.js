@@ -22,6 +22,7 @@ const DEFAULT_CONFIG = {
   hostDelayMs: 120,
   idleTabMinutes: 0,
   autoProxy: true,
+  autoGrab: false, // extension auto-monitor: app asks extension to send found videos + close their tabs
   ffmpegPath: "ffmpeg",
   theme: "dark",
   saveHistory: true,
@@ -65,7 +66,7 @@ const NUMERIC_FIELDS = [
 ];
 // Boolean toggles.
 const BOOLEAN_FIELDS = [
-  "autoProxy", "saveHistory", "skipDuplicates", "autoCloseTab", "thumbnails"
+  "autoProxy", "saveHistory", "skipDuplicates", "autoCloseTab", "thumbnails", "autoGrab"
 ];
 // String path fields.
 const STRING_FIELDS = ["downloadDir", "downloadDir2", "downloadDir3", "ffmpegPath", "theme", "scheduleWindowStart", "scheduleWindowEnd"];
