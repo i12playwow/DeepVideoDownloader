@@ -1050,6 +1050,32 @@ function startServer(portRef, segBytesFn) {
   assert("P8 NEGATIVE: send-time resolution stripped -> referer \"\" (guard bites)",
     dlNeg8 && dlNeg8.referer === "", "referer=" + JSON.stringify(dlNeg8 && dlNeg8.referer));
 
+  // ---- P9: popup mirror sync contract ----
+  // popup.js must follow the SW's autoGrab mirror: re-render on the
+  // dv-monitor-changed / desktop-status pushes AND re-pull on visibility/focus.
+  // A push can be missed while the popup page is hidden/throttled, and a stale
+  // toggle label used to make the next click send the WRONG direction (the F6
+  // preamble flake). Guards the push + resync pair as one contract.
+  console.log("-- P9: popup mirror sync contract --");
+  const fs9 = require("fs");
+  const popupSrc9 = fs9.readFileSync("extension/popup.js", "utf8");
+  const bgSrc9b = fs9.readFileSync("extension/background.js", "utf8");
+  const checkPopupSync9 = (src) =>
+    src.includes('msg.type === "dv-monitor-changed"') &&
+    src.includes('msg.type === "desktop-status"') &&
+    src.includes('"visibilitychange"') &&
+    src.includes("resyncFromSw");
+  assert("P9 popup handles the SW mirror pushes (dv-monitor-changed + desktop-status)",
+    checkPopupSync9(popupSrc9), "push handlers missing");
+  assert("P9 SW broadcasts dv-monitor-changed whenever the mirror flips",
+    bgSrc9b.includes('sendMessage({ type: "dv-monitor-changed", on: autoGrab })'), "broadcast missing");
+  const neg9a = popupSrc9.replace('  else if (msg && msg.type === "dv-monitor-changed") renderMonitor(msg.on === true);', "  /* P9 push handler stripped */");
+  assert("P9 NEGATIVE: dv-monitor-changed handler stripped -> guard bites",
+    neg9a !== popupSrc9 && !checkPopupSync9(neg9a), "guard missed the strip");
+  const neg9b = popupSrc9.replace(/document\.addEventListener\("visibilitychange",[^\n]*/, "/* P9 visibility resync stripped */");
+  assert("P9 NEGATIVE: visibility resync stripped -> guard bites",
+    neg9b !== popupSrc9 && !checkPopupSync9(neg9b), "guard missed the strip");
+
   // ---- P5: preload / renderer IPC contract ----
   // Every window.api.<method> a renderer file calls must exist in the preload
   // it runs under, and every ipc channel a preload touches must have an ipcMain
