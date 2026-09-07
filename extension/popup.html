@@ -14,6 +14,9 @@
     input:focus { border-color: #3b82f6; }
     button { width: 100%; background: #3b82f6; color: #fff; border: none; border-radius: 6px; padding: 8px; font-weight: 600; cursor: pointer; }
     button:hover { background: #2563eb; }
+    #rescan { margin-bottom: 10px; background: #1e293b; color: #cbd5e1; }
+    #rescan:hover { background: #334155; }
+    #rescan:disabled { background: #334155; color: #64748b; cursor: default; }
     .hint { color: #94a3b8; font-size: 11px; margin-top: 10px; line-height: 1.4; }
     #found-wrap { margin-top: 12px; }
     #found-wrap h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #94a3b8; margin: 0 0 6px; }
@@ -40,6 +43,7 @@
 <body>
   <h1>Deep Video Downloader</h1>
   <div id="status">checking…</div>
+  <button id="rescan" title="Ask the content script to re-scan the active tab for videos — the action icon did this before the panel existed.">Re-scan this page</button>
   <label for="url">Video / MP4 URL</label>
   <input id="url" type="text" placeholder="https://…/video.mp4" autofocus>
   <button id="send">Send to desktop app</button>

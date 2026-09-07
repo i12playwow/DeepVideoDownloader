@@ -167,7 +167,13 @@
     const isVideoEl = !!(sourceEl && sourceEl.tagName === "VIDEO");
     if (!isVideoEl && !looksLikeVideoUrl(url)) return;
     if (url.startsWith("blob:")) return;
-    const clean = url.startsWith("//") ? location.protocol + url : url;
+    // Resolve relative <video src="/media/x.mp4"> and protocol-relative srcs to
+    // absolute so the element scan catches them (the webRequest net-capture also
+    // sees the request, but MV3 webRequest does not wake the SW, so a dead SW at
+    // request time would otherwise lose the video entirely).
+    const clean = url.startsWith("//") ? location.protocol + url
+      : /^[a-z][a-z0-9+.-]*:/i.test(url) ? url
+      : (() => { try { return new URL(url, location.href).href; } catch (e) { return url; } })();
     // Only fetchable schemes: tab-suspender/lazy-load chrome-extension pages
     // (…/suspended.html#uri=<url>) and other browser-internal schemes are junk.
     if (!/^(?:https?|blob):/i.test(clean)) return;
