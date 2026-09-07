@@ -457,6 +457,41 @@ async function phaseF() {
   pass("F fair pump", "A stalled x3 -> exactly 2 running (cap holds); B x2 -> 2 running (no starvation); observed at t+35s");
 }
 
+// Who holds the drill port? On the self-hosted CI runner (buffy-runner == this
+// machine) the culprit is almost always a local task-2 sandbox app left running
+// on 8766. Name the pid + the exact kill command so an abort is never a mystery
+// (CI run 34115426511 aborted exactly this way: "port 8766 is in use").
+function describePortHolder(port) {
+  let pid = null;
+  try {
+    const out = execFileSync("netstat", ["-ano"], { encoding: "utf8" });
+    for (const line of out.split(/\r?\n/)) {
+      if (line.includes("127.0.0.1:" + port) && line.includes("LISTENING")) {
+        const m = /\s([0-9]+)\s*$/.exec(line);
+        if (m) { pid = m[1]; break; }
+      }
+    }
+  } catch (e) { /* fall through to the generic message */ }
+  if (pid) {
+    const stPath = path.join(ROOT, ".freebuff", "xt-sandbox", "state.json");
+    try {
+      const st = JSON.parse(fs.readFileSync(stPath, "utf8"));
+      if (String(st.appPid) === pid) {
+        return "port " + port + " is held by your LOCAL task-2 sandbox app (pid " + pid +
+          ", .freebuff/xt-sandbox). Kill it first, then re-run / re-dispatch:\n    taskkill //PID " + pid + " //T //F";
+      }
+    } catch (e) {}
+    let name = "";
+    try {
+      const tl = execFileSync("tasklist", ["/FI", "PID eq " + pid, "/FO", "CSV", "/NH"], { encoding: "utf8" });
+      name = tl.split(",")[0].replace(/"/g, "");
+    } catch (e) {}
+    return "port " + port + " is in use by pid " + pid + (name ? " (" + name + ")" : "") +
+      ". If it is a leftover dev/sandbox Electron app, kill it, then re-run / re-dispatch:\n    taskkill //PID " + pid + " //T //F";
+  }
+  return "port " + port + " is in use by an unidentified process; refusing to run.";
+}
+
 async function main() {
   if (!fs.existsSync(ELECTRON)) { console.log("ABORT electron not found: " + ELECTRON); process.exit(1); }
   const busy = await new Promise((resolve) => {
@@ -464,7 +499,7 @@ async function main() {
     s.on("connect", () => { s.destroy(); resolve(true); });
     s.on("error", () => resolve(false));
   });
-  if (busy) { console.log("ABORT port " + WS_PORT + " is in use; refusing to run."); process.exit(1); }
+  if (busy) { console.log("ABORT " + describePortHolder(WS_PORT)); process.exit(1); }
   if (fs.existsSync(CONFIG_PATH) && !FORCE) { console.log("ABORT config.json already exists; move it aside or pass --force (it is backed up + restored)."); process.exit(1); }
 
   fs.mkdirSync(dlDir, { recursive: true });
