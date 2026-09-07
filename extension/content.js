@@ -44,6 +44,10 @@
     lastHeight: 0
   };
 
+  // Page-side bookkeeping + render mirror for the in-page toolbar. The
+  // service worker's `found` list is the SINGLE canonical source: every scan
+  // reports here (video-found) and the toolbar re-syncs from the SW. Do not
+  // treat this map as a second truth — counts must come from the SW.
   const found = new Map(); // url -> {title, size, added}
   let selected = new Set(); // urls picked for batch actions
   const autoPending = new Set(); // best-only URLs stashed while offline
@@ -1429,8 +1433,18 @@ const acted = clickCloudflareWidget();
       extractCnPorn();
       extractMissav();
       extractSupjav();
-      if (IS_TOP) refreshFromBackground(true);
-      sendResponse({ ok: true, count: found.size });
+      // Report every video this page knows about; the SW ingests the report
+      // into its canonical list and answers with the authoritative count.
+      const report = Array.from(found.values()).map((v) => ({
+        url: v.url,
+        title: v.title || "",
+        pageUrl: v.pageUrl || location.href,
+        kind: v.kind === "m3u8" ? "m3u8" : "mp4"
+      }));
+      sendResponse({ ok: true, videos: report });
+      // Pull sizes/added state back into the toolbar mirror after the SW has
+      // ingested the report (short delay so the SW answers get-found after it).
+      if (IS_TOP) setTimeout(() => refreshFromBackground(true), 60);
       return false;
     }
     if (msg && msg.type === "dv-found-updated") {

@@ -127,29 +127,30 @@ urlInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendBtn.click();
 });
 
-// Re-scan the active tab. The action icon used to re-scan on click; with the
-// panel wired to the icon, the button keeps the behavior reachable.
+// Re-scan the active tab. Routed through the service worker so the button's
+// "Found N videos" feedback reads the SW's authoritative found list — the same
+// list the panel renders — after the content script has reported its scan.
 rescanBtn.addEventListener("click", () => {
   rescanBtn.disabled = true;
   rescanBtn.textContent = "Scanning…";
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tab = tabs && tabs[0];
-    if (tab && tab.id != null) {
-      chrome.tabs.sendMessage(tab.id, { type: "dv-rescan" }, (r) => {
-        void chrome.runtime.lastError; // content script may be absent (chrome:// etc.)
-        if (r && r.ok) {
-          rescanBtn.textContent = "Found " + (r.count || 0) + " video" + (r.count === 1 ? "" : "s") + " ✓";
-        }
-        setTimeout(() => {
-          rescanBtn.disabled = false;
-          rescanBtn.textContent = "Re-scan this page";
-        }, 1200);
-      });
-    } else {
+    const done = (r) => {
+      if (r && r.ok) {
+        loadFound(); // refresh the list to match the authoritative count
+        rescanBtn.textContent = "Found " + (r.count || 0) + " video" + (r.count === 1 ? "" : "s") + " ✓";
+      } else {
+        rescanBtn.textContent = "Nothing to scan on this page";
+      }
       setTimeout(() => {
         rescanBtn.disabled = false;
         rescanBtn.textContent = "Re-scan this page";
-      }, 200);
+      }, 1200);
+    };
+    if (tab && tab.id != null) {
+      chrome.runtime.sendMessage({ type: "dv-rescan", tabId: tab.id }, done);
+    } else {
+      done(null);
     }
   });
 });
