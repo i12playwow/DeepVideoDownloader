@@ -2,13 +2,33 @@
 # drives the download/automation surface through the WS bridge. Windows runner
 # required: the drill launches node_modules electron's Windows binary and uses
 # taskkill. GUI apps run headless-capable on windows-latest (no xvfb needed).
-# Manual trigger only - it takes ~5-6 minutes (auto-retry timer phases).
+# Manual trigger only. Two jobs run in parallel: tests (offline gates) and
+# boot-verify (the real-app drill, ~5-6 min of auto-retry timer phases).
 name: boot-verify (optional)
 
 on:
   workflow_dispatch:
 
 jobs:
+  tests:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies (with Electron binary)
+        run: npm ci
+
+      - name: Offline test suites (npm test)
+        run: npm test
+
+      - name: Static checks + shim selftest (npm run check)
+        run: npm run check
+
   boot-verify:
     runs-on: windows-latest
     timeout-minutes: 20
