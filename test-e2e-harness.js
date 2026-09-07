@@ -878,6 +878,95 @@ function startServer(portRef, segBytesFn) {
   assert("P6 pre-fix (case removed) replies nothing", before6 === undefined, "got " + JSON.stringify(before6));
   const after6 = await runSend6(bgSrc6);    assert("P6 send case replies ok through grabUrl", after6 && after6.ok === true && after6.error === "", JSON.stringify(after6));
 
+  // ---- P7: dv-rescan ingests into the SW's canonical found list ----
+  // The popup's Re-scan routes through the SW: dv-rescan forwards to the tab's
+  // content script, ingests the returned videos into `found` (dedupe by url),
+  // and replies {ok, count: found.length}. A future edit that reintroduces a
+  // second truth — answering with the content report's own length instead of
+  // the SW list after ingestion, or skipping the ingestion — must fail here.
+  console.log("-- P7: dv-rescan single-owner contract --");
+  const fs7 = require("fs");
+  const bgSrc7 = fs7.readFileSync("extension/background.js", "utf8");
+  // negative 1: the ingestion loop is removed -> canonical list stays at seeds
+  const neg7a = bgSrc7.replace(/if \(Array\.isArray\(r\.videos\)\) \{[\s\S]*?\n        \}/, "        /* P7 ingestion stripped */");
+  // negative 2: the reply trusts the content report's length instead of found
+  const neg7b = bgSrc7.replace("count: found.length", "count: (r && Array.isArray(r.videos)) ? r.videos.length : found.length");
+  const runRescan7 = (bgSource, contentVideos) => {
+    let listener = null;
+    let sentToTab = null;
+    const wsInstance = {
+      readyState: 1, // WebSocket.OPEN
+      _msg: [],
+      addEventListener(type, cb) { (this._msg[type] = this._msg[type] || []).push(cb); },
+      removeEventListener() {},
+      send(data) {
+        let m; try { m = JSON.parse(data); } catch (e) { return; }
+        if (m.type === "download") {
+          const reply = JSON.stringify({ type: "accepted", url: m.url, id: "P7-test" });
+          for (const cb of this._msg.message || []) cb({ data: reply });
+        }
+      },
+      close() {},
+    };
+    const chrome7 = {
+      storage: { local: { get() {}, set() { return Promise.resolve(); } } },
+      runtime: {
+        sendMessage() { return Promise.resolve(); },
+        onMessage: { addListener(fn) { listener = fn; } },
+        onInstalled: { addListener() {} },
+        onStartup: { addListener() {} },
+      },
+      action: { onClicked: { addListener() {} } },
+      tabs: {
+        onRemoved: { addListener() {} },
+        sendMessage(tabId, msg) { sentToTab = { tabId, msg }; return Promise.resolve({ ok: true, videos: contentVideos }); },
+      },
+      tabGroups: {}, windows: {},
+      cookies: { getAll() { return Promise.resolve([]); } },
+      webRequest: { onBeforeRequest: { addListener() {} }, onHeadersReceived: { addListener() {} } },
+    };
+    function WsStub7() { return wsInstance; }
+    WsStub7.OPEN = 1; WsStub7.CONNECTING = 0; WsStub7.CLOSING = 2; WsStub7.CLOSED = 3;
+    WsStub7.prototype.addEventListener = function () {};
+    WsStub7.prototype.removeEventListener = function () {};
+    new Function("chrome", "WebSocket", "self", "console", bgSource + "\n;return true;")(chrome7, WsStub7, {}, console);
+    if (!listener) throw new Error("P7 listener not captured");
+    return {
+      seed(url) { listener({ type: "video-found", url }, { tab: { id: 1 } }, () => {}); },
+      rescan() {
+        return Promise.race([
+          new Promise((resolve) => listener({ type: "dv-rescan", tabId: 42 }, {}, resolve)),
+          new Promise((resolve) => setTimeout(() => resolve(undefined), 1500)),
+        ]);
+      },
+      sentToTab: () => sentToTab,
+    };
+  };
+  const seedA7 = "http://127.0.0.1:9/v/seed-a.mp4";
+  const seedZ7 = "http://127.0.0.1:9/v/seed-z.mp4";
+  const newB7 = "http://127.0.0.1:9/v/new-b.mp4";
+  // the content report carries seedA (already canonical) + newB
+  const videos7 = [
+    { url: seedA7, title: "dup", pageUrl: "http://127.0.0.1:9/page/", kind: "mp4" },
+    { url: newB7, title: "new", pageUrl: "http://127.0.0.1:9/page/", kind: "mp4" },
+  ];
+  const d7 = runRescan7(bgSrc7, videos7);
+  d7.seed(seedA7); d7.seed(seedZ7);
+  const after7 = await d7.rescan();
+  const st7 = d7.sentToTab();
+  assert("P7 dv-rescan forwards to the tab's content script", st7 && st7.tabId === 42 && st7.msg && st7.msg.type === "dv-rescan", JSON.stringify(st7));
+  // canonical = seeds (seedA + seedZ) + newB from the report = 3; the report's
+  // own length is 2, so a page-local-count reply would be caught.
+  assert("P7 reply count is SW found.length after ingestion (3, deduped)", after7 && after7.ok === true && after7.count === 3, "reply=" + JSON.stringify(after7));
+  const dA7 = runRescan7(neg7a, videos7);
+  dA7.seed(seedA7); dA7.seed(seedZ7);
+  const negResA7 = await dA7.rescan();
+  assert("P7 NEGATIVE: stripped ingestion yields count 2 (guard bites)", negResA7 && negResA7.count === 2, "reply=" + JSON.stringify(negResA7));
+  const dB7 = runRescan7(neg7b, videos7);
+  dB7.seed(seedA7); dB7.seed(seedZ7);
+  const negResB7 = await dB7.rescan();
+  assert("P7 NEGATIVE: content-length reply yields count 2 (guard bites)", negResB7 && negResB7.count === 2, "reply=" + JSON.stringify(negResB7));
+
   // ---- P5: preload / renderer IPC contract ----
   // Every window.api.<method> a renderer file calls must exist in the preload
   // it runs under, and every ipc channel a preload touches must have an ipcMain
