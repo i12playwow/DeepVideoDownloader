@@ -1019,7 +1019,10 @@ class DownloadManager {
       } catch (err) {
         if (err.aborted) throw err;
         if (attempt >= maxRefresh) {
-          if (isExpiredError(err) || isSignedGetVideoExpired(item, err)) err._expired = true;
+          // Only signed, refreshable links (streamtape get_video tokens, signed
+          // m3u8 segments) are "expired" when re-resolution keeps failing. A
+          // plain dead URL that 404s stays its original category (http).
+          if (isSignedRefreshable(item) || isSignedGetVideoExpired(item, err)) err._expired = true;
           throw err;
         }
         // Rate-limited / Cloudflare-blocked: rotate proxy, back off, and retry
@@ -1049,13 +1052,19 @@ class DownloadManager {
         // with a streamtape/fstape referer is still refreshable �?from the page.
         const refreshable =
           (item._resolvedUrl && item._resolvedUrl !== item.url) || isSignedRefreshable(item);
-        if (!refreshable) { err._expired = true; throw err; }
+        // Not refreshable: the URL is exactly what it is, so a bare 403/404/410
+        // is just that status, not a lapsed signed token. Keep the original
+        // error/category (the auto-retry cap's preserved-category contract).
+        if (!refreshable) throw err;
         let fresh = null;
         try {
           fresh = await this._resolveFresh(item, baseHeaders);
         } catch (e) { /* re-resolution failed �?keep original error */ }
         _emitResolved();
-        if (!fresh || fresh === item._resolvedUrl) { err._expired = true; throw err; }
+        if (!fresh || fresh === item._resolvedUrl) {
+          if (isSignedRefreshable(item) || isSignedGetVideoExpired(item, err)) err._expired = true;
+          throw err;
+        }
         item._resolvedUrl = fresh;
         await fsp.rm(item.tempDir, { recursive: true, force: true }).catch(() => {});
         await fsp.rm(item.finalPath, { force: true }).catch(() => {});

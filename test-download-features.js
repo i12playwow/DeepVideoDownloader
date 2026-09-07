@@ -353,7 +353,34 @@ const netErr = () => { const e = new Error("network down"); e.category = "networ
     cleanup(dir);
   })();
 
-  // ---- link-expired handler -------------------------------------------------
+  // ---- expired relabel is signed-only (plain 404 keeps its category) ----
+  await (async () => {
+    const { dm, dir } = makeDm({ maxRefresh: 2 });
+    // A plain dead URL whose resolved URL differs from the input (e.g. URL
+    // normalization or proxy pass-through) still enters the refresh path.
+    // Re-resolution keeps 404ing, but the item must land in terminal error
+    // with the ORIGINAL http category — only signed refreshable links
+    // (streamtape get_video / signed m3u8) relabel to "expired".
+    dm._runOnce = async (item) => {
+      item._resolvedUrl = "http://127.0.0.1:9999/v/fail2.mp4";
+      const e = new Error("404 Not Found");
+      e.status = 404;
+      e.category = "http";
+      throw e;
+    };
+    dm._resolveFresh = async () => { throw new Error("player page gone"); };
+    const id = await dm.enqueue({ url: "http://127.0.0.1:9999/v/fail.mp4", title: "plain-404" });
+    await waitFor(dm, id, ["error", "done"], 4000);
+    const it = dm.items.get(id);
+    t("plain 404 through refresh path keeps http category", () => {
+      assert.strictEqual(it.status, "error");
+      assert.strictEqual(it.errorCategory, "http");
+      assert.ok(!/expired/i.test(it.error), "no expired relabel for plain 404: " + it.error);
+    });
+    cleanup(dir);
+  })();
+
+    // ---- link-expired handler -------------------------------------------------
   await (async () => {
     const { dm, dir } = makeDm({ maxRefresh: 1, concurrency: 1 });
     const resolvingSeen = [];
