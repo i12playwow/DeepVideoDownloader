@@ -61,10 +61,27 @@ const settings = createSettings({
     proxyManager = new ProxyManager(cfg);
     dm.config = cfg;
     dm.proxyManager = proxyManager; // drop stale bad/latency proxy state
+    pushAutoGrabState(); // keep the extension's auto-grab mirror in sync
   }
 });
 let proxyManager = new ProxyManager(settings.get());
 let dm = new DownloadManager({ config: settings.get(), proxyManager, onUpdate: pushUpdate, cookieProvider: (url) => cookieHeaderFor(url), onRequiresBrowser: (url) => browserOpen.queueBrowserOpen(url) });
+
+// Auto-grab: push the current autoGrab state to every connected extension.
+// Sent on hello-time applies, on setting changes, and it also triggers an
+// immediate harvest when the setting just turned ON, so enabling the toggle
+// grabs everything the extension has already found.
+function pushAutoGrabState(justEnabled = false) {
+  const clients = wss ? Array.from(wss.clients) : [];
+  const on = !!settings.get().autoGrab;
+  for (const c of clients) {
+    if (c.readyState !== 1 || !c.isExtension) continue;
+    try {
+      c.send(JSON.stringify({ type: "dv-auto-grab", on }));
+      if (on && justEnabled) c.send(JSON.stringify({ type: "dv-monitor-grab" }));
+    } catch (e) { /* ignore */ }
+  }
+}
 // Built-in capture browser (Deep Grab extension) lives in lib/browser.js;
 // getConfig + cookieHeaderFor are the only main.js-owned inputs it needs.
 const browser = createBuiltinBrowser({ getConfig: () => settings.get(), cookieHeaderFor });
@@ -98,6 +115,18 @@ function flushUpdates() {
   // relay status back to the extension over WebSocket (one status per entry)
   const clients = wss ? Array.from(wss.clients) : [];
   if (clients.length && clients.some((c) => c.readyState === 1)) {
+    const ext = clients.find((c) => c.readyState === 1 && c.isExtension);
+    // autoGrab: when the setting is on, each completed download closes its
+    // source tab and harvests everything new the extension has found.
+    if (ext && batch.some((it) => it.status === "done") && settings.get().autoGrab) {
+      const doneItems = batch.filter((it) => it.status === "done" && it.url);
+      for (const it of doneItems) {
+        if (it.referer) {
+          try { ext.send(JSON.stringify({ type: "dv-close-tab", pageUrl: it.referer })); } catch (e) { /* ignore */ }
+        }
+      }
+      try { ext.send(JSON.stringify({ type: "dv-monitor-grab" })); } catch (e) { /* ignore */ }
+    }
     const payloads = batch.map((item) => JSON.stringify({
       type: "status",
       id: item.id,
@@ -112,6 +141,7 @@ function flushUpdates() {
       proxy: item.proxy,
       error: item.error,
       errorCategory: item.errorCategory,
+      resolving: !!item.resolving,
       refreshCount: item.refreshCount,
       finalPath: item.finalPath,
       thumb: item.thumb || ""
@@ -175,11 +205,25 @@ function startWsServer() {
       return;
     }
     ws.send(JSON.stringify({ type: "hello", version: "1.0.0", port: settings.get().port }));
+    ws.isExtension = origin.startsWith("chrome-extension://") || origin.startsWith("moz-extension://");
+    ws.monitorEnabled = false;
+    if (wss) wss._extWs = ws; // extension socket handle for autoGrab / monitor pushes
     ws.on("message", async (data) => {
       let msg;
       try {
         msg = JSON.parse(data.toString());
       } catch (e) {
+        return;
+      }
+      if (msg.type === "hello") {
+        // Tell the extension the authoritative autoGrab state right after its hello.
+        try { ws.send(JSON.stringify({ type: "dv-auto-grab", on: !!settings.get().autoGrab })); } catch (e) { /* ignore */ }
+      }
+      if (msg.type === "dv-monitor-set") {
+        // Popup button -> app setting. Persist via the single settings path;
+        // onApply re-broadcasts the state and harvests when just enabled.
+        settings.update({ autoGrab: msg.on === true });
+        pushAutoGrabState(msg.on === true);
         return;
       }
       if (msg.type === "download" && crawlThrottle()) {

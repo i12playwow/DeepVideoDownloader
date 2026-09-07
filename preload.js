@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld("api", {
   resumeAll: () => ipcRenderer.invoke("download-resume-all"),
   retryFailed: () => ipcRenderer.invoke("download-retry-failed"),
   retry: (id) => ipcRenderer.invoke("download-retry", id),
+  prioritize: (id) => ipcRenderer.invoke("download-prioritize", id),
   resumeLast: () => ipcRenderer.invoke("download-resume-last"),
   cancel: (id) => ipcRenderer.invoke("download-cancel", id),
   remove: (id) => ipcRenderer.invoke("download-remove", id),
