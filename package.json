@@ -6,7 +6,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win",
+    "dist": "electron-builder --win && node scripts/check-dist-artifact.js",
     "check": "node check.js && node .freebuff/sync-demo.js --selftest && node scripts/check-release-drill.js",
     "test": "node test-config.js && node test-settings.js && node test-hls.js && node test-proxy.js && node test-range-server.js --selftest && node test-download-features.js && node test-e2e-harness.js",
     "boot-verify": "node scripts/boot-verify.js"
@@ -45,7 +45,7 @@
     ],
     "extraResources": [
       {
-        "from": "build/ffmpeg/ffmpeg.exe",
+        "from": "vendor/ffmpeg/ffmpeg.exe",
         "to": "ffmpeg.exe"
       }
     ],
