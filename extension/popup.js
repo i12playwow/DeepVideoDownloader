@@ -175,30 +175,40 @@ rescanBtn.addEventListener("click", () => {
   });
 });
 
-// Auto-monitor toggle: reflects/sets the background's dv_monitor flag.
+// Auto-monitor toggle: reflects/sets the background's autoGrab mirror.
+// monitorOn is the rendered state — never parse the DOM for it.
+let monitorOn = false;
 function renderMonitor(on) {
-  monitorBtn.textContent = "Auto monitor: " + (on ? "ON" : "OFF");
-  monitorBtn.className = on ? "monitor-on" : "monitor-off";
+  monitorOn = on === true;
+  monitorBtn.textContent = "Auto monitor: " + (monitorOn ? "ON" : "OFF");
+  monitorBtn.className = monitorOn ? "monitor-on" : "monitor-off";
 }
 function loadMonitor() {
   chrome.runtime.sendMessage({ type: "dv-monitor-get" }, (r) => {
     if (r) renderMonitor(r.on === true);
   });
 }
+function resyncFromSw() { refreshStatus(); loadMonitor(); }
 monitorBtn.addEventListener("click", () => {
-  const next = !monitorBtn.classList.contains("monitor-on");
+  const next = !monitorOn;
   chrome.runtime.sendMessage({ type: "dv-monitor-set", on: next }, (r) => {
     if (r) renderMonitor(r.on === true);
   });
 });
 
 // background broadcasts dv-found-updated whenever the found list / sizes change,
-// and desktop-status when the WS link changes. Refresh live while the popup is open.
+// desktop-status when the WS link changes, and dv-monitor-changed whenever the
+// autoGrab mirror flips — refresh live while the popup is open. Re-pull on
+// visibility/focus too: a push can be MISSED while the popup page is hidden or
+// throttled, and a stale toggle label used to make the next click send the
+// wrong direction.
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "dv-found-updated") loadFound();
   else if (msg && msg.type === "desktop-status") setStatus(msg.ok ? "connected" : "disconnected");
   else if (msg && msg.type === "dv-monitor-changed") renderMonitor(msg.on === true);
 });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) resyncFromSw(); });
+window.addEventListener("focus", resyncFromSw);
 
 refreshStatus();
 loadFound();
