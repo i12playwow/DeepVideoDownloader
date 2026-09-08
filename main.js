@@ -14,6 +14,7 @@ const { DownloadManager, requestWithRedirects } = require("./downloader");
 const { ProxyManager } = require("./proxy");
 const browserOpen = require("./lib/browser-open");
 const wsBridge = require("./lib/ws-bridge");
+const { statusPayload } = require("./lib/status");
 const { createSettings } = require("./lib/settings");
 const { createBuiltinBrowser } = require("./lib/browser");
 const { registerIpc } = require("./lib/ipc");
@@ -128,38 +129,10 @@ function flushUpdates() {
       try { ext.send(JSON.stringify({ type: "dv-monitor-grab" })); } catch (e) { /* ignore */ }
     }
     // The status push carries the item's human error string plus a structured
-    // code derived from its errorCategory (closed-ish set) and whether the
-    // failure is transient (auto-retried before landing in terminal error).
-    // Pure helpers keyed only on the category — they must not touch the item,
-    // or an errored download would throw here and drop the whole status flush.
-    const transientCat = (cat) => cat === "network" || cat === "rate-limited" || cat === "blocked";
-    const statusCode = (cat) => !cat ? "" :
-      (cat === "expired" ? "EXPIRED" :
-       cat === "not-video" ? "NOT_VIDEO" :
-       cat === "requires-browser" ? "REQUIRES_BROWSER" :
-       cat === "rate-limited" ? "RATE_LIMITED" : cat.toUpperCase());
-    const payloads = batch.map((item) => JSON.stringify({
-      type: "status",
-      id: item.id,
-      reqId: item.reqId || "",
-      url: item.url,
-      label: item.label,
-      fileName: item.fileName,
-      status: item.status,
-      total: item.total,
-      received: item.received,
-      progress: item.total ? item.received / item.total : 0,
-      speed: item.speed,
-      proxy: item.proxy,
-      error: item.error,
-      errorCategory: item.errorCategory,
-      errorCode: statusCode(item.errorCategory),
-      retryable: !!item.errorCategory && transientCat(item.errorCategory),
-      resolving: !!item.resolving,
-      refreshCount: item.refreshCount,
-      finalPath: item.finalPath,
-      thumb: item.thumb || ""
-    }));
+    // code derived from its errorCategory and whether the failure is transient
+    // (auto-retried before landing in terminal error). The payload builder is
+    // pure and lives in lib/status.js so this flush path is testable offline.
+    const payloads = batch.map((item) => JSON.stringify(statusPayload(item)));
     clients.forEach((client) => {
       if (client.readyState === 1) {
         for (const p of payloads) {

@@ -21,6 +21,7 @@ const { sanitizeName, titleFromReferer, titleFromUrl } = require("./lib/names");
 const { SJ_PLAYER_RE, resolveUrl, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isCfwalledSupjavMovie } = require("./lib/resolvers");
 const { unwrapExtensionUrl } = require("./lib/urls");
 const { HistoryStore, canonicalKeys } = require("./lib/history-store");
+const { isTransientError } = require("./lib/status");
 
 // A file must be at least this big to count as a real downloaded video for the
 // on-disk duplicate check. Smaller files are partials/stubs (failed CF probes,
@@ -507,7 +508,7 @@ class DownloadManager {
       item._retryAt = null;
       item.status = "queued";
       this._queuedIds.add(item.id);
-      item.error = "";
+      this._clearError(item);
       item.speed = 0;
       item.lastEmit = Date.now();
       item._lastBytes = item.received;
@@ -658,6 +659,7 @@ class DownloadManager {
       _canon: canon, // stable content keys (streamtape id / hls path / cdn dir) for chain dedupe
       refreshCount: 0,
       errorCategory: "",
+      errorStatus: 0,
       priority: false,
       duplicate: false,
       _activeRes: new Set(),
@@ -681,6 +683,7 @@ class DownloadManager {
           proxy: this.proxy,
           error: this.error,
           errorCategory: this.errorCategory,
+          errorStatus: this.errorStatus || 0,
           refreshCount: this.refreshCount,
           resolving: !!this._resolving,
           resolveAttempt: this._resolveAttempt || 0,
@@ -712,6 +715,24 @@ class DownloadManager {
       this.checkScheduled();
     }
     return id;
+  }
+
+  // Single owner of the item's error fields (message, category, HTTP status):
+  // every write site goes through these helpers so a failed -> requeued ->
+  // failed cycle can never leave stale error data on the wire (status push)
+  // or in the UI. The transient rule itself lives in lib/status.js and is
+  // called from the pump catch below.
+  _setError(item, cat, err, prefix) {
+    item.error = (prefix || "") + ((err && err.message) || String(err));
+    item.errorCategory = cat;
+    item.errorStatus = (err && err.status) || 0;
+    item.speed = 0;
+  }
+
+  _clearError(item) {
+    item.error = "";
+    item.errorCategory = "";
+    item.errorStatus = 0;
   }
 
   async pump() {
@@ -756,15 +777,13 @@ class DownloadManager {
           // attempt failed. Label it "expired" so the UI and retryFailed can
           // treat it as a refreshable-expiry case rather than a generic error.
           if (err._expired) cat = "expired";
-          next.error = err.message || String(err);
-          if (err._expired) next.error = "Link expired: " + next.error;
-          next.errorCategory = cat;
-          next.speed = 0;
+          this._setError(next, cat, err, err._expired ? "Link expired: " : "");
           // Transient failures (network / rate-limit / cloudflare / 5xx) retry
           // automatically with exponential backoff before ever landing in
-          // error; terminal categories go straight to error.
-          const transient = cat === "network" || cat === "rate-limited" || cat === "blocked" ||
-            (cat === "http" && err.status >= 500);
+          // error; terminal categories go straight to error. The rule is the
+          // single isTransientError in lib/status.js — the same function the
+          // status push uses for its retryable flag.
+          const transient = isTransientError(cat, err.status);
           if (transient && (next.retryCount || 0) < (this.config.maxRetries ?? 3)) {
             next.retryCount = (next.retryCount || 0) + 1;
             next._retryAt = Date.now() + this._retryBackoffMs * Math.pow(2, next.retryCount - 1);
@@ -784,8 +803,7 @@ class DownloadManager {
           if (autoMin > 0 && cat !== "requires-browser") {
             const autoMax = this.config.autoRetryMax || 0;
             if (autoMax > 0 && (next._autoRetries || 0) >= autoMax) {
-              next.error = "Auto-retry exhausted after " + (next._autoRetries || 0) + " cycles: " + (err.message || String(err));
-              next.errorCategory = cat;
+              this._setError(next, cat, err, "Auto-retry exhausted after " + (next._autoRetries || 0) + " cycles: ");
             } else {
               next._autoRetries = (next._autoRetries || 0) + 1;
               next.retryCount = (next.retryCount || 0) + 1;
@@ -1034,7 +1052,7 @@ class DownloadManager {
           if (this.proxyManager && item._proxy) this.proxyManager.markBad(item._proxy);
           item._proxy = null;
           await delay(1500 * (attempt + 1));
-          item.error = "";
+          this._clearError(item);
           item.status = "running";
           this.emit(item);
           continue;
@@ -1072,8 +1090,7 @@ class DownloadManager {
         await fsp.rm(item.finalPath, { force: true }).catch(() => {});
         item.received = 0;
         item._lastBytes = 0;
-        item.error = "";
-        item.errorCategory = "";
+        this._clearError(item);
         item.refreshCount = (item.refreshCount || 0) + 1;
         item.status = "running";
         this.emit(item);
@@ -1098,8 +1115,7 @@ class DownloadManager {
         }
         item.listCount = n;
         item.status = "done";
-        item.error = "";
-        item.errorCategory = "";
+        this._clearError(item);
         this.emit(item);
         this._maybeFinalize(item);
         return;
@@ -1825,7 +1841,7 @@ class DownloadManager {
     if (item.status === "paused" || item.status === "error" || item.status === "scheduled") {
       item.status = "queued";
       this._queuedIds.add(item.id);
-      item.error = "";
+      this._clearError(item);
       item.retryCount = 0;
       item._retryAt = null;
       item._autoRetries = 0; // manual action restarts the auto-retry budget
@@ -1855,7 +1871,7 @@ class DownloadManager {
       if (it.status !== "paused") continue;
       it.status = "queued";
       this._queuedIds.add(it.id);
-      it.error = "";
+      this._clearError(it);
       it.speed = 0;
       it._retryAt = null;
       this.emit(it);
@@ -1904,8 +1920,7 @@ class DownloadManager {
   retry(id) {
     const item = this.items.get(id);
     if (!item || item.status !== "error") return false;
-    item.error = "";
-    item.errorCategory = "";
+    this._clearError(item);
     item.retryCount = 0;
     item._retryAt = null;
     item._autoRetries = 0; // manual retry restarts the auto-retry budget
