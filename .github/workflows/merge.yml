@@ -39,7 +39,10 @@ permissions:
 
 jobs:
   merge:
-    runs-on: ubuntu-latest
+    # Self-hosted, not ubuntu-latest: this account's hosted-runner allocation
+    # is refused (billing lock — jobs die pre-runner in ~5s with zero logs; see
+    # run.md). The script is pure Node (github-script), so Windows is fine.
+    runs-on: [self-hosted, windows, x64]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
