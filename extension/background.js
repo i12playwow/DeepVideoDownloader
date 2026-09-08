@@ -6,6 +6,15 @@ const FOUND_CAP = 10000;
 const RECONNECT_DELAY = 3000;
 const SEND_TIMEOUT = 20000;
 
+// Per-request id so an ack can be correlated to the exact request that sent it,
+// even when the same URL is re-sent (family-dedupe / retry). Monotonic counter +
+// random suffix is unique per SW lifetime, which is all the ack window needs.
+let reqSeq = 0;
+function nextReqId() {
+  reqSeq = (reqSeq + 1) % 0xffffffff;
+  return "r" + reqSeq.toString(36) + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+}
+
 let ws = null;
 let wsStatus = "offline"; // "connecting" | "online" | "offline"
 let reconnectTimer = null;
@@ -91,8 +100,14 @@ function broadcastStatus() {
   chrome.runtime.sendMessage({ type: "desktop-status", ok: wsStatus === "online" }).catch(() => {});
 }
 
+// Wire protocol version this extension speaks. The app refuses a client that
+// claims a NEWER protocol than it implements (PROTOCOL_MISMATCH -> close); an
+// older or legacy (no field) client is always accepted, so this only needs to
+// be bumped alongside a breaking message-shape change on BOTH sides.
+const EXT_PROTOCOL_VERSION = 1;
+
 function sendHello() {
-  try { ws.send(JSON.stringify({ type: "hello", v: "1.0.2" })); } catch (e) { /* ignore */ }
+  try { ws.send(JSON.stringify({ type: "hello", v: "1.0.2", protocolVersion: EXT_PROTOCOL_VERSION })); } catch (e) { /* ignore */ }
 }
 
 function broadcastFound() {
@@ -122,7 +137,7 @@ function doProbe(url) {
     const release = () => { probing.delete(url); resolve(); };
     if (!ws || ws.readyState !== WebSocket.OPEN) { release(); return; }
     try {
-      ws.send(JSON.stringify({ type: "probe", url }));
+      ws.send(JSON.stringify({ type: "probe", reqId: nextReqId(), url }));
     } catch (e) { release(); return; }
     setTimeout(release, PROBE_TIMEOUT);
   });
@@ -336,6 +351,11 @@ async function extractCookies(urls) {
 
 function sendInner(resolve, url, title, referer) {
   const cookieHeader = null; // populated asynchronously below
+  // Per-request id so a response can be correlated to this exact request even
+  // when the same URL is sent twice (family-dedupe/retry can otherwise mis-route
+  // the ack). Backward compatible: a server that does not echo reqId is matched
+  // by the old url-compare path.
+  const reqId = nextReqId();
   const timer = setTimeout(() => {
     ws.removeEventListener("message", onMsg);
     resolve({ ok: false, error: "Desktop app timeout" });
@@ -344,20 +364,24 @@ function sendInner(resolve, url, title, referer) {
   function onMsg(ev) {
     let m;
     try { m = JSON.parse(ev.data); } catch (e) { return; }
-    if (m.type === "accepted" && m.url === url) {
+    if (m.type !== "accepted" && m.type !== "error") return;
+    const mine = m.reqId != null ? m.reqId === reqId : m.url === url;
+    if (m.type === "accepted" && mine) {
       clearTimeout(timer);
       ws.removeEventListener("message", onMsg);
       resolve({ ok: true, id: m.id });
-    } else if (m.type === "error" && m.url === url) {
+    } else if (m.type === "error" && mine) {
       clearTimeout(timer);
       ws.removeEventListener("message", onMsg);
-      resolve({ ok: false, error: m.message });
+      // Structured envelope ({code, message, retryable, retryAfter}) with a
+      // fallback to the legacy flat {message} shape for older apps.
+      resolve({ ok: false, error: m.message, code: m.code || "", retryable: !!m.retryable, retryAfter: m.retryAfter || 0 });
     }
   }
   ws.addEventListener("message", onMsg);
   extractCookies([url, referer]).then((cookieHeader) => {
     try {
-      ws.send(JSON.stringify({ type: "download", url, title, referer, cookieHeader }));
+      ws.send(JSON.stringify({ type: "download", reqId, url, title, referer, cookieHeader }));
     } catch (e) {
       clearTimeout(timer);
       ws.removeEventListener("message", onMsg);

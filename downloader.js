@@ -568,7 +568,7 @@ class DownloadManager {
     grant();
   }
 
-  async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", cookieHeader = null, force = false, markDuplicate = true, dirOverride = null }) {
+  async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", cookieHeader = null, force = false, markDuplicate = true, dirOverride = null, reqId = "" }) {
     // Unwrap tab-suspender/lazy-load chrome-extension wrappers to their real
     // target (…/suspended.html#…uri=<url>) and reject unfetchable schemes.
     url = unwrapExtensionUrl(url);
@@ -635,6 +635,7 @@ class DownloadManager {
       title: effectiveTitle,
       referer,
       label,
+      reqId: reqId || "",
       cookieHeader: cookieHeader || null,
       dirOverride: effDirOverride,
       _windowBypass: windowBypass,
@@ -664,6 +665,7 @@ class DownloadManager {
       public() {
         return {
           id: this.id,
+          reqId: this.reqId || "",
           url: this.url,
           referer: this.referer,
           title: this.title,

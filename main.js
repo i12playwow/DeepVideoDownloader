@@ -127,9 +127,21 @@ function flushUpdates() {
       }
       try { ext.send(JSON.stringify({ type: "dv-monitor-grab" })); } catch (e) { /* ignore */ }
     }
+    // The status push carries the item's human error string plus a structured
+    // code derived from its errorCategory (closed-ish set) and whether the
+    // failure is transient (auto-retried before landing in terminal error).
+    // Pure helpers keyed only on the category — they must not touch the item,
+    // or an errored download would throw here and drop the whole status flush.
+    const transientCat = (cat) => cat === "network" || cat === "rate-limited" || cat === "blocked";
+    const statusCode = (cat) => !cat ? "" :
+      (cat === "expired" ? "EXPIRED" :
+       cat === "not-video" ? "NOT_VIDEO" :
+       cat === "requires-browser" ? "REQUIRES_BROWSER" :
+       cat === "rate-limited" ? "RATE_LIMITED" : cat.toUpperCase());
     const payloads = batch.map((item) => JSON.stringify({
       type: "status",
       id: item.id,
+      reqId: item.reqId || "",
       url: item.url,
       label: item.label,
       fileName: item.fileName,
@@ -141,6 +153,8 @@ function flushUpdates() {
       proxy: item.proxy,
       error: item.error,
       errorCategory: item.errorCategory,
+      errorCode: statusCode(item.errorCategory),
+      retryable: !!item.errorCategory && transientCat(item.errorCategory),
       resolving: !!item.resolving,
       refreshCount: item.refreshCount,
       finalPath: item.finalPath,
@@ -204,7 +218,7 @@ function startWsServer() {
       try { ws.close(1008, "origin not allowed"); } catch (e) { /* ignore */ }
       return;
     }
-    ws.send(JSON.stringify({ type: "hello", version: "1.0.0", port: settings.get().port }));
+    ws.send(JSON.stringify({ type: "hello", version: "1.0.0", protocolVersion: wsBridge.PROTOCOL_VERSION, port: settings.get().port }));
     ws.isExtension = origin.startsWith("chrome-extension://") || origin.startsWith("moz-extension://");
     ws.monitorEnabled = false;
     if (wss) wss._extWs = ws; // extension socket handle for autoGrab / monitor pushes
@@ -216,6 +230,18 @@ function startWsServer() {
         return;
       }
       if (msg.type === "hello") {
+        // Protocol handshake: an extension claiming a NEWER wire protocol than
+        // this app implements is refused (its messages may rely on fields the
+        // app won't send). An older client, or a legacy client that sends no
+        // protocolVersion at all, keeps working unchanged.
+        if (!wsBridge.isProtocolCompatible(msg.protocolVersion)) {
+          try {
+            ws.send(JSON.stringify(wsBridge.errorReply(wsBridge.ERROR_CODES.PROTOCOL_MISMATCH, "Extension is newer than the app — update Deep Video Downloader (app protocol v" + wsBridge.PROTOCOL_VERSION + ")", { url: "", reqId: msg.reqId })));
+          } catch (e) { /* ignore */ }
+          try { ws.close(1008, "protocol version mismatch"); } catch (e) { /* ignore */ }
+          return;
+        }
+        ws.protocolVersion = msg.protocolVersion == null ? wsBridge.PROTOCOL_VERSION : Number(msg.protocolVersion);
         // Tell the extension the authoritative autoGrab state right after its hello.
         try { ws.send(JSON.stringify({ type: "dv-auto-grab", on: !!settings.get().autoGrab })); } catch (e) { /* ignore */ }
       }
@@ -228,7 +254,9 @@ function startWsServer() {
       }
       if (msg.type === "download" && crawlThrottle()) {
         try {
-          ws.send(JSON.stringify({ type: "error", message: "Pace limit: too many downloads in the last minute.", url: msg.url }));
+          // Pace limit: retryable after the rolling-minute window (60s), mirroring
+          // the throttle's sustainedPerMin cap so the client knows when to back off.
+          ws.send(JSON.stringify(wsBridge.errorReply(wsBridge.ERROR_CODES.PACE_LIMITED, "Pace limit: too many downloads in the last minute.", { url: msg.url || "", reqId: msg.reqId, retryable: true, retryAfter: 60 })));
         } catch (e) { /* ignore */ }
         return;
       }
@@ -240,7 +268,7 @@ function startWsServer() {
           send: (o) => { try { ws.send(JSON.stringify(o)); } catch (e) { /* ignore */ } }
         });
       } catch (e) {
-        try { ws.send(JSON.stringify({ type: "error", message: e.message, url: msg.url })); } catch (_) {}
+        try { ws.send(JSON.stringify(wsBridge.errorReply(wsBridge.ERROR_CODES.INTERNAL, e.message, { url: msg.url || "" }))); } catch (_) {}
       }
     });
     ws.on("error", () => {});

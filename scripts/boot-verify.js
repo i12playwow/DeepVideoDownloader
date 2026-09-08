@@ -201,6 +201,12 @@ function wsDownload(url, title, referer, waitMs) {
     const states = [];
     const t0 = Date.now();
     let acceptedId = null;
+    // Request-id correlation pin: the request carries a unique id; the app must
+    // echo it in the accepted reply AND in every status push for that download,
+    // so a response can never be mis-routed to the wrong (duplicated) request.
+    const reqId = "bv-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+    let acceptedReqId = null;
+    let statusReqIds = new Set();
     let why = "timeout";
     let finished = false;
     const finish = (w) => {
@@ -209,19 +215,20 @@ function wsDownload(url, title, referer, waitMs) {
       why = w;
       clearTimeout(timer);
       try { ws.terminate(); } catch (e) { /* ignore */ }
-      resolve({ states, acceptedId, why });
+      resolve({ states, acceptedId, why, reqId, acceptedReqId, statusReqIds: Array.from(statusReqIds) });
     };
     const timer = setTimeout(() => finish("timeout"), waitMs);
     let ws = null;
     const connect = () => {
       ws = new WebSocket("ws://127.0.0.1:" + WS_PORT);
       ws.on("open", () => {
-        if (acceptedId == null) ws.send(JSON.stringify({ type: "download", url, title, referer: referer || "" }));
+        if (acceptedId == null) ws.send(JSON.stringify({ type: "download", reqId, url, title, referer: referer || "" }));
       });
       ws.on("message", (d) => {
         const m = JSON.parse(d.toString());
-        if (m.type === "accepted") acceptedId = m.id;
+        if (m.type === "accepted") { acceptedId = m.id; acceptedReqId = m.reqId; }
         if (m.type === "status" && m.url === url) {
+          if (m.reqId) statusReqIds.add(m.reqId);
           states.push({ t: Math.round((Date.now() - t0) / 1000), status: m.status, received: m.received, total: m.total, error: (m.error || ""), cat: m.errorCategory || "" });
           if (m.status === "done" || m.status === "error" || m.status === "duplicate") finish(m.status);
         }
@@ -242,6 +249,11 @@ async function phaseA(port) {
   const r = await wsDownload(url, "bv-a", "", 30000);
   const done = r.states.find((s) => s.status === "done");
   if (!r.acceptedId) return fail("A accepted", "no accepted reply");
+  // Request-id correlation: the accepted reply echoes the request id and every
+  // status push for this download carries it, so a duplicated URL can never
+  // mis-route the ack/status stream to the wrong request.
+  if (r.acceptedReqId !== r.reqId) return fail("A accepted reqId", "accepted.reqId=" + r.acceptedReqId + " expected " + r.reqId);
+  if (!r.statusReqIds.includes(r.reqId)) return fail("A status reqId", "statuses carried " + JSON.stringify(r.statusReqIds) + " expected " + r.reqId);
   if (!r.states.some((s) => s.status === "running")) return fail("A pump started", "never saw running: " + r.states.map((s) => s.status).join(","));
   if (!done) return fail("A completed", "no done in " + r.states.map((s) => s.status + "@" + s.t).join(","));
   if (done.received !== MP4.length || done.total !== MP4.length) return fail("A byte counts", "recv " + done.received + " total " + done.total + " expected " + MP4.length);

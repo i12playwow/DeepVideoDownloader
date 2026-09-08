@@ -290,25 +290,42 @@ function startServer(portRef, segBytesFn) {
     const responses = [];
     client.on("message", (d) => { try { responses.push(JSON.parse(d.toString())); } catch (e) {} });
 
-    // a) the download message the extension actually sends
-    client.send(JSON.stringify({ type: "download", url: base + "/playlist.ws.m3u8", title: "e2e-ws", referer: base, sources: [{ kind: "link", url: base + "/playlist.ws.m3u8", label: "" }] }));
+    // a) the download message the extension actually sends. A per-request id is
+    // echoed back so a response correlates to the exact request even when the
+    // same URL is re-sent (family-dedupe / retry mis-route protection).
+    const reqId = "e2e-req-" + Date.now();
+    client.send(JSON.stringify({ type: "download", reqId, url: base + "/playlist.ws.m3u8", title: "e2e-ws", referer: base, sources: [{ kind: "link", url: base + "/playlist.ws.m3u8", label: "" }] }));
     const accepted = await (async () => {
       const ok = await waitForCondition(() => responses.some((x) => x.type === "accepted"), 10000);
       return ok ? responses.find((x) => x.type === "accepted") : null;
     })();
     assert("E WS accepted response with id", accepted && Array.isArray(accepted.ids) && accepted.ids.length === 1, JSON.stringify(accepted));
+    assert("E accepted echoes reqId", accepted && accepted.reqId === reqId, "reqId=" + (accepted && accepted.reqId));
     if (accepted) {
       const it = await waitFor(dm, accepted.ids[0], 40000);
       assert("E WS download completes (status=done)", it && it.status === "done", it && it.status);
       assert("E final mp4 non-empty", it && it.finalPath && fs.existsSync(it.finalPath) && fs.statSync(it.finalPath).size > 0, it && it.finalPath);
+      // the enqueued item carries the request id (echoed by status pushes)
+      assert("E enqueued item stores reqId", it.reqId === reqId, "item.reqId=" + (it && it.reqId));
     }
-    // b) ping/pong + error branches
-    client.send(JSON.stringify({ type: "ping" }));
+    // b) ping/pong + error branches + probe reqId echo
+    client.send(JSON.stringify({ type: "ping", reqId }));
     const gotPong = await waitForCondition(() => responses.some((x) => x.type === "pong"), 5000);
     assert("E ping -> pong", gotPong);
-    client.send(JSON.stringify({ type: "download" }));
-    const gotErr = await waitForCondition(() => responses.some((x) => x.type === "error" && x.message === "No usable source"), 5000);
-    assert("E empty download -> No usable source error", gotErr);
+    const pong = responses.find((x) => x.type === "pong");
+    assert("E pong echoes reqId", pong && pong.reqId === reqId, "pong.reqId=" + (pong && pong.reqId));
+    client.send(JSON.stringify({ type: "download", reqId }));
+    const gotErr = await waitForCondition(() => responses.some((x) => x.type === "error" && x.code === "NO_USABLE_SOURCE"), 5000);
+    assert("E empty download -> NO_USABLE_SOURCE error", gotErr);
+    const err = responses.find((x) => x.type === "error" && x.code === "NO_USABLE_SOURCE");
+    assert("E error echoes reqId", err && err.reqId === reqId, "error.reqId=" + (err && err.reqId));
+    assert("E error carries structured envelope", err && err.message === "No usable source" && err.retryable === false && err.retryAfter == null,
+      JSON.stringify(err));
+    client.send(JSON.stringify({ type: "probe", reqId, url: base + "/playlist.ws.m3u8" }));
+    const gotPr = await waitForCondition(() => responses.some((x) => x.type === "probe-result"), 5000);
+    assert("E probe -> probe-result", gotPr);
+    const pr = responses.find((x) => x.type === "probe-result");
+    assert("E probe-result echoes reqId", pr && pr.reqId === reqId, "probe-result.reqId=" + (pr && pr.reqId));
 
     client.close();
     wsServer.close();
@@ -325,6 +342,42 @@ function startServer(portRef, segBytesFn) {
   assert("W http website origin rejected", !allow("http://127.0.0.1:9999"), "http origin");
   assert("W file origin rejected", !allow("file:///C:/x.html"), "file origin");
   assert("W null origin rejected", !allow("null"), "null origin");
+
+  // ---- V: WS protocol handshake (protocolVersion) ----
+  // The app refuses a client that claims a NEWER wire protocol than it
+  // implements, but keeps older and legacy (no protocolVersion) clients working.
+  console.log("-- V: WS protocol version handshake --");
+  const comp = (cv) => wsBridge.isProtocolCompatible(cv);
+  assert("V PROTOCOL_VERSION exported", Number.isInteger(wsBridge.PROTOCOL_VERSION) && wsBridge.PROTOCOL_VERSION >= 1, "v=" + wsBridge.PROTOCOL_VERSION);
+  assert("V legacy client (no protocolVersion) accepted", comp(undefined), "undefined");
+  assert("V empty-string protocolVersion accepted as legacy", comp(""), "empty string");
+  assert("V same version accepted", comp(wsBridge.PROTOCOL_VERSION), "equal");
+  // The current protocol is v1, so no positive older version exists yet; the
+  // branch still runs once a future bump makes PROTOCOL_VERSION - 1 valid.
+  if (wsBridge.PROTOCOL_VERSION > 1) {
+    assert("V older version accepted", comp(wsBridge.PROTOCOL_VERSION - 1), "older");
+  } else {
+    assert("V older version accepted (none below v1 yet)", true, "skip - v1 is the floor");
+  }
+  assert("V numeric string version accepted", comp(String(wsBridge.PROTOCOL_VERSION)), "numeric string");
+  assert("V newer version rejected", !comp(wsBridge.PROTOCOL_VERSION + 1), "newer");
+  assert("V much newer version rejected", !comp(999), "999");
+  assert("V non-numeric version rejected", !comp("abc"), "abc");
+  assert("V negative version rejected", !comp(-1), "negative");
+
+  // ---- V2: structured error envelope (errorReply + ERROR_CODES) ----
+  // Every error reply must carry the closed code set + retryable flag; the flat
+  // legacy shape ({message, url}) is gone from ws-bridge/main.js replies.
+  console.log("-- V2: structured error envelope --");
+  const er = wsBridge.errorReply(wsBridge.ERROR_CODES.NO_USABLE_SOURCE, "No usable source", { url: "u", reqId: "r1" });
+  assert("V2 errorReply builds type/code/message/url", er.type === "error" && er.code === "NO_USABLE_SOURCE" && er.message === "No usable source" && er.url === "u", JSON.stringify(er));
+  assert("V2 errorReply defaults retryable=false, no retryAfter", er.retryable === false && er.retryAfter == null, JSON.stringify(er));
+  assert("V2 errorReply echoes reqId", er.reqId === "r1", JSON.stringify(er));
+  const erPace = wsBridge.errorReply(wsBridge.ERROR_CODES.PACE_LIMITED, "Pace limit", { retryable: true, retryAfter: 60 });
+  assert("V2 PACE_LIMITED is retryable with retryAfter=60", erPace.retryable === true && erPace.retryAfter === 60, JSON.stringify(erPace));
+  assert("V2 closed code set exported", typeof wsBridge.ERROR_CODES === "object" &&
+    ["NO_USABLE_SOURCE", "CLOUDFLARE_CHALLENGED", "ENQUEUE_FAILED", "PACE_LIMITED", "PROTOCOL_MISMATCH", "INTERNAL"]
+      .every((c) => wsBridge.ERROR_CODES[c] === c), JSON.stringify(wsBridge.ERROR_CODES));
 
   // ---- G: supjav list-page resolution (mock fetch) ----
   console.log("\n-- G: supjav list-page resolution --");

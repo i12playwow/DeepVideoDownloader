@@ -163,6 +163,7 @@ wsTest("hello on connect + ping/pong", (ws, msgs, done) => {
     const hello = msgs.find((m) => m.type === "hello");
     if (hello) {
       assert("hello received", hello.type === "hello" && hello.version, "version: " + hello.version);
+      assert("hello advertises protocolVersion", Number.isInteger(hello.protocolVersion) && hello.protocolVersion >= 1, "protocolVersion: " + hello.protocolVersion);
     } else {
       assert("hello received", false, "no hello message");
     }
