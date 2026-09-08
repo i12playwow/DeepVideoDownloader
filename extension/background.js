@@ -233,13 +233,25 @@ function connect() {
         });
       }
     } else if (m && m.type === "status") {
-      // Desktop app reports download progress; update matching entry's size/error.
+      // Desktop app reports download progress; update matching entry's
+      // size/error. The app is the single owner of the structured error
+      // fields (errorCode/errorStatus/retryable — lib/status.js): mirror them
+      // EXACTLY from the push. An error push carries them; a retry/done push
+      // carries them cleared, which is how a requeued item sheds its stale
+      // error. Re-deriving the retryable rule here ("5xx is transient") would
+      // be the drift class this mirror exists to avoid.
       const entry = found.find((x) => x.url === m.url);
       if (!entry) return;
       let changed = false;
       if (m.total && entry.size !== m.total) { entry.size = m.total; changed = true; }
-      if (m.status === "error" && m.error && entry.error !== m.error) { entry.error = m.error; changed = true; }
-      if (m.status === "done" && entry.error) { entry.error = ""; changed = true; }
+      const errText = m.error || "";
+      const errCode = m.errorCode || "";
+      const errStatus = m.errorStatus || 0;
+      const retryable = !!m.retryable;
+      if (entry.error !== errText || entry.errorCode !== errCode || Number(entry.errorStatus) !== errStatus || entry.retryable !== retryable) {
+        entry.error = errText; entry.errorCode = errCode; entry.errorStatus = errStatus; entry.retryable = retryable;
+        changed = true;
+      }
       if (changed) { persist(); broadcastFound(); }
     } else if (m && m.type === "probe-result") {
       probing.delete(m.url);

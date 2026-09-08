@@ -1227,6 +1227,92 @@ function startServer(portRef, segBytesFn) {
     neg10c !== contentSrc10 && (neg10c.match(/maybeAutoCrawl\(clean\)/g) || []).length !== 4,
     "guard missed a call-site strip (count=" + ((neg10c.match(/maybeAutoCrawl\(clean\)/g) || []).length) + ")");
 
+  // ---- P11: extension error-status consumption contract ----
+  // The app's status push carries structured error fields (lib/status.js:
+  // errorStatus = raw HTTP status, errorCode = machine code, retryable = the
+  // single-source transient rule). The SW must store them on the found entry
+  // EXACTLY as pushed (the app is the single owner; a retry/done push carries
+  // them cleared, so the mirror is self-clearing), and the popup must render
+  // retryable failures distinctly from terminal ones (amber ⟳ vs red ✕).
+  // Guards the last unshipped seam of the status-push feature — fields that
+  // used to be emitted into the void.
+  console.log("-- P11: extension error-status consumption contract --");
+  const fs11 = require("fs");
+  const bgSrc11 = fs11.readFileSync("extension/background.js", "utf8").replace(/\r\n/g, "\n");
+  const popupSrc11 = fs11.readFileSync("extension/popup.js", "utf8");
+  const runStatus11 = async (bgSource) => {
+    let listener = null;
+    let wreq = null;
+    const wsInstance = {
+      readyState: 1, // WebSocket.OPEN
+      onmessage: null,
+      addEventListener() {},
+      removeEventListener() {},
+      send() {},
+      close() {},
+    };
+    const chrome11 = {
+      storage: { local: { get() { return Promise.resolve({}); }, set() { return Promise.resolve(); } } },
+      runtime: {
+        sendMessage() { return Promise.resolve(); },
+        onMessage: { addListener(fn) { listener = fn; } },
+        onInstalled: { addListener() {} },
+        onStartup: { addListener() {} },
+      },
+      action: { onClicked: { addListener() {} } },
+      tabs: { onRemoved: { addListener() {} }, get() { return Promise.resolve(null); } },
+      tabGroups: {}, windows: {},
+      cookies: { getAll() { return Promise.resolve([]); } },
+      webRequest: { onBeforeRequest: { addListener(fn) { wreq = fn; } }, onHeadersReceived: { addListener() {} } },
+    };
+    function WsStub11() { return wsInstance; }
+    WsStub11.OPEN = 1; WsStub11.CONNECTING = 0; WsStub11.CLOSING = 2; WsStub11.CLOSED = 3;
+    new Function("chrome", "WebSocket", "self", "console", bgSource + "\n;return true;")(chrome11, WsStub11, {}, console);
+    if (!wreq || !wsInstance.onmessage) throw new Error("P11 sandbox wiring failed");
+    const URL = "http://127.0.0.1:9/v/status-test.mp4";
+    wreq({ url: URL, tabId: 5, type: "media" }); // seed the found entry
+    await new Promise((r) => setTimeout(r, 30));
+    const getFound = () => new Promise((resolve) => { listener({ type: "get-found" }, {}, (r) => resolve(r)); });
+    const push = (data) => wsInstance.onmessage({ data: JSON.stringify(data) });
+    // All three steps observe the SAME live entry object, so snapshot the
+    // fields at each step — later pushes would otherwise mutate the earlier
+    // captures and every assert would read the final (cleared) state.
+    const snap = (e) => e && { error: e.error, errorCode: e.errorCode, errorStatus: e.errorStatus, retryable: e.retryable };
+    // retryable failure (http 502 -> the engine auto-requeues): fields land on the entry
+    push({ type: "status", url: URL, status: "error", error: "server error", errorCode: "HTTP", errorStatus: 502, retryable: true });
+    await new Promise((r) => setTimeout(r, 30));
+    const e1 = snap((await getFound()).found.find((x) => x.url === URL));
+    // terminal failure (http 404 -> NOT auto-retried): retryable false
+    push({ type: "status", url: URL, status: "error", error: "not found", errorCode: "HTTP", errorStatus: 404, retryable: false });
+    await new Promise((r) => setTimeout(r, 30));
+    const e2 = snap((await getFound()).found.find((x) => x.url === URL));
+    // done push carries the fields cleared -> the mirror sheds the stale error
+    push({ type: "status", url: URL, status: "done", error: "", errorCode: "", errorStatus: 0, retryable: false });
+    await new Promise((r) => setTimeout(r, 30));
+    const e3 = snap((await getFound()).found.find((x) => x.url === URL));
+    return { e1, e2, e3 };
+  };
+  const st11 = await runStatus11(bgSrc11);
+  assert("P11 SW stores the structured fields from a retryable push (errorStatus 502 / errorCode / retryable true)",
+    !!(st11.e1 && st11.e1.error === "server error" && st11.e1.errorCode === "HTTP" && st11.e1.errorStatus === 502 && st11.e1.retryable === true),
+    JSON.stringify(st11.e1));
+  assert("P11 SW mirrors a terminal push (errorStatus 404, retryable false)",
+    !!(st11.e2 && st11.e2.error === "not found" && st11.e2.errorStatus === 404 && st11.e2.retryable === false),
+    JSON.stringify(st11.e2));
+  assert("P11 SW sheds stale error fields when the done push carries them empty (self-clearing mirror)",
+    !!(st11.e3 && st11.e3.error === "" && !st11.e3.errorCode && st11.e3.errorStatus === 0 && st11.e3.retryable === false),
+    JSON.stringify(st11.e3));
+  // popup presentation contract: retryable and terminal get distinct classes/text
+  const checkPopupErr11 = (src) =>
+    src.includes('" dv-retry"') && src.includes('" dv-err"') &&
+    src.includes("errorStatus") && src.includes("errorCode") && src.includes("retryable") &&
+    src.includes('"⟳ " + err') && src.includes('"✕ " + err');
+  assert("P11 popup renders retryable (⟳ dv-retry) vs terminal (✕ dv-err) distinctly from the push fields",
+    checkPopupErr11(popupSrc11), "popup error presentation missing");
+  const neg11 = popupSrc11.replace('v.retryable ? " dv-retry" : " dv-err"', '" dv-err"');
+  assert("P11 NEGATIVE: retryable class collapsed into terminal -> guard bites",
+    neg11 !== popupSrc11 && !checkPopupErr11(neg11), "guard missed the collapse");
+
   // ---- P5: preload / renderer IPC contract ----
   // Every window.api.<method> a renderer file calls must exist in the preload
   // it runs under, and every ipc channel a preload touches must have an ipcMain
