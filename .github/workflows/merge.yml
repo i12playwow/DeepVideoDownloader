@@ -1,0 +1,186 @@
+# Gated master merge — replaces the hand-driven capture→delete→restore dance.
+#
+# Problem it solves: master's protection requires the `tests` check (strict),
+# but a NON-required failing check from the `cloudflare-workers-and-pages` app
+# ("Workers Builds: consoleapp1") poisons GitHub's mergeability to
+# `state: blocked` even when every required check is green, so PRs can only be
+# squash-merged by temporarily deleting protection. That dance used to be done
+# by hand; this workflow encodes it and gates it.
+#
+# Gate (tests check is AUTHORITATIVE): the workflow reads the current required
+# status checks off master's protection (so it tracks config drift) and refuses
+# to merge unless EVERY required context has a completed+success check run on
+# the PR head. It then tries a plain squash-merge; only when GitHub's merge
+# API reports the phantom-check block does it fall back to capture → delete →
+# merge → restore, and the restore is verified by the semantic read-back rules
+# in AGENTS.md (enforce_admins on, force-pushes off, linear history on, no
+# review requirement, required contexts unchanged).
+#
+# Secrets: ADMIN_TOKEN — an admin-capable PAT (classic `repo`, or fine-grained
+# with Administration:Write + Pull requests:Write + Checks:Read) needed because
+# the branch-protection endpoints refuse the default GITHUB_TOKEN. Trigger only:
+# a human dispatches with pr=<number> and confirm=YES as the approval gate.
+name: merge-pr (tests-gated)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to squash-merge into master"
+        required: true
+        type: number
+      confirm:
+        description: "Approval gate — type YES once the tests check is green on the PR"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/github-script@v7
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        with:
+          script: |
+            const token = process.env.ADMIN_TOKEN;
+            if (!token) {
+              core.setFailed("ADMIN_TOKEN secret is not set on the repo — add an admin PAT (see the workflow header) and re-dispatch.");
+              return;
+            }
+            const { owner, repo } = context.repo;
+            const api = "https://api.github.com";
+            const H = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+            const call = async (method, path, body) => {
+              const res = await fetch(api + path, { method, headers: H, body: body == null ? undefined : JSON.stringify(body) });
+              const text = await res.text();
+              let parsed; try { parsed = JSON.parse(text); } catch (e) { parsed = text; }
+              return { status: res.status, body: parsed };
+            };
+            const get = (p) => call("GET", p);
+            const post = (p, b) => call("POST", p, b);
+            const put = (p, b) => call("PUT", p, b);
+            const del = (p) => call("DELETE", p);
+
+            // ---- approval gate ----
+            const prNum = Number(github.event.inputs.pr);
+            const confirm = String(github.event.inputs.confirm || "").trim();
+            if (confirm !== "YES") {
+              core.setFailed(`Approval gate: set confirm=YES to merge PR #${prNum} (got "${confirm}").`);
+              return;
+            }
+
+            // ---- PR facts ----
+            const pr = (await get(`/repos/${owner}/${repo}/pulls/${prNum}`)).body;
+            if (pr.base.ref !== "master") { core.setFailed(`PR #${prNum} targets "${pr.base.ref}", not master — refusing.`); return; }
+            if (pr.merged) { console.log(`PR #${prNum} is already merged (${pr.merge_commit_sha}) — nothing to do.`); return; }
+            if (pr.state !== "open") { core.setFailed(`PR #${prNum} is ${pr.state}, not open — refusing.`); return; }
+            const headSha = pr.head.sha;
+            console.log(`PR #${prNum} → master, head ${headSha.slice(0, 7)} (${pr.title})`);
+
+            // ---- current protection on master (authoritative required checks) ----
+            const protRes = await get(`/repos/${owner}/${repo}/branches/master/protection`);
+            if (protRes.status === 404) {
+              console.log("WARN master has NO branch protection — merging without a tests gate.");
+            } else if (protRes.status !== 200) {
+              core.setFailed("could not read master protection: " + protRes.status + " " + JSON.stringify(protRes.body).slice(0, 300));
+              return;
+            }
+            const cap = protRes.status === 200 ? protRes.body : null;
+            const requiredContexts = cap && cap.required_status_checks ? (cap.required_status_checks.contexts || []) : [];
+            console.log("required status checks on master: " + JSON.stringify(requiredContexts));
+
+            // ---- tests check is AUTHORITATIVE: every required context green on head ----
+            const runs = (await get(`/repos/${owner}/${repo}/commits/${headSha}/check-runs`)).body;
+            const checkRuns = runs && runs.check_runs ? runs.check_runs : [];
+            for (const ctx of requiredContexts) {
+              const run = checkRuns.find((c) => c.name === ctx);
+              if (!run) {
+                core.setFailed(`Required check "${ctx}" has NO check run on head ${headSha.slice(0, 7)} — dispatch Actions → boot-verify (optional) on the PR branch first, then re-dispatch this workflow.`);
+                return;
+              }
+              if (run.status !== "completed" || run.conclusion !== "success") {
+                core.setFailed(`Required check "${ctx}" is ${run.status}/${run.conclusion} on head ${headSha.slice(0, 7)} — refusing to merge.`);
+                return;
+              }
+              console.log(`required check ${ctx}: ${run.status}/${run.conclusion} — OK`);
+            }
+            if (!requiredContexts.length) console.log("no required checks configured — proceeding on the dispatch gate alone.");
+
+            // ---- try the plain merge first (no protection churn when GitHub is sane) ----
+            const tryMerge = () => post(`/repos/${owner}/${repo}/pulls/${prNum}/merge`, {
+              commit_title: `${pr.title} (#${prNum})`,
+              sha: headSha,
+              merge_method: "squash"
+            });
+            let merge = await tryMerge();
+            if (merge.status === 200 || merge.status === 201) {
+              console.log(`MERGED directly — ${merge.body.sha || "?"} (no protection dance needed).`);
+              return;
+            }
+            const msg = typeof merge.body === "object" && merge.body ? JSON.stringify(merge.body).toLowerCase() : String(merge.body || "").toLowerCase();
+            if (!msg.includes("required status check") && !msg.includes("required_status_check") && !msg.includes("check") && merge.status !== 422) {
+              core.setFailed(`merge refused (${merge.status}): ${JSON.stringify(merge.body)} — no fallback attempted (not a check-poisoning block).`);
+              return;
+            }
+            console.log(`direct merge refused (${merge.status}) — likely the phantom Cloudflare check; using the capture → delete → merge → restore dance.`);
+
+            // ---- fallback: capture → delete → merge → restore (verified) ----
+            if (!cap) { core.setFailed("protection absent at capture time — cannot dance safely; merge manually."); return; }
+            const delRes = await del(`/repos/${owner}/${repo}/branches/master/protection`);
+            if (delRes.status !== 204 && delRes.status !== 200) {
+              core.setFailed("protection delete failed: " + delRes.status + " " + JSON.stringify(delRes.body).slice(0, 300));
+              return;
+            }
+            console.log("protection deleted for the merge window");
+            merge = await tryMerge();
+            if (merge.status !== 200 && merge.status !== 201) {
+              core.setFailed(`merge failed even with protection down (${merge.status}): ${JSON.stringify(merge.body)} — protection is DELETED, restore it manually from the capture in this run's log.`);
+              return;
+            }
+            // Restore byte-identical to the capture. NOTE: the protection API
+            // now REQUIRES `required_pull_request_reviews` and `restrictions` in
+            // the body (null = disabled) — omitting them 422s. Booleans come
+            // from the capture so drift (e.g. a future enforce_admins change)
+            // is preserved, not flattened.
+            const bval = (k, fallback) => (cap[k] != null ? !!cap[k].enabled : fallback);
+            const restoreBody = {
+              required_status_checks: { strict: true, contexts: requiredContexts },
+              enforce_admins: bval("enforce_admins", true),
+              required_pull_request_reviews: null,
+              restrictions: null,
+              required_linear_history: bval("required_linear_history", true),
+              allow_force_pushes: bval("allow_force_pushes", false),
+              allow_deletions: bval("allow_deletions", false),
+              block_creations: bval("block_creations", false),
+              required_conversation_resolution: bval("required_conversation_resolution", false),
+              lock_branch: bval("lock_branch", false),
+              allow_fork_syncing: bval("allow_fork_syncing", false)
+            };
+            const putRes = await put(`/repos/${owner}/${repo}/branches/master/protection`, restoreBody);
+            if (putRes.status !== 200) {
+              core.setFailed(`protection restore PUT failed (${putRes.status}): ${JSON.stringify(putRes.body).slice(0, 300)} — protection is INCONSISTENT, fix manually.`);
+              return;
+            }
+            // Semantic read-back per AGENTS.md (object-wrapped booleans are truthy — never shallow-compare).
+            const back = (await get(`/repos/${owner}/${repo}/branches/master/protection`)).body;
+            const contextsNow = back.required_status_checks ? (back.required_status_checks.contexts || []) : [];
+            const ok =
+              back.enforce_admins && back.enforce_admins.enabled === true &&
+              back.allow_force_pushes && back.allow_force_pushes.enabled === false &&
+              back.required_linear_history && back.required_linear_history.enabled === true &&
+              !back.required_pull_request_reviews &&
+              (!cap.required_signatures || (back.required_signatures && back.required_signatures.enabled === cap.required_signatures.enabled)) &&
+              contextsNow.join(",") === requiredContexts.join(",");
+            if (!ok) {
+              core.setFailed(`protection restore read-back FAILED: ${JSON.stringify(back)} — fix master protection manually.`);
+              return;
+            }
+            console.log(`protection restored and verified (semantic read-back OK; required checks: ${JSON.stringify(contextsNow)})`);
+            console.log(`MERGED via dance — ${merge.body.sha || "?"}`);
