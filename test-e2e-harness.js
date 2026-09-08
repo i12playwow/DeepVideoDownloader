@@ -1063,8 +1063,9 @@ function startServer(portRef, segBytesFn) {
   const checkPopupSync9 = (src) =>
     src.includes('msg.type === "dv-monitor-changed"') &&
     src.includes('msg.type === "desktop-status"') &&
+    src.includes('msg.type === "dv-found-updated"') &&
     src.includes('"visibilitychange"') &&
-    src.includes("resyncFromSw");
+    src.includes("resyncFromSw() { refreshStatus(); loadMonitor(); loadFound(); }");
   assert("P9 popup handles the SW mirror pushes (dv-monitor-changed + desktop-status)",
     checkPopupSync9(popupSrc9), "push handlers missing");
   assert("P9 SW broadcasts dv-monitor-changed whenever the mirror flips",
@@ -1075,6 +1076,56 @@ function startServer(portRef, segBytesFn) {
   const neg9b = popupSrc9.replace(/document\.addEventListener\("visibilitychange",[^\n]*/, "/* P9 visibility resync stripped */");
   assert("P9 NEGATIVE: visibility resync stripped -> guard bites",
     neg9b !== popupSrc9 && !checkPopupSync9(neg9b), "guard missed the strip");
+  const neg9c = popupSrc9.replace("resyncFromSw() { refreshStatus(); loadMonitor(); loadFound(); }", "resyncFromSw() { refreshStatus(); loadMonitor(); }");
+  assert("P9 NEGATIVE: found-list pull stripped from the resync -> guard bites",
+    neg9c !== popupSrc9 && !checkPopupSync9(neg9c), "guard missed the strip");
+
+  // ---- P10: always-on link crawler contract (content.js) ----
+  // The always-on background crawler must auto-send every captured link match
+  // (video URL, JAV movie page, host dl entry) WITHOUT the manual "Send"
+  // toggle (grabOn) that gates maybeAutoDownload. Guards that (a) the default
+  // config carries autoCrawl ON, (b) maybeAutoCrawl exists and is gated only by
+  // config.autoCrawl (not grabOn), and (c) every link capture path (best-only
+  // + non-best-only tryCapture, tryCaptureMoviePage, tryCaptureDl) calls it.
+  // A future edit that reverts to per-click sending silently loses the feature.
+  console.log("-- P10: always-on link crawler contract --");
+  const fs10 = require("fs");
+  const contentSrc10 = fs10.readFileSync("extension/content.js", "utf8");
+  const checkCrawler10 = (src) =>
+    src.includes("autoCrawl: true") &&
+    src.includes("function maybeAutoCrawl(url)") &&
+    src.includes("if (!config.autoCrawl) return;") &&
+    !/maybeAutoDownload\([^)]*\);\s*$/.test(src.slice(src.indexOf("function maybeAutoCrawl"), src.indexOf("function flushAutoPending"))) &&
+    (src.match(/maybeAutoCrawl\(clean\)/g) || []).length >= 4;
+  assert("P10 content.js defines the always-on crawler (autoCrawl default ON + maybeAutoCrawl)",
+    checkCrawler10(contentSrc10), "crawler contract missing");
+  // Each capture site must route through maybeAutoCrawl.
+  const crawlerSites10 = [
+    ["tryCapture best-only video link", contentSrc10.slice(contentSrc10.indexOf("function tryCapture"), contentSrc10.indexOf("const DEFAULT_VIDEO_SELECTORS"))],
+    ["tryCapture non-best-only video link", contentSrc10.slice(contentSrc10.indexOf("function tryCapture"), contentSrc10.indexOf("function scanVideoElements"))],
+    ["tryCaptureMoviePage", contentSrc10.slice(contentSrc10.indexOf("function tryCaptureMoviePage"), contentSrc10.indexOf("function isSupjavDlUrl"))],
+    ["tryCaptureDl", contentSrc10.slice(contentSrc10.indexOf("function tryCaptureDl"), contentSrc10.indexOf("function extractCnPorn"))]
+  ];
+  for (const [name, slice] of crawlerSites10) {
+    assert("P10 " + name + " auto-sends its link match (maybeAutoCrawl call)",
+      slice.includes("maybeAutoCrawl("), name + " missing auto-crawl call");
+  }
+  // Negative drills: strip the crawler gate and each call site in turn; the
+  // guard must bite so the feature can never silently regress to manual sends.
+  const neg10a = contentSrc10.replace("autoCrawl: true", "autoCrawl: false");
+  assert("P10 NEGATIVE: autoCrawl default flipped OFF -> guard bites",
+    neg10a !== contentSrc10 && !checkCrawler10(neg10a), "guard missed the autoCrawl flip");
+  const neg10b = contentSrc10.replace("if (!config.autoCrawl) return;", "/* P10 gate stripped */");
+  assert("P10 NEGATIVE: maybeAutoCrawl gate stripped -> guard bites",
+    neg10b !== contentSrc10 && !checkCrawler10(neg10b), "guard missed the gate strip");
+  // Strip the FIRST maybeAutoCrawl(clean) call (the best-only tryCapture site,
+  // which is uniquely followed by "return;"). Source files carry CRLF, so
+  // rebuild the drill on the normalized line content, not raw \r\n layout.
+  const bestOnlyRegion10 = contentSrc10.slice(contentSrc10.indexOf("if (config.bestOnly)"), contentSrc10.indexOf("const DEFAULT_VIDEO_SELECTORS"));
+  const neg10c = contentSrc10.replace(bestOnlyRegion10, bestOnlyRegion10.replace("maybeAutoCrawl(clean);", "/* P10 call site stripped */"));
+  assert("P10 NEGATIVE: one capture call site stripped -> guard bites",
+    neg10c !== contentSrc10 && (neg10c.match(/maybeAutoCrawl\(clean\)/g) || []).length !== 4,
+    "guard missed a call-site strip (count=" + ((neg10c.match(/maybeAutoCrawl\(clean\)/g) || []).length) + ")");
 
   // ---- P5: preload / renderer IPC contract ----
   // Every window.api.<method> a renderer file calls must exist in the preload

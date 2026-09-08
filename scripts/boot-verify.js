@@ -59,7 +59,17 @@ function startFixture() {
   return new Promise((resolve, reject) => {
     fixture = http.createServer((req, res) => {
       const p = req.url.split("?")[0];
-      if (p === "/v/one.mp4" || p === "/v/two.mp4" || p === "/v/three.mp4") {
+      // Phase G (extension drill): category pages each load a distinct video,
+      // so the extension's webRequest capture fires with a real tabId.
+      const PAGE = (title, v) =>
+        "<!doctype html><html><head><title>" + title + "</title></head><body>" +
+        "<h1>" + title + "</h1><video src='" + v + "' autoplay muted preload='auto'></video>" +
+        "<script>fetch('" + v + "',{mode:'no-cors'}).catch(function(){})</script></body></html>";
+      // Serve ONLY the known-good media names (one/two/three for phases A/B,
+      // mov-*/act-*/tag-* for the Phase G extension drill). fail.mp4/fail2.mp4
+      // must stay 404 so the auto-retry phases (C/D) still get deterministic
+      // "not a video" errors.
+      if (/^\/v\/(?:one|two|three|mov-[^/]+|act-[^/]+|tag-[^/]+)\.mp4$/.test(p)) {
         const range = req.headers.range;
         if (range) {
           const m = /bytes=([0-9]+)-([0-9]*)/.exec(range);
@@ -76,6 +86,15 @@ function startFixture() {
         }
         res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": MP4.length, "Accept-Ranges": "bytes" });
         res.end(MP4);
+        return;
+      }
+      const cm = /^\/(actress|tag|movies)\/([^/]+)\//.exec(p);
+      if (cm) {
+        const v = cm[1] === "actress" ? "/v/act-" + cm[2] + ".mp4"
+                : cm[1] === "tag" ? "/v/tag-" + cm[2] + ".mp4"
+                : "/v/mov-" + cm[2] + ".mp4";
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(PAGE(cm[1] + "/" + cm[2], v));
         return;
       }
       res.writeHead(404, { "Content-Type": "text/plain" });
@@ -457,6 +476,309 @@ async function phaseF() {
   pass("F fair pump", "A stalled x3 -> exactly 2 running (cap holds); B x2 -> 2 running (no starvation); observed at t+35s");
 }
 
+// ---- Phase G: auto-close-movies-tab across a real MV3 SW death ----
+// Port of the thread driver's F5 --evict drill so `npm run boot-verify`
+// covers the send-time pageUrl fix (#27) as a gate. Prerequisite-gated: needs
+// Chrome for Testing (branded Chrome 137+ dropped --load-extension) + the
+// unpacked extension; SKIPs cleanly otherwise, so a CI checkout (which has
+// neither .freebuff/xt-cft nor the untracked thread tooling) stays green.
+// Self-contained: inlines its own CDP client + config-truth toggle; does NOT
+// require the untracked .freebuff/xt-lib.
+//
+// Flow (mirrors xt-cdp F5): open the movies tab -> its video capture lands in
+// the SW -> clear the entry's pageUrl + persist (the storage shape an MV3
+// eviction leaves) -> KILL the worker via CDP Target.closeTarget -> popup
+// monitor toggle ON (config.json truth polling) -> the fresh worker's
+// loadPersisted restores the pageUrl-less entry, the harvest grabs it, the
+// PRODUCT send-time resolution (background.js sendToDesktop) fills the referer
+// from the live tab -> the app download completes -> dv-close-tab -> the
+// movies tab closes. Pre-fix this phase FAILS (referer "" -> relay skipped).
+let chromeG = null; // { pid, cdpPort, extId, sandboxDir }
+
+function killChromeG() {
+  if (chromeG && chromeG.pid != null) {
+    try { execFileSync("taskkill", ["/PID", String(chromeG.pid), "/T", "/F"], { stdio: "ignore" }); } catch (e) { /* already gone */ }
+    chromeG.pid = null;
+  }
+}
+
+async function phaseG(port) {
+  console.log("--- Phase G: auto-close movies tab across an MV3 SW death (extension drill) ---");
+  const chromePath = process.env.CFT_CHROME || path.join(ROOT, ".freebuff", "xt-cft", "chrome-win64", "chrome.exe");
+  if (!fs.existsSync(chromePath)) {
+    pass("G auto-close drill", "SKIPPED - Chrome for Testing not found (set CFT_CHROME or .freebuff/xt-cft)");
+    return;
+  }
+
+  // Minimal CDP client (same wire shape as the thread xt-lib, inlined).
+  class Gcdp {
+    constructor(wsUrl) {
+      this.ws = new WebSocket(wsUrl);
+      this.id = 0;
+      this.pending = new Map();
+      this.ready = new Promise((res, rej) => { this.ws.on("open", res); this.ws.on("error", rej); });
+      this.ws.on("message", (d) => {
+        const m = JSON.parse(d.toString());
+        if (m.id && this.pending.has(m.id)) {
+          const { res, rej } = this.pending.get(m.id);
+          this.pending.delete(m.id);
+          m.error ? rej(new Error(m.error.message)) : res(m.result);
+        }
+      });
+    }
+    send(method, params = {}, sessionId) {
+      return this.ready.then(() => new Promise((res, rej) => {
+        const id = ++this.id;
+        this.pending.set(id, { res, rej });
+        const m = { id, method, params };
+        if (sessionId) m.sessionId = sessionId;
+        this.ws.send(JSON.stringify(m));
+      }));
+    }
+    close() { try { this.ws.close(); } catch (e) {} }
+  }
+  const ghttp = (u) => fetch(u).then((r) => r.json());
+  const glist = (p) => ghttp("http://127.0.0.1:" + p + "/json/list");
+  const gtargets = (b) => b.send("Target.getTargets").then((r) => r.targetInfos || []);
+  // Chrome ships built-in SWs (Google Hangouts thunk.js, Contextual Tasks
+  // background.js) that would collide with a url-only match — resolve the Deep
+  // Grab worker by its manifest NAME once, then match by that exact id+script.
+  let dgSwId = null;
+  const dgSwUrl = () => (dgSwId ? "chrome-extension://" + dgSwId + "/background.js" : null);
+  const isDgSw = (t) => t.type === "service_worker" && !!dgSwUrl() && t.url === dgSwUrl();
+  const findDgSwTarget = async (b) => {
+    if (dgSwId) return (await gtargets(b)).find(isDgSw) || null;
+    for (const t of (await gtargets(b)).filter((x) => x.type === "service_worker" && x.url && /^chrome-extension:\/\//.test(x.url) && x.url.endsWith("/background.js"))) {
+      let ss = null;
+      try {
+        ss = await b.send("Target.attachToTarget", { targetId: t.targetId, flatten: true });
+        const ev = await b.send("Runtime.evaluate", { expression: `chrome.runtime.getManifest().name`, returnByValue: true }, ss.sessionId);
+        if (ev.result && ev.result.value === "Deep Grab") { dgSwId = /^chrome-extension:\/\/([^/]+)\//.exec(t.url)[1]; return t; }
+      } catch (e) { /* built-in worker may die mid-attach */ }
+      finally { if (ss) { try { await b.send("Target.detachFromTarget", { sessionId: ss.sessionId }); } catch (e) {} } }
+    }
+    return null;
+  };
+  const gopen = async (b, url) => { const c = new Gcdp(b.ws.url); try { return (await c.send("Target.createTarget", { url })).targetId; } finally { c.close(); } };
+  const gclose = async (b, targetId) => { try { await b.send("Target.closeTarget", { targetId }); } catch (e) {} };
+  const geval = async (wsUrl, expression) => {
+    const c = new Gcdp(wsUrl);
+    try {
+      await c.send("Runtime.enable");
+      const r = await c.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+      if (r.exceptionDetails) throw new Error(r.exceptionDetails.text + " :: " + JSON.stringify(r.exceptionDetails.exception || {}));
+      return r.result && r.result.value;
+    } finally { c.close(); }
+  };
+
+  // SW eval with a real wake: popup.html as a TAB is BLOCKED while the SW is
+  // down, but a fixture page's video capture starts the worker. Detach after
+  // every eval (an attached inspector keeps the worker alive, defeating the
+  // closeTarget below).
+  const makeSwEval = (b, wakeUrl) => {
+    const findSw = async () => {
+      let sw = await findDgSwTarget(b);
+      if (sw) return sw;
+      for (let attempt = 0; attempt < 3 && !sw; attempt++) {
+        let tabId = null;
+        try { tabId = await gopen(b, wakeUrl); } catch (e) {}
+        if (tabId) { try { await b.send("Target.activateTarget", { targetId: tabId }); } catch (e) {} }
+        for (let i = 0; i < 12 && !sw; i++) {
+          await sleep(700);
+          sw = await findDgSwTarget(b);
+        }
+        if (tabId) await gclose(b, tabId);
+        if (!sw) await sleep(1500);
+      }
+      return sw || null;
+    };
+    const value = async (expr) => {
+      let foundAny = false;
+      let lastErr = null;
+      for (let i = 0; i < 10; i++) {
+        const sw = await findSw();
+        if (sw) {
+          foundAny = true;
+          let ss = null;
+          try {
+            ss = await b.send("Target.attachToTarget", { targetId: sw.targetId, flatten: true });
+            const ev = await b.send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true }, ss.sessionId);
+            if (ev.exceptionDetails) throw new Error("SW EXC: " + JSON.stringify(ev.exceptionDetails.exception && ev.exceptionDetails.exception.description));
+            return ev.result && ev.result.value;
+          } catch (e) { lastErr = e; /* SW died between list and eval — retry */ }
+          finally {
+            if (ss) { try { await b.send("Target.detachFromTarget", { sessionId: ss.sessionId }); } catch (e) {} }
+          }
+        }
+        await sleep(600);
+      }
+      throw new Error((foundAny ? "SW eval kept failing: " + (lastErr && lastErr.message) : "SW never became available for eval (foundAny=false)"));
+    };
+    return { value };
+  };
+
+  const readConfigGrab = () => { try { return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")).autoGrab; } catch (e) { return undefined; } };
+  const clickUntilMonitor = async (target, click) => {
+    for (let i = 0; i < 10; i++) {
+      if (readConfigGrab() === target) return true;
+      await click();
+      await sleep(1300);
+    }
+    return readConfigGrab() === target;
+  };
+
+  const G = (s) => console.log("  G: " + s);
+  try {
+    // Copy the shipped extension into the drill sandbox; ONLY the WS port is
+    // overridden (8765 -> 8766, pairing with THIS app, never the prod one).
+    G("copy extension + launch chrome");
+    const extDst = path.join(sandbox, "ext");
+    fs.rmSync(extDst, { recursive: true, force: true });
+    fs.cpSync(path.join(ROOT, "extension"), extDst, { recursive: true });
+    const bg = path.join(extDst, "background.js");
+    let src = fs.readFileSync(bg, "utf8");
+    if (!src.includes('"ws://127.0.0.1:8766"')) {
+      src = src.replace('"ws://127.0.0.1:8765"', '"ws://127.0.0.1:8766"');
+      fs.writeFileSync(bg, src);
+    }
+    if (!fs.readFileSync(bg, "utf8").includes('"ws://127.0.0.1:8766"')) throw new Error("WS port override failed");
+
+    const chromeUd = path.join(sandbox, "chrome-ud");
+    fs.rmSync(chromeUd, { recursive: true, force: true });
+    fs.mkdirSync(chromeUd, { recursive: true });
+    const cOut = fs.openSync(path.join(sandbox, "chrome.log"), "w");
+    const cErr = fs.openSync(path.join(sandbox, "chrome.log.err"), "w");
+    const cChild = spawn(chromePath, [
+      "--user-data-dir=" + chromeUd,
+      "--load-extension=" + extDst,
+      "--disable-extensions-except=" + extDst,
+      "--remote-debugging-port=0",
+      "--enable-unsafe-extension-debugging",
+      "--no-first-run", "--no-default-browser-check", "--disable-session-crashed-bubble",
+      "--disable-component-update", "--no-service-autorun",
+      "about:blank"
+    ], { detached: true, windowsHide: false, stdio: ["ignore", cOut, cErr] });
+    cChild.unref();
+    chromeG = { pid: cChild.pid, cdpPort: null, extId: "", sandboxDir: sandbox };
+
+    // Chrome writes the chosen CDP port to DevToolsActivePort (like the app).
+    const dap = path.join(chromeUd, "DevToolsActivePort");
+    let cdpPort = null;
+    for (let i = 0; i < 60 && !cdpPort; i++) {
+      try { cdpPort = parseInt(String(fs.readFileSync(dap, "utf8")).trim().split(/\r?\n/)[0], 10); } catch (e) { /* not written yet */ }
+      if (!cdpPort) await sleep(500);
+    }
+    if (!cdpPort) throw new Error("Chrome never wrote DevToolsActivePort");
+    chromeG.cdpPort = cdpPort;
+
+    const b = new Gcdp((await ghttp("http://127.0.0.1:" + cdpPort + "/json/version")).webSocketDebuggerUrl);
+    const closeTabUrl = "http://127.0.0.1:" + port + "/movies/close-me/";
+    const wakeUrl = "http://127.0.0.1:" + port + "/actress/ai-u/";
+    const swEval = makeSwEval(b, wakeUrl).value;
+    G("chrome up on " + cdpPort + ", close-me=" + closeTabUrl);
+
+    // Open the close-me tab FIRST: its video capture wakes the SW and lands
+    // the entry (autoGrab is still OFF, so nothing is harvested yet). A fresh
+    // Chrome profile defers the first navigation, so activate the tab and poll
+    // for the committed URL instead of trusting a blind sleep.
+    const closeTabId2 = await gopen(b, closeTabUrl);
+    if (closeTabId2) { try { await b.send("Target.activateTarget", { targetId: closeTabId2 }); } catch (e) {} }
+    let closeTabId = -1;
+    for (let i = 0; i < 20 && closeTabId === -1; i++) {
+      closeTabId = await swEval(`chrome.tabs.query({}).then(ts => { const t = ts.find(x => x.url === ${JSON.stringify(closeTabUrl)}); return t ? t.id : -1; })`);
+      if (closeTabId === -1) await sleep(700);
+    }
+    if (closeTabId === -1) throw new Error("close-me tab never committed its URL in the extension SW");
+    G("close-me tab id=" + closeTabId + " committed; resolving ext id");
+    await findDgSwTarget(b); // resolve the Deep Grab extension id by manifest name
+    chromeG.extId = dgSwId || "";
+    if (!chromeG.extId) throw new Error("could not derive Deep Grab extension id (no worker with name 'Deep Grab')");
+    G("Deep Grab ext id=" + chromeG.extId);
+
+    // Open the popup page FIRST, while the SW is alive: (a) popup.html as a tab
+    // is BLOCKED while the SW is down (the MV3 SW-sleep trap), so it must exist
+    // before the kill below, and (b) the SW's own chrome.runtime.sendMessage
+    // does NOT deliver to its own onMessage listener — a second receiver context
+    // (the popup) must be open for the remove-found prune below to resolve
+    // instead of rejecting every retry. It stays open across the kill; its
+    // monitor button is the toggle driver.
+    const popupUrl = "chrome-extension://" + chromeG.extId + "/popup.html";
+    const popupTabId = await gopen(b, popupUrl);
+    let popupWs = null;
+    for (let i = 0; i < 20 && !popupWs; i++) {
+      try {
+        const t = (await glist(cdpPort)).find((x) => x.id === popupTabId);
+        if (t && t.webSocketDebuggerUrl) popupWs = t.webSocketDebuggerUrl;
+      } catch (e) {}
+      if (!popupWs) await sleep(500);
+    }
+    if (!popupWs) throw new Error("popup page target never exposed a debugger url");
+    await sleep(1200);
+    G("popup open");
+
+    // Prune everything except the close-me capture so the harvest is focused.
+    // (Runs now that the popup receiver is open; before the kill.)
+    await swEval(`chrome.runtime.sendMessage({ type: "remove-found", urls: found.filter(f => !f.url.includes("mov-close-me.mp4")).map(f => f.url) })`);
+    await sleep(500);
+
+    // ---- F5a: force the exact SW-death storage shape ----
+    // Clear the entry's pageUrl + persist, then KILL the worker via CDP
+    // Target.closeTarget (natural idle eviction never fired reliably in CfT;
+    // from the extension's perspective a closeTarget IS an SW death: memory
+    // gone, storage intact).
+    await swEval(`(async () => { const f = found.find(x => x.url.includes('mov-close-me')); if (f) { f.pageUrl = ""; await persist(); } return f ? { pageUrl: f.pageUrl, tabId: f.tabId } : null; })()`);
+    const swNow = (await gtargets(b)).find(isDgSw);
+    const t0 = Date.now();
+    if (swNow) await gclose(b, swNow.targetId);
+    let swDead = null;
+    for (let i = 0; i < 15 && !swDead; i++) {
+      const targets = await glist(cdpPort).catch(() => []);
+      if (!targets.find(isDgSw)) { swDead = Math.round((Date.now() - t0) / 1000); break; }
+      await sleep(500);
+    }
+    G("SW terminated in " + swDead + "s after clearing pageUrl");
+    // swDead can legitimately be 0 (already gone in the first poll) — guard on
+    // null, not falsiness, or a fast kill is misread as a failure.
+    if (swDead == null) { fail("G SW death", "service worker target never disappeared after closeTarget"); return; }
+    G("toggle autoGrab ON via popup");
+
+    // ---- harvest: toggle autoGrab ON via the popup (config-truth clicks) ----
+    // The ON edge pushes dv-monitor-grab; the first click wakes a FRESH worker
+    // (loadPersisted restores the pageUrl-less entry) and the retry loop covers
+    // the SW-wake + WS-reconnect window.
+    const popupClick = () => geval(popupWs, `document.getElementById('monitor').click()`);
+    await clickUntilMonitor(true, popupClick);
+    await sleep(4000);
+    // Fresh-worker loadPersisted is async — if the enable-edge harvest fired
+    // before the restore, re-toggle OFF->ON to re-fire dv-monitor-grab.
+    const grabbed5 = await swEval(`(() => { const f = found.find(x => x.url.includes('mov-close-me')); return f ? { added: !!f.added } : null; })()`);
+    G("post-toggle entry=" + JSON.stringify(grabbed5));
+    if (grabbed5 && !grabbed5.added) {
+      G("first harvest missed the restored entry (loadPersisted race) — re-toggling OFF->ON");
+      await clickUntilMonitor(false, popupClick);
+      await clickUntilMonitor(true, popupClick);
+      await sleep(2000);
+    }
+
+    let closed = false;
+    for (let i = 0; i < 45; i++) {
+      await sleep(1000);
+      const stillThere = await swEval(`chrome.tabs.query({}).then(ts => ts.some(t => t.url && t.url === ${JSON.stringify(closeTabUrl)}))`);
+      if (!stillThere) { closed = true; break; }
+    }
+    const diag5 = await swEval(`(() => { const f = found.find(x => x.url.includes('mov-close-me')); return f ? { pageUrl: f.pageUrl, added: f.added } : null; })()`);
+    if (closed) {
+      pass("G auto-close across SW death", "pageUrl-less entry restored after SW death -> send-time referer -> download done -> dv-close-tab closed the movies tab (SW dead in " + swDead + "s)");
+    } else {
+      fail("G auto-close across SW death", "movies tab still open after grab+done; diag=" + JSON.stringify(diag5) + " config.autoGrab=" + readConfigGrab());
+    }
+  } catch (e) {
+    fail("G auto-close across SW death", "drill error: " + ((e && e.message) || e));
+  } finally {
+    killChromeG();
+  }
+}
+
 // Who holds the drill port? On the self-hosted CI runner (buffy-runner == this
 // machine) the culprit is almost always a local task-2 sandbox app left running
 // on 8766. Name the pid + the exact kill command so an abort is never a mystery
@@ -526,6 +848,7 @@ async function main() {
     await phaseD(port);
     await phaseE(port, lastExhaustedId);
     await phaseF();
+    await phaseG(port);
   } catch (e) {
     fail("uncaught", (e && e.stack) || String(e));
   }
@@ -533,6 +856,7 @@ async function main() {
 }
 
 main().then(async (code) => {
+  killChromeG();
   killApp();
   stopFairFixture();
   try { if (fixture) fixture.close(); } catch (e) { /* ignore */ }
