@@ -31,7 +31,13 @@
     bestOnly: true,
     autoGrab: true,
     autoCloseTab: true,
-    pipelineQty: 0
+    pipelineQty: 0,
+    // Always-on background link crawler (ON by default = no toggle needed).
+    // When set, every captured link match (video URL, JAV movie page, host dl
+    // entry) is auto-sent to the desktop app the moment the page scan reports
+    // it — unlike maybeAutoDownload, which only fires for the best-only video
+    // path while the manual "Send" toggle (grabOn) is armed.
+    autoCrawl: true
   };
 
   let config = { ...DEFAULT_CONFIG };
@@ -204,6 +210,9 @@
       found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind, _rank });
       chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind }).catch(() => {});
       maybeAutoDownload(clean);
+      // Always-on crawler: same entry also auto-sends when the manual Send
+      // toggle is off (autoSending dedupe makes this a no-op if grabOn sent).
+      maybeAutoCrawl(clean);
       renderFoundList();
       updateCounts();
       return;
@@ -213,6 +222,8 @@
     const titleText = (title || pageTitle || clean.split("/").pop()).trim();
     found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind: kindOf(clean) });
     chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind: kindOf(clean) }).catch(() => {});
+    // Always-on crawler: non-best-only video links (scanPageLinks) auto-send.
+    maybeAutoCrawl(clean);
     renderFoundList();
     updateCounts();
   }
@@ -301,6 +312,8 @@
     const titleText = (title || clean.split("/").pop()).trim();
     found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind: "link", _rank: 0 });
     chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind: "link" }).catch(() => {});
+    // Always-on crawler: JAV movie pages auto-send to the desktop resolver.
+    maybeAutoCrawl(clean);
     renderFoundList();
     updateCounts();
   }
@@ -333,6 +346,8 @@
     const titleText = title || "supjav download";
     found.set(clean, { url: clean, title: titleText, size: 0, added: false, kind: "link", _rank: 0 });
     chrome.runtime.sendMessage({ type: "video-found", url: clean, title: titleText, pageUrl: location.href, kind: "link" }).catch(() => {});
+    // Always-on crawler: host dl entries auto-send to the desktop resolver.
+    maybeAutoCrawl(clean);
     renderFoundList();
     updateCounts();
   }
@@ -618,7 +633,33 @@
     if (!autoPending.size) return;
     const urls = Array.from(autoPending);
     autoPending.clear();
-    urls.forEach((u) => maybeAutoDownload(u));
+    urls.forEach((u) => { maybeAutoDownload(u); maybeAutoCrawl(u); });
+  }
+
+  // Always-on link crawler: auto-send every captured link match to the desktop
+  // app (video URL, JAV movie page, host dl entry) without requiring the manual
+  // "Send" toggle (grabOn) that gates maybeAutoDownload. Dedupe with the same
+  // autoSending/autoPending sets so a URL is sent at most once per page session
+  // and an offline send is re-attempted when the background comes back.
+  function maybeAutoCrawl(url) {
+    if (!config.autoCrawl) return;
+    const v = found.get(url);
+    if (!v || v.added || autoSending.has(url)) return;
+    autoSending.add(url);
+    chrome.runtime.sendMessage({ type: "add-to-list", url, title: v.title, pageUrl: location.href })
+      .then(() => {
+        v.added = true;
+        autoSending.delete(url);
+        autoPending.delete(url);
+        renderFoundList();
+        updateCounts();
+      })
+      .catch(() => {
+        // background unavailable — stash and flush on the next online poll
+        autoSending.delete(url);
+        autoPending.add(url);
+        v.added = false;
+      });
   }
 
   // ---------- sync found list with background (sizes / added state) ----------
@@ -1145,7 +1186,11 @@
         dot.className = "dv-dot " + (on ? "dv-ok" : "dv-off");
         dot.title = on ? "Desktop app connected" : "Desktop app offline (run the app)";
       }
-      if (on && grabOn) flushAutoPending();
+      // Flush offline stashes whenever the desktop is reachable again — both
+      // maybeAutoDownload and maybeAutoCrawl self-gate on grabOn/autoCrawl, so
+      // the always-on crawler's stashed links flush here even with Send toggled
+      // off.
+      if (on) flushAutoPending();
     });
   }
   if (IS_TOP) setInterval(refreshStatus, 3000);
@@ -1188,6 +1233,11 @@
       applyFilter();
       scanVideoElements();
       scanPageLinks();
+      // Always-on link crawler: run the movie-page / dl scans immediately at
+      // load (not just on the periodic interval) so every link match auto-sends
+      // as soon as the page renders.
+      scanSupjavList();
+      scanSupjavDl();
       refreshFromBackground(true);
       refreshStatus();
     });

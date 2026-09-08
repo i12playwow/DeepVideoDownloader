@@ -188,7 +188,7 @@ function loadMonitor() {
     if (r) renderMonitor(r.on === true);
   });
 }
-function resyncFromSw() { refreshStatus(); loadMonitor(); }
+function resyncFromSw() { refreshStatus(); loadMonitor(); loadFound(); }
 monitorBtn.addEventListener("click", () => {
   const next = !monitorOn;
   chrome.runtime.sendMessage({ type: "dv-monitor-set", on: next }, (r) => {
