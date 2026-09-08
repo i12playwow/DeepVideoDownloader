@@ -148,6 +148,7 @@ const netErr = () => { const e = new Error("network down"); e.category = "networ
       assert.strictEqual(it.status, "error");
       assert.strictEqual(it.errorCategory, "network");
       assert.strictEqual(it.retryCount, 1);
+      assert.strictEqual(it.errorStatus, 0, "network errors carry no HTTP status");
     });
     cleanup(dir);
   })();
@@ -192,7 +193,9 @@ const netErr = () => { const e = new Error("network down"); e.category = "networ
     // the item lands in terminal error instead of churning the queue forever.
     const { dm, dir } = makeDm({ concurrency: 1, maxRetries: 0, autoRetryMinutes: 1, autoRetryMax: 2 });
     let calls = 0;
-    dm.run = async () => { calls++; throw netErr(); };
+    // A 5xx is transient under the shared rule, so with maxRetries 0 it falls
+    // into the automation cycle; the exhausted path must keep the HTTP status.
+    dm.run = async () => { calls++; const e = new Error("500 boom"); e.status = 500; e.category = "http"; throw e; };
     const id = await dm.enqueue({ url: "https://example.com/dead.mp4", title: "dead" });
     const s1 = await waitFor(dm, id, ["scheduled"], 3000);
     t("auto-retry arms the first cycle", () => {
@@ -213,7 +216,8 @@ const netErr = () => { const e = new Error("network down"); e.category = "networ
       assert.strictEqual(err.status, "error");
       assert.strictEqual(err._autoRetries, 2);
       assert.ok(err.error.includes("Auto-retry exhausted after 2 cycles"));
-      assert.strictEqual(err.errorCategory, "network");
+      assert.strictEqual(err.errorCategory, "http");
+      assert.strictEqual(err.errorStatus, 500, "exhausted path keeps the HTTP status");
     });
     cleanup(dir);
   })();
@@ -233,7 +237,13 @@ const netErr = () => { const e = new Error("network down"); e.category = "networ
       assert.strictEqual(err1.status, "error");
       assert.ok(err1.error.includes("Auto-retry exhausted"));
     });
-    dm.retry(id);
+    t("clear-on-retry: retry() drops stale error fields before requeue", () => {
+      assert.strictEqual(dm.retry(id), true);
+      const p = dm.items.get(id).public();
+      assert.strictEqual(p.error, "");
+      assert.strictEqual(p.errorCategory, "");
+      assert.strictEqual(p.errorStatus, 0);
+    });
     const s2 = await waitFor(dm, id, ["scheduled"], 3000);
     t("manual retry resets the auto-retry budget", () => {
       assert.strictEqual(s2.status, "scheduled");
@@ -375,7 +385,47 @@ const netErr = () => { const e = new Error("network down"); e.category = "networ
     t("plain 404 through refresh path keeps http category", () => {
       assert.strictEqual(it.status, "error");
       assert.strictEqual(it.errorCategory, "http");
+      assert.strictEqual(it.errorStatus, 404, "pump catch records the HTTP status");
+      assert.strictEqual(it.public().errorStatus, 404, "public() surfaces it");
       assert.ok(!/expired/i.test(it.error), "no expired relabel for plain 404: " + it.error);
+    });
+    cleanup(dir);
+  })();
+
+  // ---- errorStatus threading through the engine (the rule the V3 pins share) ----
+  await (async () => {
+    const { dm, dir } = makeDm({ maxRetries: 1 });
+    let attempts = 0;
+    dm._runOnce = async (item) => {
+      attempts++;
+      item._resolvedUrl = "http://127.0.0.1:9999/v/f5xx.mp4";
+      const e = new Error("502 Bad Gateway");
+      e.status = 502;
+      e.category = "http";
+      throw e;
+    };
+    dm._resolveFresh = async () => { throw new Error("player page gone"); };
+    const id = await dm.enqueue({ url: "http://127.0.0.1:9999/v/f5.mp4", title: "5xx" });
+    const err = await waitFor(dm, id, ["error"], 4000);
+    t("5xx is transient at engine level: requeued once, terminal keeps errorStatus", () => {
+      assert.strictEqual(attempts, 2, "the shared transient rule must auto-requeue a 5xx");
+      assert.strictEqual(err.errorStatus, 502);
+      assert.strictEqual(err.errorCategory, "http");
+    });
+    t("clear-on-retry: retry() drops stale error fields", () => {
+      assert.strictEqual(dm.retry(id), true);
+      const p = dm.items.get(id).public();
+      assert.strictEqual(p.error, "");
+      assert.strictEqual(p.errorCategory, "");
+      assert.strictEqual(p.errorStatus, 0);
+    });
+    await waitFor(dm, id, ["error"], 4000); // the failing stub re-runs after retry
+    t("clear-on-resume: resume() drops stale error fields", () => {
+      dm.resume(id);
+      const p = dm.items.get(id).public();
+      assert.strictEqual(p.error, "");
+      assert.strictEqual(p.errorCategory, "");
+      assert.strictEqual(p.errorStatus, 0);
     });
     cleanup(dir);
   })();

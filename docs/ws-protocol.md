@@ -228,6 +228,7 @@ Download progress/terminal-state push — one per item per update batch
   "proxy": "",
   "error": "",
   "errorCategory": "",
+  "errorStatus": 0,
   "errorCode": "",
   "retryable": false,
   "resolving": false,
@@ -317,8 +318,13 @@ app                          client
   by `id`/`url`/`reqId`.
 - The `status` push carries both the human `error` string and a structured
   `errorCode` derived from `errorCategory` (e.g. `EXPIRED`, `NOT_VIDEO`,
-  `REQUIRES_BROWSER`, or the category uppercased) plus a `retryable` flag
-  (true only for the transient categories `network` / `rate-limited` /
-  `blocked`, which the engine auto-retries).
+  `REQUIRES_BROWSER`, or the category uppercased) plus `errorStatus` (the raw
+  HTTP status of the failure, `0` for non-HTTP) and a `retryable` flag. The
+  flag is computed by the same function the engine calls (`isTransientError`
+  in `lib/status.js`, the single owner of the auto-retry rule), so the wire
+  and the engine can never disagree: `network` / `rate-limited` / `blocked`
+  are always retryable, and `http` only when `errorStatus >= 500` — a
+  404/403/410 is NOT auto-retried by the engine and is flagged
+  `retryable: false`.
 - `hello` from the app is sent on connect and on every reconnect; the extension
   re-sends its own `hello` on `ws.onopen`.

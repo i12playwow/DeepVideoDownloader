@@ -379,6 +379,53 @@ function startServer(portRef, segBytesFn) {
     ["NO_USABLE_SOURCE", "CLOUDFLARE_CHALLENGED", "ENQUEUE_FAILED", "PACE_LIMITED", "PROTOCOL_MISMATCH", "INTERNAL"]
       .every((c) => wsBridge.ERROR_CODES[c] === c), JSON.stringify(wsBridge.ERROR_CODES));
 
+  // ---- V3: status push builder (errorCode + retryable vs engine transient rules) ----
+  // isTransientError (lib/status.js) is the single owner of the transient
+  // rule: downloader.js's pump catch calls it to decide auto-requeue, and
+  // main.js's statusPayload calls it for the push's retryable flag. This
+  // table pins that shared rule; test-download-features.js pins it through
+  // the engine (5xx requeues, errorStatus threading).
+  console.log("-- V3: status push builder --");
+  const { statusPayload, isTransientError, errorCodeFor } = require("./lib/status");
+  const v3cases = [
+    // [category, httpStatus, expected retryable, expected errorCode]
+    ["network", 0, true, "NETWORK"],
+    ["rate-limited", 0, true, "RATE_LIMITED"],
+    ["blocked", 0, true, "BLOCKED"],
+    ["http", 500, true, "HTTP"],
+    ["http", 502, true, "HTTP"],
+    ["http", 503, true, "HTTP"],
+    ["http", 599, true, "HTTP"],
+    ["http", 499, false, "HTTP"],
+    ["http", 404, false, "HTTP"],
+    ["http", 0, false, "HTTP"],
+    ["expired", 0, false, "EXPIRED"],
+    ["not-video", 0, false, "NOT_VIDEO"],
+    ["requires-browser", 0, false, "REQUIRES_BROWSER"],
+    ["norange", 0, false, "NORANGE"],
+    ["", 0, false, ""],
+    [undefined, 0, false, ""]
+  ];
+  for (const [cat, st, wantRetryable, wantCode] of v3cases) {
+    const label = cat || "(none)";
+    assert("V3 " + label + "/" + st + " retryable=" + wantRetryable, isTransientError(cat, st) === wantRetryable, "got " + isTransientError(cat, st));
+    assert("V3 " + label + " errorCode=" + wantCode, errorCodeFor(cat) === wantCode, "got " + errorCodeFor(cat));
+  }
+  // statusPayload: full shape, reqId echo, errorStatus passthrough, and the
+  // same engine rule applied end-to-end (500 retryable, 404 not).
+  const v3base = { id: "i1", reqId: "r9", url: "http://x/a.mp4", label: "", fileName: "a.mp4", status: "error", total: 0, received: 0, speed: 0, proxy: "", error: "boom", errorCategory: "http", errorStatus: 503, resolving: false, refreshCount: 0, finalPath: "", thumb: "" };
+  const p503 = statusPayload(v3base);
+  assert("V3 payload http/503 retryable", p503.retryable === true, JSON.stringify(p503));
+  assert("V3 payload errorCode HTTP + errorStatus passthrough", p503.errorCode === "HTTP" && p503.errorStatus === 503, JSON.stringify(p503));
+  assert("V3 payload reqId echo", p503.reqId === "r9", JSON.stringify(p503));
+  const p404 = statusPayload({ ...v3base, errorStatus: 404 });
+  assert("V3 payload http/404 NOT retryable", p404.retryable === false, JSON.stringify(p404));
+  const pNet = statusPayload({ ...v3base, errorCategory: "network", errorStatus: 0 });
+  assert("V3 payload network retryable regardless of status", pNet.retryable === true, JSON.stringify(pNet));
+  const pOk = statusPayload({ ...v3base, status: "done", errorCategory: "", errorStatus: 0, error: "" });
+  assert("V3 payload done item not retryable, no errorCode", pOk.retryable === false && pOk.errorCode === "" && pOk.errorStatus === 0, JSON.stringify(pOk));
+  assert("V3 payload progress zero-guard", statusPayload({ ...v3base, total: 1000, received: 250 }).progress === 0.25, "progress");
+
   // ---- G: supjav list-page resolution (mock fetch) ----
   console.log("\n-- G: supjav list-page resolution --");
   const pmForG = new ProxyManager(config);
