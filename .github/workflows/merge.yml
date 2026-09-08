@@ -10,9 +10,11 @@
 # Gate (tests check is AUTHORITATIVE): the workflow reads the current required
 # status checks off master's protection (so it tracks config drift) and refuses
 # to merge unless EVERY required context has a completed+success check run on
-# the PR head. It then tries a plain squash-merge; only when GitHub's merge
-# API reports the phantom-check block does it fall back to capture → delete →
-# merge → restore, and the restore is verified by the semantic read-back rules
+# the PR head. It then tries a plain REST squash-merge; on any non-2xx it asks
+# GraphQL for the authoritative reason (this account's phantom-check block
+# surfaces as a bare REST 404), and only when GraphQL confirms a check/mergeable
+# block does it fall back to capture → delete → merge (GraphQL, the proven
+# vehicle on this account) → restore, verified by the semantic read-back rules
 # in AGENTS.md (enforce_admins on, force-pushes off, linear history on, no
 # review requirement, required contexts unchanged).
 #
@@ -132,12 +134,41 @@ jobs:
               console.log(`MERGED directly — ${merge.body.sha || "?"} (no protection dance needed).`);
               return;
             }
-            const msg = typeof merge.body === "object" && merge.body ? JSON.stringify(merge.body).toLowerCase() : String(merge.body || "").toLowerCase();
-            if (!msg.includes("required status check") && !msg.includes("required_status_check") && !msg.includes("check") && merge.status !== 422) {
-              core.setFailed(`merge refused (${merge.status}): ${JSON.stringify(merge.body)} — no fallback attempted (not a check-poisoning block).`);
+            // ---- any non-2xx REST merge: get the authoritative reason from GraphQL ----
+            // This account's phantom-check block surfaces as a bare REST 404 with body
+            // {"message":"Not Found"} (see run.md), so a check-word heuristic on the REST
+            // body is unreliable. GraphQL reports the real reason, and is also the proven
+            // merge vehicle when REST is blocked.
+            const gqlMerge = async () => {
+              try {
+                const res = await fetch("https://api.github.com/graphql", {
+                  method: "POST",
+                  headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    query: `mutation($id: ID!, $sha: GitObjectID!, $headline: String!) {
+                      mergePullRequest(input: {pullRequestId: $id, expectedHeadOid: $sha, commitHeadline: $headline, mergeMethod: SQUASH}) {
+                        pullRequest { state }
+                      }
+                    }`,
+                    variables: { id: pr.node_id, sha: headSha, headline: `${pr.title} (#${prNum})` }
+                  })
+                });
+                const j = await res.json();
+                if (j.errors && j.errors.length) return { ok: false, error: j.errors.map((e) => e.message).join("; ") };
+                return { ok: true };
+              } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+            };
+            const g = await gqlMerge();
+            if (g.ok) {
+              console.log(`MERGED via GraphQL — ${headSha.slice(0, 7)} (REST merge ${merge.status}; no protection churn needed).`);
               return;
             }
-            console.log(`direct merge refused (${merge.status}) — likely the phantom Cloudflare check; using the capture → delete → merge → restore dance.`);
+            const gmsg = g.error.toLowerCase();
+            if (!gmsg.includes("required status check") && !gmsg.includes("mergeable")) {
+              core.setFailed(`merge refused — REST ${merge.status}: ${JSON.stringify(merge.body)}; GraphQL: ${g.error} — no fallback attempted (not a check-poisoning block).`);
+              return;
+            }
+            console.log(`direct merge refused (REST ${merge.status}; GraphQL: ${g.error}) — phantom-check block; using the capture → delete → merge → restore dance.`);
 
             // ---- fallback: capture → delete → merge → restore (verified) ----
             if (!cap) { core.setFailed("protection absent at capture time — cannot dance safely; merge manually."); return; }
@@ -149,8 +180,15 @@ jobs:
             console.log("protection deleted for the merge window");
             merge = await tryMerge();
             if (merge.status !== 200 && merge.status !== 201) {
-              core.setFailed(`merge failed even with protection down (${merge.status}): ${JSON.stringify(merge.body)} — protection is DELETED, restore it manually from the capture in this run's log.`);
-              return;
+              // REST 404s on this account even with protection down (see run.md) — GraphQL is the proven vehicle.
+              const g2 = await gqlMerge();
+              if (!g2.ok) {
+                core.setFailed(`merge failed even with protection down (REST ${merge.status}: ${JSON.stringify(merge.body)}; GraphQL: ${g2.error}) — protection is DELETED, restore it manually from the capture in this run's log.`);
+                return;
+              }
+              const prAfter = (await get(`/repos/${owner}/${repo}/pulls/${prNum}`)).body;
+              merge = { body: { sha: prAfter.merge_commit_sha } };
+              console.log("merged via GraphQL with protection down");
             }
             // Restore byte-identical to the capture. NOTE: the protection API
             // now REQUIRES `required_pull_request_reviews` and `restrictions` in
