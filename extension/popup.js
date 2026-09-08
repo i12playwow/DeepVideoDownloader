@@ -72,6 +72,17 @@ function emptyItem(text) {
   return li;
 }
 
+// Structured error line for a failed download: the human `error` text plus the
+// machine-readable HTTP status / code from the push (errorStatus/errorCode,
+// built by lib/status.js in the app) when one is present and not already in
+// the text.
+function errorDetail(v) {
+  let s = v.error || "";
+  const code = v.errorStatus ? "HTTP " + v.errorStatus : (v.errorCode || "");
+  if (code && s.indexOf(code) === -1) s = (s ? s + " · " : "") + code;
+  return s;
+}
+
 function foundItem(v) {
   const li = document.createElement("li");
   const info = document.createElement("div");
@@ -81,8 +92,13 @@ function foundItem(v) {
   title.textContent = v.title || (v.url ? v.url.split("/").pop() : "");
   title.title = v.url || "";
   const meta = document.createElement("div");
-  meta.className = "dv-meta" + (v.error ? " dv-err" : "");
-  meta.textContent = v.error ? "✕ " + v.error : fmtSize(v.size || 0);
+  const err = v.error || v.errorCode ? errorDetail(v) : "";
+  // Distinct terminal-vs-retryable presentation: a retryable failure (network /
+  // 5xx — the engine auto-requeues it with backoff) renders amber with ⟳,
+  // a terminal failure (404/403/expired/…) renders red with ✕. The flag comes
+  // straight off the status push (mirrored by the SW), never re-derived here.
+  meta.className = "dv-meta" + (err ? (v.retryable ? " dv-retry" : " dv-err") : "");
+  meta.textContent = err ? (v.retryable ? "⟳ " + err : "✕ " + err) : fmtSize(v.size || 0);
   info.appendChild(title);
   info.appendChild(meta);
   li.appendChild(info);
