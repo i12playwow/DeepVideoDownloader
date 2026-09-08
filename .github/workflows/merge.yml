@@ -72,8 +72,13 @@ jobs:
             const del = (p) => call("DELETE", p);
 
             // ---- approval gate ----
-            const prNum = Number(github.event.inputs.pr);
-            const confirm = String(github.event.inputs.confirm || "").trim();
+            // workflow_dispatch inputs live on context.payload.inputs (github
+            // here is the Octokit client, not the Actions context — it has no
+            // .event, which crashed the first real run on the self-hosted
+            // runner). Fall back to github.event.inputs for older images.
+            const payloadInputs = (context && context.payload && context.payload.inputs) || (github.event && github.event.inputs) || {};
+            const prNum = Number(payloadInputs.pr);
+            const confirm = String(payloadInputs.confirm || "").trim();
             if (confirm !== "YES") {
               core.setFailed(`Approval gate: set confirm=YES to merge PR #${prNum} (got "${confirm}").`);
               return;
