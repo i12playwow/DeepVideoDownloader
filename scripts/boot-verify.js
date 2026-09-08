@@ -7,6 +7,8 @@
 //                     start-flagged site rule bypasses it + folder override
 //   C auto-retry    — a deterministic 404 fails, auto-retries after
 //                     autoRetryMinutes, and re-fails cleanly
+//   C2 error fields  — a clean-config 404's terminal error push carries
+//                     errorStatus/errorCode/retryable over the WS relay
 //   D cap exhaustion — with autoRetryMax 2 the item requeues at +60s for
 //                     each capped cycle, then terminal error with the
 //                     "Auto-retry exhausted after 2 cycles" message + category
@@ -229,7 +231,7 @@ function wsDownload(url, title, referer, waitMs) {
         if (m.type === "accepted") { acceptedId = m.id; acceptedReqId = m.reqId; }
         if (m.type === "status" && m.url === url) {
           if (m.reqId) statusReqIds.add(m.reqId);
-          states.push({ t: Math.round((Date.now() - t0) / 1000), status: m.status, received: m.received, total: m.total, error: (m.error || ""), cat: m.errorCategory || "" });
+          states.push({ t: Math.round((Date.now() - t0) / 1000), status: m.status, received: m.received, total: m.total, error: (m.error || ""), cat: m.errorCategory || "", es: m.errorStatus || 0, ec: m.errorCode || "", ret: m.retryable });
           if (m.status === "done" || m.status === "error" || m.status === "duplicate") finish(m.status);
         }
       });
@@ -320,6 +322,25 @@ async function phaseC(port) {
   if (!requeued) return fail("C requeued after timer", seg);
   if (!rearmed) return fail("C re-armed after re-fail", seg);
   pass("C auto-retry", "failed -> scheduled -> requeued after 60s -> re-failed -> scheduled (" + seg + ")");
+}
+
+// The structured error fields the engine attaches to a failure (errorStatus /
+// errorCode / retryable) must survive the live flush -> WS relay untouched:
+// this is the seam the offline tests can only stub. A clean-config 404 lands
+// in terminal error instantly (404 is NOT transient: the rule is network /
+// rate-limited / blocked / http>=500), so the error push is deterministic.
+async function phaseC2(port) {
+  console.log("--- Phase C2: 404 status push carries errorStatus/errorCode/retryable over WS ---");
+  writeConfig({ scheduleWindowStart: "", scheduleWindowEnd: "", autoRetryMinutes: 0, siteRules: [] });
+  await sleep(3500);
+  const urlF = "http://127.0.0.1:" + port + "/v/fail3.mp4";
+  const r = await wsDownload(urlF, "bv-c2", "", 15000);
+  const err = r.states.find((s) => s.status === "error");
+  if (!err) return fail("C2 404 terminal error", "no error state: " + r.states.map((s) => s.status + "@" + s.t).join(","));
+  if (err.es !== 404) return fail("C2 errorStatus on wire", "got " + err.es + " expected 404 (cat " + err.cat + ")");
+  if (err.ec !== "HTTP") return fail("C2 errorCode on wire", "got " + JSON.stringify(err.ec) + " expected HTTP (cat " + err.cat + ")");
+  if (err.ret !== false) return fail("C2 retryable on wire", "404 flagged retryable=" + err.ret + " (transient rule is network|rate-limited|blocked|http>=500)");
+  pass("C2 404 structured fields", "errorStatus=404 errorCode=HTTP retryable=false on the error push");
 }
 
 async function phaseD(port) {
@@ -857,6 +878,7 @@ async function main() {
     await phaseA(port);
     await phaseB(port);
     await phaseC(port);
+    await phaseC2(port);
     await phaseD(port);
     await phaseE(port, lastExhaustedId);
     await phaseF();
