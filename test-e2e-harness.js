@@ -1351,15 +1351,33 @@ function startServer(portRef, segBytesFn) {
     !!(st11.e3 && st11.e3.error === "" && !st11.e3.errorCode && st11.e3.errorStatus === 0 && st11.e3.retryable === false),
     JSON.stringify(st11.e3));
   // popup presentation contract: retryable and terminal get distinct classes/text
+  // (explicit "Retryable error:"/"Terminal error:" labels for a11y + tooltip).
   const checkPopupErr11 = (src) =>
     src.includes('" dv-retry"') && src.includes('" dv-err"') &&
     src.includes("errorStatus") && src.includes("errorCode") && src.includes("retryable") &&
-    src.includes('"⟳ " + err') && src.includes('"✕ " + err');
+    src.includes('"⟳ Retryable error: " + err') && src.includes('"✕ Terminal error: " + err');
   assert("P11 popup renders retryable (⟳ dv-retry) vs terminal (✕ dv-err) distinctly from the push fields",
     checkPopupErr11(popupSrc11), "popup error presentation missing");
   const neg11 = popupSrc11.replace('v.retryable ? " dv-retry" : " dv-err"', '" dv-err"');
   assert("P11 NEGATIVE: retryable class collapsed into terminal -> guard bites",
     neg11 !== popupSrc11 && !checkPopupErr11(neg11), "guard missed the collapse");
+
+  // Desktop renderer presentation mirrors the popup: the same pushed fields
+  // produce a visible amber ⟳ retryable marker or red ✕ terminal marker in
+  // both the progress detail and status badge, with an accessible label.
+  const rendererSrc11 = fs11.readFileSync("renderer.js", "utf8");
+  const checkRendererErr11 = (src) =>
+    src.includes("errorStatus") && src.includes("errorCode") && src.includes("retryable") &&
+    src.includes('marker: retryable ? "⟳" : "✕"') &&
+    src.includes('className: retryable ? "error-retryable" : "error-terminal"') &&
+    src.includes('label: retryable ? "Retryable error" : "Terminal error"') &&
+    src.includes("errorMarkup") && src.includes("statusBadge") &&
+    src.includes("aria-label");
+  assert("P11 desktop renderer mirrors retryable (amber ⟳) vs terminal (red ✕) markers",
+    checkRendererErr11(rendererSrc11), "desktop error presentation missing");
+  const negRenderer11 = rendererSrc11.replace('className: retryable ? "error-retryable" : "error-terminal"', 'className: "error-terminal"');
+  assert("P11 NEGATIVE: desktop retryable class collapsed into terminal -> guard bites",
+    negRenderer11 !== rendererSrc11 && !checkRendererErr11(negRenderer11), "guard missed the desktop collapse");
 
   // ---- P5: preload / renderer IPC contract ----
   // Every window.api.<method> a renderer file calls must exist in the preload

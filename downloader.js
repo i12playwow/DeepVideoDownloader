@@ -21,7 +21,7 @@ const { sanitizeName, titleFromReferer, titleFromUrl } = require("./lib/names");
 const { SJ_PLAYER_RE, resolveUrl, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isCfwalledSupjavMovie } = require("./lib/resolvers");
 const { unwrapExtensionUrl } = require("./lib/urls");
 const { HistoryStore, canonicalKeys } = require("./lib/history-store");
-const { isTransientError } = require("./lib/status");
+const { isTransientError, errorCodeFor } = require("./lib/status");
 
 // A file must be at least this big to count as a real downloaded video for the
 // on-disk duplicate check. Smaller files are partials/stubs (failed CF probes,
@@ -442,6 +442,10 @@ class DownloadManager {
       received: item.received,
       status: item.status,
       error: item.error,
+      errorCategory: item.errorCategory || "",
+      errorStatus: item.errorStatus || 0,
+      errorCode: errorCodeFor(item.errorCategory),
+      retryable: isTransientError(item.errorCategory, item.errorStatus),
       finalPath: item.finalPath || "",
       thumb: item.thumb || "",
       timestamp: Date.now(),
@@ -684,6 +688,8 @@ class DownloadManager {
           error: this.error,
           errorCategory: this.errorCategory,
           errorStatus: this.errorStatus || 0,
+          errorCode: errorCodeFor(this.errorCategory),
+          retryable: isTransientError(this.errorCategory, this.errorStatus),
           refreshCount: this.refreshCount,
           resolving: !!this._resolving,
           resolveAttempt: this._resolveAttempt || 0,

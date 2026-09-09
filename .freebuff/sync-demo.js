@@ -534,9 +534,10 @@ async function selfTest() {
 
       !!beh.proxy && JSON.stringify(beh.proxy) === JSON.stringify(wantProxy));
     // queue-wide controls + retry: pauseAll freezes running/queued/scheduled,
-    // resumeAll brings paused back, retryFailed skips requires-browser but
-    // explicit retry flips an errored item to running.
-    const wantQueue = { pausedAll: true, pauseCount: 4, resumedD1: "queued", resumeCount: 4, retryFailedCount: 0, d5AfterRetry: "running" };
+    // resumeAll brings paused back, retryFailed retries the retryable error
+    // (d8, http 502) while skipping requires-browser (d5), and explicit retry
+    // flips an errored item to running.
+    const wantQueue = { pausedAll: true, pauseCount: 4, resumedD1: "queued", resumeCount: 4, retryFailedCount: 1, d5AfterRetry: "running" };
     check("shim queue-wide controls + retry", beh.queue, wantQueue,
       !!beh.queue && JSON.stringify(beh.queue) === JSON.stringify(wantQueue));
     // global schedule window + site rules: outside the window new downloads

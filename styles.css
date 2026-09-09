@@ -259,6 +259,12 @@ th.sel input, td.sel input { margin: 0; }
   transition: width 0.2s;
 }
 .pct { color: var(--muted); font-size: 11px; margin-top: 3px; }
+.error-detail { font-weight: 600; }
+.error-detail.error-retryable { color: var(--amber); }
+.error-detail.error-terminal { color: var(--red); }
+.error-marker { font-weight: 800; }
+.error-marker.error-retryable { color: var(--amber); }
+.error-marker.error-terminal { color: var(--red); }
 .refreshed { color: var(--amber); font-size: 10px; margin-top: 2px; }
 
 .speed { color: var(--amber); font-weight: 600; white-space: nowrap; }

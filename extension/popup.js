@@ -98,7 +98,17 @@ function foundItem(v) {
   // a terminal failure (404/403/expired/…) renders red with ✕. The flag comes
   // straight off the status push (mirrored by the SW), never re-derived here.
   meta.className = "dv-meta" + (err ? (v.retryable ? " dv-retry" : " dv-err") : "");
-  meta.textContent = err ? (v.retryable ? "⟳ " + err : "✕ " + err) : fmtSize(v.size || 0);
+  meta.textContent = err
+    ? (v.retryable ? "⟳ Retryable error: " + err : "✕ Terminal error: " + err)
+    : fmtSize(v.size || 0);
+  if (err) {
+    const label = (v.retryable ? "Retryable error: " : "Terminal error: ") + err;
+    // Keep the compact icon/text presentation while exposing the same explicit
+    // terminal-vs-retryable label used by the desktop renderer to assistive
+    // technology and the native tooltip.
+    meta.setAttribute("aria-label", label);
+    meta.title = label;
+  }
   info.appendChild(title);
   info.appendChild(meta);
   li.appendChild(info);

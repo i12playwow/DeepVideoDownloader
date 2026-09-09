@@ -76,8 +76,46 @@ function statusClass(st) {
   return "st-" + st;
 }
 
-function errorColor(it) {
-  return (it.errorCategory === "expired" || it.errorCategory === "requires-browser") ? "var(--amber)" : "var(--red)";
+// Keep the desktop error presentation aligned with the extension popup: the
+// app is the source of truth for errorCode/errorStatus/retryable, and clients
+// only render the pushed fields. A retryable failure is amber with ⟳; a
+// terminal failure is red with ✕ (including expired/requires-browser errors).
+function errorDetail(it) {
+  let s = it.error || "";
+  const code = it.errorStatus ? "HTTP " + it.errorStatus : (it.errorCode || "");
+  if (code && s.indexOf(code) === -1) s = (s ? s + " · " : "") + code;
+  return s;
+}
+
+function errorPresentation(it) {
+  const detail = errorDetail(it);
+  if (!detail) return null;
+  const retryable = it.retryable === true;
+  return {
+    detail,
+    marker: retryable ? "⟳" : "✕",
+    className: retryable ? "error-retryable" : "error-terminal",
+    label: retryable ? "Retryable error" : "Terminal error"
+  };
+}
+
+function errorMarkup(it) {
+  const p = errorPresentation(it);
+  if (!p) return "";
+  return ` — <span class="error-detail ${p.className}" title="${esc(p.label + ": " + p.detail)}"><span class="error-marker" aria-hidden="true">${p.marker}</span> ${esc(p.detail)}</span>`;
+}
+
+function statusBadge(it) {
+  const p = errorPresentation(it);
+  const marker = p
+    ? ` <span class="error-marker ${p.className}" title="${esc(p.label + ": " + p.detail)}" aria-label="${esc(p.label)}">${p.marker}</span>`
+    : "";
+  return `<span class="badge ${statusClass(it.status)}">${esc(it.status)}${it.resolving ? " ⟳" : ""}${marker}</span>`;
+}
+
+function errorSummary(it) {
+  const p = errorPresentation(it);
+  return p ? p.label + ": " + p.detail : "Error: " + (it.error || "Unknown error");
 }
 
 // Virtualized list: only rows in the viewport are in the DOM, with spacer rows
@@ -109,12 +147,12 @@ function rowHtml(it, showing) {
       <td>${fmtBytes(it.total)}</td>
       <td class="wide">
         <div class="bar-wrap"><div class="bar" style="width:${pct}%"></div></div>
-        <div class="pct">${pct.toFixed(1)}%${it.error ? ' — <span style="color:' + errorColor(it) + '">' + esc(it.error) + '</span>' : ""}${it.refreshCount ? '<div class="refreshed">↻ refreshed ' + it.refreshCount + '×</div>' : ""}${it.retryCount ? '<div class="refreshed">↻ retry ' + it.retryCount + '×</div>' : ""}</div>
+        <div class="pct">${pct.toFixed(1)}%${errorMarkup(it)}${it.refreshCount ? '<div class="refreshed">↻ refreshed ' + it.refreshCount + '×</div>' : ""}${it.retryCount ? '<div class="refreshed">↻ retry ' + it.retryCount + '×</div>' : ""}</div>
       </td>
       <td class="speed">${done ? "—" : fmtSpeed(it.speed)}</td>
       <td class="proxy" title="${esc(it.proxy)}">${esc(it.proxy)}</td>
       <td class="sched">${fmtSched(it)}</td>
-      <td class="status"><span class="badge ${statusClass(it.status)}">${esc(it.status)}${it.resolving ? " ⟳" : ""}</span></td>
+      <td class="status">${statusBadge(it)}</td>
       <td class="actions">${showing === "history" ? histActionButtons(it) : actionButtons(it)}</td>`;
 }
 
@@ -249,8 +287,8 @@ function actionButtons(it) {
 
 function histActionButtons(it) {
   let html = "";
-  if (it.error) {
-    html += `<button data-act="history-error" data-id="${it.id}" title="${esc(it.error)}" class="ghost">ⓘ</button>`;
+  if (errorPresentation(it)) {
+    html += `<button data-act="history-error" data-id="${it.id}" title="${esc(errorSummary(it))}" class="ghost">ⓘ</button>`;
   }
   html += `<button data-act="history-date" data-id="${it.id}" title="${fmtDate(it.timestamp)}">📅</button>`;
   if (it.status === "done" && it.finalPath) {
@@ -291,7 +329,7 @@ $("dlsBody").addEventListener("click", (e) => {
   } else if (act === "history-error" || act === "history-date") {
     const it = historyItems.get(id);
     if (it && act === "history-error") {
-      alert("Error: " + it.error);
+      alert(errorSummary(it));
     } else if (it && act === "history-date") {
       alert("Completed: " + fmtDate(it.endTime || it.timestamp));
     }
@@ -336,7 +374,7 @@ $("histBody").addEventListener("click", (e) => {
   if (!btn) return;
   const it = historyItems.get(btn.dataset.id);
   if (!it) return;
-  if (btn.dataset.act === "history-error") alert("Error: " + it.error);
+  if (btn.dataset.act === "history-error") alert(errorSummary(it));
   else if (btn.dataset.act === "history-date") alert("Completed: " + fmtDate(it.endTime || it.timestamp));
   else if (btn.dataset.act === "move") handleMove(it.id);
 });
@@ -370,7 +408,7 @@ function historyRowHtml(it) {
       <div class="name-col"><div class="name">${esc(it.fileName)}</div><div class="sub">${esc(it.url)}</div></div>
     </td>
     <td>${fmtBytes(it.total)}</td>
-    <td class="wide">${fmtDate(it.endTime || it.timestamp)}</td>     <td class="status"><span class="badge ${statusClass(it.status)}">${esc(it.status)}${it.resolving ? " ⟳" : ""}</span></td>
+    <td class="wide">${fmtDate(it.endTime || it.timestamp)}</td>     <td class="status">${statusBadge(it)}</td>
     <td class="actions">${histActionButtons(it)}</td>
   </tr>`;
 }
