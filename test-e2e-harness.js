@@ -1236,6 +1236,25 @@ function startServer(portRef, segBytesFn) {
     assert("P10 isCrawlHost rejects " + host,
       !isCrawlHost10(host), host + " must NOT be a crawl host");
   }
+  // Production calls the gate with FULL captured URLs (tryCapture* pass the
+  // absolute link, not the hostname) — a call-site/hostname mismatch once
+  // silently killed the crawler for every host. Pin the URL-shaped contract:
+  // the same families must match and cross-host CDN/media links must not.
+  const crawlUrls10 = [
+    ["http://supjav.com:8080/movie/code-123.html", "supjav movie page URL"],
+    ["https://www.supremejav.net/v/1.mp4", "supremejav media URL"],
+    ["https://sextb.cc/watch/abc", "sextb page URL"],
+    ["http://cnporn.org/embed/uuid", "cnporn embed URL"],
+    ["https://missav123.ws/video/xyz", "missav mirror URL"]
+  ];
+  for (const [url, label] of crawlUrls10) {
+    assert("P10 isCrawlHost matches " + label + " (" + url + ")",
+      isCrawlHost10(url), url + " must be a crawl host");
+  }
+  for (const url of ["http://cdn.example.com/v/x.mp4", "http://127.0.0.1:50556/movie/code-456.html", "http://www.notmissav.com/v/x.mp4"]) {
+    assert("P10 isCrawlHost rejects " + url,
+      !isCrawlHost10(url), url + " must NOT be a crawl host");
+  }
   const neg10a = contentSrc10.replace("autoCrawl: true", "autoCrawl: false");
   assert("P10 NEGATIVE: autoCrawl default flipped OFF -> guard bites",
     neg10a !== contentSrc10 && !checkCrawler10(neg10a), "guard missed the autoCrawl flip");

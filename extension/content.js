@@ -274,8 +274,12 @@
   }
   // The always-on crawler is scoped to the JAV families the extension targets:
   // supjav/supremejav, sextb, cnporn, missav. Link matches on any other host
-  // stay in the found list (manual send) instead of auto-sending.
+  // stay in the found list (manual send) instead of auto-sending. The gate is
+  // evaluated against CAPTURED URLs (full http(s) links from tryCapture*);
+  // parse the hostname so the anchored family patterns below match — a bare
+  // hostname input (drills/tests) has no scheme and falls through unchanged.
   function isCrawlHost(h) {
+    try { h = new URL(h).hostname; } catch (e) { /* already a bare hostname */ }
     return isSupjavHostname(h) || isSextbHostname(h) ||
       /^cnporn\.org$/i.test(h) || /^missav\d*\.(?:ws|ai|com|live|xyz)$/i.test(h);
   }
