@@ -17,6 +17,12 @@
 //   E budget reset   — a CDP-driven manual window.api.retry(id) on the
 //                     exhausted item gives a fresh budget: re-run, re-arm,
 //                     requeue ~+60s (observed passively by item id)
+//   H crawler relay  — real Chrome loads a JAV fixture page served AT the
+//                     host supjav.com (resolver-rule mapping + fixture-as-
+//                     proxy): the always-on crawler auto-sends the captured
+//                     movie-page link over the real WS relay, the resolver
+//                     resolves it, and the mp4 lands byte-exact; a same
+//                     page on plain 127.0.0.1 must NOT auto-send (scope gate)
 // Self-contained: the fixture MP4 is embedded and served by an in-process
 // static server (Range support) on an ephemeral port — no network egress.
 // Usage: npm run boot-verify [-- --keep] [-- --force]
@@ -35,6 +41,7 @@ const CONFIG_PATH = path.join(ROOT, "config.json");
 const WS_PORT = 8766;
 const KEEP = process.argv.includes("--keep");
 const FORCE = process.argv.includes("--force");
+const ONLY = process.argv.find((a) => a.startsWith("--only="));
 
 // 1-second testsrc 160x90 x264 MP4 (generated with ffmpeg, 8680 bytes).
 const MP4 = Buffer.from("AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAHnVtZGF0AAACVAYF//9Q3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMyAwNDgwY2IwIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTAgcmVmPTEgZGVibG9jaz0wOjA6MCBhbmFseXNlPTA6MCBtZT1kaWEgc3VibWU9MCBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0wIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MCA4eDhkY3Q9MCBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0wIHRocmVhZHM9MyBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0cD0wIGtleWludD0yNTAga2V5aW50X21pbj0xMCBzY2VuZWN1dD0wIGludHJhX3JlZnJlc2g9MCByYz1jcmYgbWJ0cmVlPTAgY3JmPTIzLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MACAAAALL2WIhDomKAAJAsMYACTYAAgCYISSFgJq2GDEIQwf/wAPDdETAn7Omh94AFQSi99WxxI3fcGEAASDwDwgABAdAAEADQABAWBwQRjBwQRgAAn+QFZqFCbgcAAoAAIArGDgAFAABAFYAAtgCzdAoJtPchISIMYACAY7xP2WWWWWSbJMBjQACmyImN+hkd8CZok/UF0039sCZok/UF0039gw+H/CABAAEAgBYDwQAAgFAACEyAAIK9gAewqiWiyefIMOAB4CoCzxpvUCJBgogYcZgOAAIFwAAgJgDg+mCAAFwSIAAIEQAAgD4OEFYg4QViDgAFQABAEYg4ABUAAQBGBHR2IxQABMejgACQHHAAEDaMwHAAEC4AAQEgBwAB9MBgACoAAgDRAABAiAAEJGDhBWMHCCsQcAAqAAIAjGDgAFQABAEYhjAAQBhCTSDTDTDTBKjABII/AArMyNDbodGfA3apflBNMN/YMCMzI0Nuh0Z/h4QCQABwOCAAPAOAAIMoADEALVDmC0YXf4/AAvBC6ZczDQK2OvH++F/zYIBlGAL+8AumdCFJKIeg9vEodntceWT5iAAEHCZeHAAQcJlhwAEHCZYGk7RZ8gLhhv7B+ALBC9xJALHzx/wgADAPYAYEAAIFIAAgJMAAEHndNNbWmCAgjAGsydEB3cIE3/hAQRjjZDZeQ6EF5KBAACgAAgCsaAQZ6L0kEW7yYmJEIAAUAAEAVgnXCxIADwBOBqsngQDfcamE8/7gAU0RkxOKUrfEgoCQT/o1rySt93iAAEQAIxyCwFMI32gt65oOQ0wvte0n1eLAAIgARiWAARAAjEIAQpqQgABACAAwBRIAHazDyTgxyWtnmOr+/gvhyops7+rwBgA+DVhhXU68CpzVEBE0MG5wjCT//BYnA28WUE9UW9XhYABNhPT08z+p6eFsAB4wIDPLOga2CStcuEP/6BGZkaGwha84RIAAIAUKucpkZIbdTKzh8NjOs2dlRGABw4cAAgBQq5DgAEAKFXKWNOJ7HsJ9Xv8AHsMM1I5UiYeN+rwHEgMIIQkOhNbYIIQq1I7PeCffNckAP4AytZOZNpgAAiBwUQKuq54tSwFSCE6b1Se1KQFG/Vws4ACG7u7u7gAMAi97jTgAHsIM1A9UgYfN+rwKQAAIBYAAgDAB9yfhwABALAAEAYAPuSHAAEAsAAQBgA+5Poi7D3Mo9zLU/B1Pp6enp6enhckABAIACucAAb4ErmNwbTpylOwgOACAEBADobkWAAIBYAAgjGRwABALAAEEZjBwABALAAEEYyHiAIMYaA0IkBtqlgACAWAAIIzAOAAIBYAAgjMQBAgCDGGgNCJAbavg4AAgFgACCMxAECAIMYaA0IkBtqEAAKAGgwAAgOgACB3FM8xTFMygHkFgALB4ABFg8AAiwn9cLOAPACIQoMaaEZIEXxf8AB2EUVzUGmDhPu7QgDIAAEAoAAQBwA64AEJERITCmqzhOHFLCEyXACpm16vz8AHoA/RHL6m6c9PT09PT08LOAIAAgFAACAiCzAcVXKx5pfdE9/0v3/+AIEAQbwHDvAEZtqLAAOgACA8ZLAAEAgAAQRWMHAAOgACA8ZAB7DDNHPJETAEQW+r0BWGUV7Ummjvt/VAFwggTxIQABkAAQERAcwOQhJYDNRCzD/awOAARAUFywCkJ3FJNaaBG7SeFsAFoJCAAHMCcAMuyEAFhu0APABsBBcdgHAAI2AYLjsPGeMDgAFbACAuOwDgAGbABAJjsPGeMUYowB4AZQUVPYJAAISgcKnsFGKMSAAUlAKCp7BIABiUAUCJ7AkAgwACQkABgwAAgUAaEGoY0AgGoY8ROlA8Ex0oAVQDAAXNgagYAucFgGBSOwFhhxOwCygCGBRe112SLIFB9XW7LMJgkAA3YAGATHZrwNV6jeYUk5b//PGQAAQAwy4LHhF2cOCYWWeORRhwACAGGXBIABqUAOAiewPAAJQIKi6WeGLGokAApKAcGT2AQmRkCK3UwU7QgEJwaEABBQKD4QwGdlZUJ/39MABAEjEunExEH2aJHhzjSAEsuByjemHLKBgHzZPQLlxjHbvnpYbiVb1LMT4MKAOvAgOK9wX7JuDdoOIiyw6Q5cl4cAEEGyw4AhhMsvlRcwjJKAeYpQLqDgBBRkKAcAhxEKAlADAYIAAQBQAg+qNGKAGjPYOo+gNUEnAO7AAEBAAAQSs2N6mFaEAAHbIAGB+LQXUAORwnH8xYi9okgR/fh1aDBFLLy8PGSWHATDy/FxcoyjSOUYdEWWHAiulg4ABUASEcAAQBAABAPV8Bnnga3LDJNwNnINUCTgC0MjgadEWkJHkwtgazFS2M3SC6gGgo4NTgNOm6IdfBs5ZWcu98YnryUyyiUsKDA4BgdA6FhrwMhgfeSRQewRvDIW1xi3sYuMQwoALPQwDPgh/gGEhDMOEUiWDhopFPZ+AHAMoU6NgHAAyg46Gw8zzc/AOCITLBAYITWBZimBwBsCH1sEgANgMPlsCgACBiCgCQMEKEAfIAAQDwABBF3YCYAAQEwABBRvASAAelACgq+weAAIAQAKBFaAcIJoDKCXgOwnqaex4BdQA8E2DTKAMSzEFALfvgPtq2AcbCFjYeZ5kUnbEO6DzLMUxTEvJrYJPBiVsFMU5Qktl43QIAAXAAEACEAEAf+BnjBryglfWgGBB4wFQYYoDLDUraNIADAAEBXdgxAJCc4qm750AACVA4q+AXUAUoAECgR+Cx1WibXEuXwhWBwAQQXLDgAIMPllu0QrSDU7FbgOAEFFRoBwAIOOjQEClIEAAbBAASA4LsMaQBQaxR6RqgM4a8DIABAACApvBG9wdoQAARloEG5tBhQAcBgEDUXFaFyAz1qwkMesdlistgHhFt3s/SarEAAGABwKl94rFdgOAAgw+NDwcAEEFxoDgAGQBgLlhDIMIAAgqgMuwxjHYbA1rcGUmcJi3dp5AZTD53iFhrzTfSBEjAQsAnjwLjEKQVpppmbtXWQACeVgBQ7+uC6gG9lgsYCzrNq4Vyyipc68urJmWVuWEgQGALB0CmqhJsBVCAmbBLywtggGyEclpwyzhMg6uUM/EABAAEAiDgAgACBj+P33r4WcAHGQpSFIUgAAgDAH5xgKEv/2A9xaY1RzRkvz9IAAgwRc+HAAgwRchwAIMEXAkgQAAgGBAE4AAgPgAKIYVAikaWHYyAOiYLQCgWAQBWALhOzghfWGIuuoHAIB2BAAgACADALP4TGAZSlcOE27aZsUlYPYBALcSmNtgx/9dd3bv2ABSRESEwpas4XZAABEDhtwHe3CAAKAwNACAQAAgQgACAGAsBAIRMswXE0DjUEBQAW5ziNncMXhAb4itE1PIQAAXHAAMuPiwFlLu7d/3d38QAAuCRAABAiAAEAf44QViDhBWOMsAAqAAIAzGDgAFQABAEYGLSr+v+FnFVJnd/+9/BwCAAIQsGAgACCxvmhelQXlmi1NwVpFmKJG1JgYAB3AACBDDACACAALohpxcguALUBwuLQsFuQAAXwAAgAUeHhwAC+AANQefC2ADo0AAICHRcADgJFl0a9u4pKyWZUADzZqt/QEw0v9mSslUCOzM2N+p1dVBQwACgAAgKgLQQABEoAHEO2WAzKmZ6KGuQRABbm+gLiYpysM7llpIdkAAEQUAAQArgWwAEAx3kve95IAIBjG/E6PgAeC/FtjLYNb/XQLz2Zmxv1OrqCzrBVVVrCACwAwkIAAQBwABA/FgL6US23jH0klwgIIwGDggjHA3HleYhmGARo0KIwACloAAgD5AxwACgAAgCsHWO2AAAAGIQZohoFMMeEIfgAGmIq/hIJGO7gE4f/omxvkeLZ5BVUAJshUrkbrtc4AEQXoijH2b/GmoyzEqLwWgYHRABKOyFyVNz78Q6hI3DamAB7IAAQArqcBEvpT73gT6deldvg+eYlZ0fp4Qh/ACbRCdyApi7T+8MAJZnCYrou1ft9CEwY4A42ms9+1IAPgJSAqCRVU1jnHzSZmhJlKqMHiI3is/AAiL5IwS/CqDDUVv73UACHVt6KbQYLMGHtggdtXu1MAKjmbUV+W3d2/343quqqtVVVGgAVz3RLtTTX/4Ygk1r3DELQAMpxbudTiPCgYfAAxDD+vQwtsBg6wIkEwAvz29L7rjYAPw7lLxMIUc8C29q9kaX4Qh/ABrNCQqsCnG7S8qsAG2mOER3IbtV5nhCYNwEfWvPfcncYAPgTkDqJFXVWOeBGTGuZpyuyB+NqNeFMs6opxTFMXFxTi8EAwUAGmMLO4KLB25tnDEL6V7z4W4510PhF4gAgACAJEABAAEBG5e9n4rsV4RxMAAAAGIQZpA6BTDE19/GwI1HLCYex0seABlgAbTgaZYc/LBigAYoAGBUSCrYHsgUsOflgxbtCIBDRBAfGAAEUmjG0zYcCbZx2iRIqPDEO8ADKcSK51FKJBSGGgbt+ABiGGqfoIXrgFphACcFPAYGunMSPU88AQgI5QAzQSUbeEpsJVtaxSff42CvlssG2PiRqL1FBtgsnLVi6hCxbQ7gawFBhDgq4yoNUmVVSwUONwgUo0IUPp8baHWql7KFsvL1F1nlDIXF3UZgiAJDs8HRI6S5Zdpk3bwxBboAqtVV+GIWgARhWEiuLrSCwUGHwAIJcGqXoITrgwOthEgRABfQ666XweueeAD8DqKfhOMcc8DGtsrzIeX4YhbAAjCsJO4+tIJBUPRgAQS4NdeghOsAtYQAnBTwGHGnMgirZgCEBHKAGaCSjbkHMMglS1rFJ9/jYLNLCzSxYZYcCk4rFDFDBWUsKxSzOW1n7AqBgWEQmgsYd5kHT0fNRqWYVjYYhfZ3vFYhPuHCOnDUfier1AAAAHRQZpgShHVpOrEVy1rFdfRMMR13d0BpPffxsA7EZU4LNQKlgAEo4HdEyyJliwZYAxQACUcDuA9kBSxqBmMWDFAGQLGejKOYxwUMwAOEh0z4pUgXaHghJjy0x8+3TLwxGzDgtrACrWEylH8kwsCGGGenp4LYAFM4N0qsEN9zDHWgJ2YQACOLZAjA90DfJVbMAPYBCrByJ0wLvBzDINVva5SfdfjYZYpjr4uOERV4vLwdfLyLbuY/FxcXHPAZwAgSMFXwKJ5md4YmYyYYkJ3nEHxtLlpLxdo8xccvi4uSWTqC45fZhT4EQASTx0SOo9bVS+FHLDEbqLqRHlcyjYi8XDaAdz36ZNzGsIRsAIQIiEOcYJIG7Xnt6tqK3ACKEZcYw6eN2taNrWovQRQQwAUOiTx/z6gzp8AHsAP4clqKYo5voC0ZHtJ7JweEI2xAA1jIIhyiDyBu0p/6MXVVUAG2QywxBUsN2lXk1ALTCATjrAFGxXpj4np3rwAegCKIN8yW2+QOeAuRGG7GbKKlSAT8bA30tlhg8vNYrLYoY8uiAyySMtivG/AwR4aI1MQdHpA/lFWbgvuqwhC+MspbiuHWWBoOLsE9LmJ66yKuX+sXzb3XVk8AAABwEGagFo/XUEUMRmXHeoRst23qG7ucEAfxsCW6mZfMhNQsBjVZmDq/FgDOAVBUJqFgMIeiCAWWQTMKAM4BUGgjpy5DlgYUB4ADiBofQ6DAjEHQsGsdli/p8IRtPBBgDWMRDCrICShu1ffFd7dAtUAiZBnwiiVqXad8fqwLcIBKHFgBfnMVdDPM2+h88AhACKMPQbNZfKHNN4yIwysIqvelSAS8bxPqVEYkXyf8youo4ZHSCIgAJDsHR6JB0aloZSy4ZmB/jZKNF6wFEp3AmyeAATi6n6Mw+yWAATuZC8wHcwbAAo4KJHQqMtczGMqCaB+fNljwxBPbVVyMLz8MQtAAXmTBM5wqSzjwEBh8ABTRoG7dSBD9KDAtYQFgjAApcofK/nxenvPAB7AOs4vnKFJHOBAbGWzFO7FS/34YhbAAjCTBMpwqSTDwEQ8jIADLRkG6dSBDdKAsTCAARxr4EYGuwb4i6nngB4wAh2gcmJrBd4OYGYarJLIYn3+NgxvZweXxlk5zxAe3gdRe7OeFXy9kB6ABgXCCYrhwdSnBMJSwnBXGsnTGPDEOb3BrmwGskueGH+epNS/rq31lUT4Zrq+pEwAAAJnQZqgalzYrRKupGX6kT6lT6pa4Z463XqgFGt44DQbhv6lRE+pZ/qWW+qX6pPhC6zsTsLRsrydSz/Ust9Uv1SfPX4QfnfLEoAAdv1LP9Sy31S/VJ81X1DEFfKwdRdj60W56mG+Nh7lkRWw2KR0PAGiGWFbliwAZ4A8pHQsAYg8aCV0AZYUAGeAPG2OWC/HWw4YhAAEAFBDxip7r2DJsuC8VOcHSvlmt7nhiHbhYABujIwJnOHWaIXHMMZLXQugIABkyMgN26mBBN0glsYQABEceRAF/BcpA3xFpTzwA8YAQV4ClRloLvBcYGYJllllOT7/GyUaLxJYCRrmdnJZi55YE6E30imiMsmqwggAEhgoSA6DEZDBipYsp2yVSSLvjbQ40C5eCqp4B5iWWYIB0PAALxcXZiIyxQgHQsAAviWgdB6QwssGKAAocDMFEOWVGVhUtVLQQKJ3OIIX1jYYh/jz0VYmMuAADAarUv/6fWY1hiFoADdGRgRHOCpNFNjwYIVCgAMmRoDK1UgYXdQMDpjCAkCOAChcofK/nmLpru88AHsAdIUfxWHFDngTGWZinpSFRfhiFqAQADdMmCZzh/LOEj0PgAMtGgbt1YEP8oJZmEAARCjyIEYB5WDfEWqeeAIEAIK8BSYyybeC5gZg1WaSY5Pun43i2KNI1iB5bFsUYthZU4eW34c0DMAAcYYHiiisQiZCPXTLLD8avMmr4IIXwJv0x2QSIJUEyCIVGKYDmBiqwGtLjPO4tmPaT8PPX03ZP56kzINjuroav8N3vX/ppN/C/mta9/ijqomp04Z/BJvV/lrX6p1AAAAB9UGawGoFMMQWcrF3e1i+d8bBW5YY3LFgDLAGMU5YV8scAsFgDFAGKAMDbDlhtjljgFgsAaUBlhZHLDQKEgANFSttQ0BEFlYpZMy1svCEP6YAKaGxjDvKDTBu0K3lgVlt5BAHZic+GYStRu0Vf6jRYQAnBxYAX44xV0M31sfoOeAPIEXDg1Iie6TMDuPjEzlKQZWJetSg/GzkRrwuX1RTFMXFwpZLPCmKbMO4IIAAgAIdgxHLPB1DuaPY0zRsvGzkQR7wXsBdAD2LywPMSyzgAAqgPAALxcoF0CIy0xI8EgABVAWAAXj0jAcsCJDg9AHUACBwESJHRI6i0O0sBIOnDAdtwxCnYlUoXYDlVV1JVUBLyrCEbABTIbGMK1wJNG7X36ZK1p6ZIArGJzyiMe9zXZgQRVehwLTCKBBgAcKVEy1ec8IW+rh//4APMC7hZr2cUo51gKkNl/RF6ssDwhGzhoAFNDYxh2kB5o3aXn2DUnVREMBAHZicWnMJW43aVn+DpgQAnBWgBfjmKqhnk36nngAsgZcEBaT575cwO6wFxI5ykGVSSWsUWpfjdIVisNMtlsVlsVistBWKyZaCV8JAAaG0Fg/ODq2Wtl/wxC+BMT1McsEnccEngQijCmCeIXhb2T4yBrLEqUPl1d9ev8I/n1/jZl+7gAAAAeJBmuBqBTDEE3Fbu7o++NgYrlhW5YsAZYDFfLDFOWLABlgDFAGKAwWRywsjlhQAYoAxthyw2w5YaBQhAAEAFCXW00weFoPFoN8srcvxsV8sgSrSwBjif2hcUxQBlE6B7H41HoP8s+RHAxDBIMAI8Mjjng6aM4t/oIJbYzYze44vGxr1BlmLjjQlyxeXimLk3x3BcXJbQqaBEAAkMFA6PQqAy0pnbCpZNTrYXjdIB5kcsDQ2h4ABeDzI5YYkcsWAAXlgAF5UNoWAAXi3WA6QwssKAAXigAF4OkMLLDSYBywKAAKQMmAIOjinjqLQqlgZ3iPHTxYVS8MQU+qqq5FHfhiH4ADeyMEyimpLEMjwYfAAZOMgbp3ICCbqAgEtYHTMICQMwAKHSh8r+eMXpr+14APYA6Qo/iMOLHPAWjJmYp6UhUDwhD9oAFMhsYw7XB5g3aFz8XFzUAHYxOeCKesg3aT6ZCfDCAEUt4AX45ivYzjjPT48AFkCNggLSfEL06gd4C4kU5yCKpJLWKLWfjaQaZYVljdYaZYtljFYoxvx7grFGr8TrIQgACACh8HhaDwtBtyyty2286LDEEGALen0xCLBE990IcETwBe2jFMBrg08OEeRusQOy6by2o8I1eufFWf/6gAAAghBmwBqBTDEE1K7btu2m+Ngr5YV8sWAywBivlhXyxYDLAYoDFAGHQGWG2OWFAYoDFkcsLI5YaBQkAA02JdlNAwMUmDLOdTNT8bFfLZ4D1aHGgUy88B7lCUBlnxLxcm+dQDLABAQhgq4yiOWZzwxSxTj3CZV+N0GNeFyzeRaLMNFMFxTYQVTQKaIph3EFAQQAEueDoOj1VLVS/whGx3y3x4ywaJlgB5mHOLCyJwkbAsMTdosbwqCxigyV8lBlhRnj0oywA8jiHmBWTpM0QLm7QQAJAUUBNNgA8wKwkOVKCtiZacjAVBuxiOFb6CGLWfQBiBTF3Qw2hj17UX2GI3w8rDiL1DlP12owgs9nOHf/h9NT6x2XhCNgDmhsYw7SA80btaggJ+XqwYuouoA7GJzwZT1uN2uRdVJgOmBBxgQALiqJvV/nhxrrrvn8AHmBdws17OIUc6wFSGy/5FqosDwhGyUABTRiMI9bg80btF5/93FxdmADbIZ8Mp6yDdp37cFgoIAThSQA/HGKq2OsuIPU810AFkCNkgNSfEL06oe8BWJFOdhlUl7WKBF42O+fQsZbKQS4WMtijFYlxKMsKMVnuNoJAAaG0TBlnB0mZa2WfWmHvDEPd3gC3k9TLIJkEqCZBAfvRhTAewQvBah5PNkBrRcpQ+XVlhBcaUiUyVsvt55fUI658v7Td1AAAAB10GbIGoFMMV98bBW5YYpyxYAywGMU5YYzliwBlgDFAGKAwNscsLIcsKAMUAYsjlhtjlhoFCEAA0JdbNsYPFogDo7LJmX43QlFWKY40PIl5ZirFyVgJ8MBFxTdREZYNwACgkYHR1TwdRNBRUsZ6M3XVPxsa9QZZi414GOrwXlhF4pi5N8dwXHCL3UAvmQ5gbAAFHFB0egdOUo0tFoTDgpQxoecMIRsV8sV/iwZYN1gAtghTDQkiaJHQLDE3aLBvjywYoO6DLEo+EAqCxoQSDADyKIaYEZNkzRAybtBACYCjA2uAC2ADEgkEKkhOxMtHsBYbsIryW6ghTW1gDEDMVKxkIYt/W9hiCS9gMb+/DELQAG5GTAmc4Kk0Q2PAjD4AMmRoG7dyBhN1AwOswgJAjgAoXFDpX88xWnd3ngA9gDpCj+Iw8sc8CaMsxk3KQqP/f42CzS0CLAMHrpDvi2WxQDH3AYqFRQ0cFsVnuPwOQAOGiEjFDg6T8LZYTgMV+kFizYpfjcBpCsUZrNZbLGKxRq/PwVijV+PcEIAAgAocweLQeLVssrcu27YFhiCDAmn0yWCbu784OCbwBe2RhTBLg08OEeT4yHj6bJYl1SskTVzhGev/WxVa66qAAAA0ttb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAAPoAAAD6AABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACdnRyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAAAAAD6AAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAoAAAAFoAAAAAACRlZHRzAAAAHGVsc3QAAAAAAAAAAQAAA+gAAAAAAAEAAAAAAe5tZGlhAAAAIG1kaGQAAAAAAAAAAAAAAAAAACgAAAAoAFXEAAAAAAAtaGRscgAAAAAAAAAAdmlkZQAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAGZbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAABWXN0YmwAAAC5c3RzZAAAAAAAAAABAAAAqWF2YzEAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAoABaAEgAAABIAAAAAAAAAAEUTGF2YzYzLjEuMTAxIGxpYngyNjQAAAAAAAAAAAAAAAAY//8AAAAvYXZjQwFCwAr/4QAYZ0LACtoKN+TARAAAAwAEAAADAFA8SJqAAQAEaM4PyAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAAPNoAAAAAAAAABhzdHRzAAAAAAAAAAEAAAAKAAAEAAAAABRzdHNzAAAAAAAAAAEAAAABAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAAKAAAAAQAAADxzdHN6AAAAAAAAAAAAAAAKAAANiwAAAYwAAAGMAAAB1QAAAcQAAAJrAAAB+QAAAeYAAAIMAAAB2wAAABRzdGNvAAAAAAAAAAEAAAAwAAAAYXVkdGEAAABZbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAsaWxzdAAAACSpdG9vAAAAHGRhdGEAAAABAAAAAExhdmY2My4xLjEwMQ==", "base64");
@@ -60,13 +67,43 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function startFixture() {
   return new Promise((resolve, reject) => {
     fixture = http.createServer((req, res) => {
-      const p = req.url.split("?")[0];
+      // Proxy-style (absolute-form) requests arrive when the APP routes a
+      // supjav.com URL through the Phase H rule proxy (fixture-as-proxy):
+      // req.url is then "http://supjav.com:<port>/path" — serve by path only.
+      if (req.headers.host && /supjav/i.test(req.headers.host)) console.log("  [fixture]", req.method, req.url);
+      let p = req.url.split("?")[0];
+      if (/^https?:/i.test(p)) { try { p = new URL(p).pathname; } catch (e) { /* keep raw */ } }
       // Phase G (extension drill): category pages each load a distinct video,
       // so the extension's webRequest capture fires with a real tabId.
       const PAGE = (title, v) =>
         "<!doctype html><html><head><title>" + title + "</title></head><body>" +
         "<h1>" + title + "</h1><video src='" + v + "' autoplay muted preload='auto'></video>" +
         "<script>fetch('" + v + "',{mode:'no-cors'}).catch(function(){})</script></body></html>";
+      // Phase H (crawler drill): a supjav.com "list" page carries a movie-page
+      // link (scanSupjavList + tryCaptureMoviePage auto-send it over WS); the
+      // resolver then fetches the movie page and its absolute <video src>
+      // (JAV_SRC_RE shape, built from the request's Host so it always points
+      // back at this fixture) resolves to the media. The negative-control list
+      // page is served on plain 127.0.0.1 and is deliberately LINK-ONLY: a
+      // real <video> element would trip the extension's default autoGrab
+      // (grabOn) best-only path, which sends videos from EVERY host by design
+      // — the host-scope gate under test is the crawler's, not autoGrab's.
+      const LIST = (title, movieHref) =>
+        "<!doctype html><html><head><title>" + title + "</title></head><body>" +
+        "<h1>" + title + "</h1><a href='" + movieHref + "' title='" + title + "'>" + title + "</a></body></html>";
+      if (p === "/movies/crawl-me/") { res.writeHead(200, { "Content-Type": "text/html" }); res.end(LIST("movie-code-123", "/movie-code-123.html")); return; }
+      if (p === "/movies/no-crawl/") {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end("<!doctype html><html><head><title>movie-code-456</title></head><body>" +
+          "<h1>movie-code-456</h1><a href='/movie-code-456.html' title='movie-code-456'>movie-code-456</a></body></html>");
+        return;
+      }
+      if (/^\/movie-code-\d+\.html$/.test(p)) {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end("<!doctype html><html><head><title>" + p + "</title></head><body>" +
+          "<video src='http://" + req.headers.host + "/v/mov-crawl-me.mp4' controls></video></body></html>");
+        return;
+      }
       // Serve ONLY the known-good media names (one/two/three for phases A/B,
       // mov-*/act-*/tag-* for the Phase G extension drill). fail.mp4/fail2.mp4
       // must stay 404 so the auto-retry phases (C/D) still get deterministic
@@ -147,6 +184,13 @@ async function startFairFixture(mp4) {
 function stopFairFixture() { for (const x of [fixA, fixB]) { try { x && x.server.close(); } catch (e) {} } }
 
 function writeConfig(patch) {
+  // Preserve keys already in config.json (mid-run phase patches are applied
+  // live by the app's file watcher). Without the merge, ANY phase write would
+  // reset autoProxy/proxyRules to the base defaults and silently kill the
+  // Phase H supjav.com routing — the resolver then fetches the REAL host and
+  // hangs 30s. Explicit patch keys always win over preserved ones.
+  let prev = {};
+  try { prev = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")); } catch (e) { /* first write */ }
   const base = {
     port: WS_PORT,
     downloadDir: dlDir.split(path.sep).join("/"),
@@ -161,7 +205,7 @@ function writeConfig(patch) {
     scheduleWindowStart: "", scheduleWindowEnd: "",
     autoRetryMinutes: 0, siteRules: []
   };
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(Object.assign(base, patch), null, 2));
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(Object.assign({}, base, prev, patch), null, 2));
 }
 
 const CDP_PORT = 0; // ephemeral; Chromium writes the chosen port to <udDir>/DevToolsActivePort
@@ -244,6 +288,40 @@ function wsDownload(url, title, referer, waitMs) {
 
 const fileSize = (p) => { try { return fs.statSync(p).size; } catch (e) { return -1; } };
 const hasFile = (p) => fs.existsSync(p);
+
+// Passive WS observer: the app broadcasts every status flush to ALL clients,
+// so a listener that never sends anything still sees the extension's
+// downloads arrive over the real relay. Resolves on a terminal push for a
+// watched URL or on timeout; `seen` holds every status push observed.
+function wsObserve(urls, waitMs) {
+  return new Promise((resolve) => {
+    const seen = [];
+    let finished = false;
+    let ws = null;
+    const finish = (why) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      try { if (ws) ws.terminate(); } catch (e) { /* ignore */ }
+      resolve({ seen, why });
+    };
+    const timer = setTimeout(() => finish("timeout"), waitMs);
+    const connect = () => {
+      ws = new WebSocket("ws://127.0.0.1:" + WS_PORT);
+      ws.on("open", () => {});
+      ws.on("message", (d) => {
+        let m;
+        try { m = JSON.parse(d.toString()); } catch (e) { return; }
+        if (m.type !== "status") return;
+        seen.push({ url: m.url, status: m.status, error: (m.error || "").slice(0, 140) });
+        if (urls.includes(m.url) && (m.status === "done" || m.status === "error" || m.status === "duplicate")) finish("terminal");
+      });
+      ws.on("close", () => { if (!finished) setTimeout(connect, 400); });
+      ws.on("error", () => {});
+    };
+    connect();
+  });
+}
 
 async function phaseA(port) {
   console.log("--- Phase A: real download completes byte-exact ---");
@@ -461,7 +539,9 @@ async function phaseF() {
   console.log("--- Phase F: fair per-host concurrency (no starvation) ---");
   // Global concurrency must exceed 4 or the GLOBAL cap (not the per-host cap)
   // becomes the binding constraint and B starves legitimately.
-  writeConfig({ concurrency: 8 });
+  // Reset the C/D auto-retry timers explicitly (the merge in writeConfig
+  // would otherwise carry them into F/G/H).
+  writeConfig({ concurrency: 8, autoRetryMinutes: 0, scheduleWindowStart: "", scheduleWindowEnd: "", siteRules: [] });
   await sleep(3500); // watcher applies the edit
   const urlA = (p) => "http://127.0.0.1:" + fixA.port + p;
   const urlB = (p) => "http://[::1]:" + fixB.port + p;
@@ -812,6 +892,198 @@ async function phaseG(port) {
   }
 }
 
+// ---- Phase H: always-on crawler auto-sends a JAV-host capture over WS ----
+// Real Chrome (CfT) + the real extension against the real app relay, fully
+// offline: the fixture is served AT the host supjav.com (--host-resolver-rules
+// maps it to loopback), so the content script's scanSupjavList runs and
+// maybeAutoCrawl auto-sends the movie-page link (kind "link") with ZERO
+// toggle clicks; the app's own fetch of the movie page + media reaches the
+// fixture through the proxyRules entry (absolute-form), so the resolver's
+// JAV_SRC_RE path runs for real and the mp4 lands byte-exact. SW state is
+// read over CDP (captured set). Negative control: the same LINK-ONLY list
+// page served on plain 127.0.0.1 must NOT auto-send (video elements are
+// excluded on purpose — the extension's default autoGrab/grabOn best-only
+// path sends videos from every host by design; the gate under test here is
+// the crawler's host scope). This drill once caught a real regression: the
+// gate was evaluated against full URLs while the family patterns expected
+// bare hostnames, silently killing the crawler for every host.
+// Assertions: WS status push -> resolver -> byte-exact mp4 (relay proof),
+// plus SW captured/scope state over the same observer + CDP.
+class Hcdp {
+  constructor(wsUrl) {
+    this.ws = new WebSocket(wsUrl);
+    this.id = 0;
+    this.pending = new Map();
+    this.ready = new Promise((res, rej) => { this.ws.on("open", res); this.ws.on("error", rej); });
+    this.ws.on("message", (d) => {
+      const m = JSON.parse(d.toString());
+      if (m.id && this.pending.has(m.id)) {
+        const { res, rej } = this.pending.get(m.id);
+        this.pending.delete(m.id);
+        m.error ? rej(new Error(m.error.message)) : res(m.result);
+      }
+    });
+  }
+  send(method, params = {}, sessionId) {
+    return this.ready.then(() => new Promise((res, rej) => {
+      const id = ++this.id;
+      this.pending.set(id, { res, rej });
+      const m = { id, method, params };
+      if (sessionId) m.sessionId = sessionId;
+      this.ws.send(JSON.stringify(m));
+    }));
+  }
+  close() { try { this.ws.close(); } catch (e) {} }
+}
+
+// Eval an expression in the Deep Grab service worker (resolved by manifest
+// NAME — Chrome ships built-in workers whose URLs also end /background.js).
+// Retries across SW wake/idle; detaches after every eval so the attached
+// inspector never keeps the worker alive.
+async function hSwEval(browser, expr) {
+  let hSwId = null;
+  const isDg = (t) => t.type === "service_worker" && !!hSwId && t.url === "chrome-extension://" + hSwId + "/background.js";
+  const find = async () => {
+    if (hSwId) return (await browser.send("Target.getTargets")).targetInfos.find(isDg) || null;
+    for (const t of (await browser.send("Target.getTargets")).targetInfos.filter((x) => x.type === "service_worker" && x.url && /^chrome-extension:\/\//.test(x.url) && x.url.endsWith("/background.js"))) {
+      let ss = null;
+      try {
+        ss = await browser.send("Target.attachToTarget", { targetId: t.targetId, flatten: true });
+        const ev = await browser.send("Runtime.evaluate", { expression: "chrome.runtime.getManifest().name", returnByValue: true }, ss.sessionId);
+        if (ev.result && ev.result.value === "Deep Grab") { hSwId = /^chrome-extension:\/\/([^/]+)\//.exec(t.url)[1]; return t; }
+      } catch (e) { /* worker may die mid-attach */ }
+      finally { if (ss) { try { await browser.send("Target.detachFromTarget", { sessionId: ss.sessionId }); } catch (e) {} } }
+    }
+    return null;
+  };
+  let lastErr = null;
+  for (let i = 0; i < 10; i++) {
+    const sw = await find();
+    if (sw) {
+      let ss = null;
+      try {
+        ss = await browser.send("Target.attachToTarget", { targetId: sw.targetId, flatten: true });
+        const ev = await browser.send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true }, ss.sessionId);
+        if (ev.exceptionDetails) throw new Error("SW EXC: " + JSON.stringify(ev.exceptionDetails.exception && ev.exceptionDetails.exception.description));
+        return ev.result && ev.result.value;
+      } catch (e) { lastErr = e; }
+      finally { if (ss) { try { await browser.send("Target.detachFromTarget", { sessionId: ss.sessionId }); } catch (e) {} } }
+    }
+    await sleep(600);
+  }
+  throw new Error("SW eval kept failing: " + ((lastErr && lastErr.message) || "no Deep Grab worker found"));
+}
+
+async function phaseH(port) {
+  console.log("--- Phase H: always-on crawler auto-sends a JAV-host capture over the real WS relay ---");
+  const chromePath = process.env.CFT_CHROME || path.join(ROOT, ".freebuff", "xt-cft", "chrome-win64", "chrome.exe");
+  if (!fs.existsSync(chromePath)) {
+    pass("H crawler auto-send relay", "SKIPPED - Chrome for Testing not found (set CFT_CHROME or .freebuff/xt-cft)");
+    return;
+  }
+  const crawlList = "http://supjav.com:" + port + "/movies/crawl-me/";
+  const crawlMovie = "http://supjav.com:" + port + "/movie-code-123.html";
+  const plainList = "http://127.0.0.1:" + port + "/movies/no-crawl/";
+  const plainMovie = "http://127.0.0.1:" + port + "/movie-code-456.html";
+  const dlBefore = new Set(fs.readdirSync(dlDir));
+  const H = (s) => console.log("  H: " + s);
+  try {
+    // Copy the shipped extension (same WS-port override as Phase G).
+    H("copy extension + launch chrome (supjav.com -> loopback)");
+    const extDst = path.join(sandbox, "ext");
+    fs.rmSync(extDst, { recursive: true, force: true });
+    fs.cpSync(path.join(ROOT, "extension"), extDst, { recursive: true });
+    const bg = path.join(extDst, "background.js");
+    let src = fs.readFileSync(bg, "utf8");
+    if (!src.includes('"ws://127.0.0.1:8766"')) {
+      src = src.replace('"ws://127.0.0.1:8765"', '"ws://127.0.0.1:8766"');
+      fs.writeFileSync(bg, src);
+    }
+    if (!fs.readFileSync(bg, "utf8").includes('"ws://127.0.0.1:8766"')) throw new Error("WS port override failed");
+
+    // Passive observer FIRST — the extension's download must be OBSERVED, and
+    // the app only pushes statuses to clients already connected.
+    const obs = wsObserve([crawlMovie], 90000);
+
+    const chromeUd = path.join(sandbox, "chrome-h-ud");
+    fs.rmSync(chromeUd, { recursive: true, force: true });
+    fs.mkdirSync(chromeUd, { recursive: true });
+    const cOut = fs.openSync(path.join(sandbox, "chrome-h.log"), "w");
+    const cErr = fs.openSync(path.join(sandbox, "chrome-h.log.err"), "w");
+    const cChild = spawn(chromePath, [
+      "--user-data-dir=" + chromeUd,
+      "--load-extension=" + extDst,
+      "--disable-extensions-except=" + extDst,
+      "--remote-debugging-port=0",
+      "--enable-unsafe-extension-debugging",
+      "--no-first-run", "--no-default-browser-check", "--disable-session-crashed-bubble",
+      "--disable-component-update", "--no-service-autorun",
+      // The fixture is served at the real supjav.com host: Chrome resolves it
+      // to loopback so isCrawlHost sees a JAV host on the captured URL.
+      "--host-resolver-rules=MAP supjav.com 127.0.0.1",
+      crawlList, plainList
+    ], { detached: true, windowsHide: false, stdio: ["ignore", cOut, cErr] });
+    cChild.unref();
+    chromeG = { pid: cChild.pid, cdpPort: null, extId: "", sandboxDir: sandbox };
+
+    const dap = path.join(chromeUd, "DevToolsActivePort");
+    let cdpPort = null;
+    for (let i = 0; i < 60 && !cdpPort; i++) {
+      try { cdpPort = parseInt(String(fs.readFileSync(dap, "utf8")).trim().split(/\r?\n/)[0], 10); } catch (e) { /* not written yet */ }
+      if (!cdpPort) await sleep(500);
+    }
+    if (!cdpPort) throw new Error("Chrome never wrote DevToolsActivePort");
+    chromeG.cdpPort = cdpPort;
+    const bws = (await fetch("http://127.0.0.1:" + cdpPort + "/json/version").then((r) => r.json())).webSocketDebuggerUrl;
+
+    // A fresh profile defers the FIRST navigation (G's lesson): find the crawl
+    // tab, activate it, and only wait on the relay once it committed, so
+    // scanSupjavList actually runs on the supjav.com host.
+    const b0 = new Hcdp(bws);
+    let crawlTab = null;
+    for (let i = 0; i < 30 && !crawlTab; i++) {
+      try { crawlTab = (await b0.send("Target.getTargets")).targetInfos.find((x) => x.type === "page" && x.url === crawlList) || null; } catch (e) { /* retry */ }
+      if (crawlTab) { try { await b0.send("Target.activateTarget", { targetId: crawlTab.targetId }); } catch (e) {} }
+      else await sleep(700);
+    }
+    H("chrome up on " + cdpPort + (crawlTab ? "; crawl tab committed + activated" : "; crawl tab NEVER committed") + "; waiting for the relay");
+    b0.close();
+
+    const { seen, why } = await obs;
+    // SW ground truth right after the terminal push (the worker that just sent
+    // is still alive; `captured` is memory-only, so an idle-evicted worker
+    // cannot answer it — the WS + byte-exact file are the primary relay proof).
+    let sw = null;
+    try {
+      const b = new Hcdp(bws);
+      sw = await hSwEval(b, `({ crawlCaptured: captured.has(${JSON.stringify(crawlMovie)}), plainFound: found.some(f => f.url === ${JSON.stringify(plainMovie)}), plainCaptured: captured.has(${JSON.stringify(plainMovie)}) })`);
+      b.close();
+    } catch (e) { H("SW eval failed: " + ((e && e.message) || e)); }
+    // Give the app a beat to finalize the file, then diff the download dir.
+    await sleep(1500);
+    const newFiles = fs.readdirSync(dlDir).filter((f) => !dlBefore.has(f)).map((f) => path.join(dlDir, f));
+    const goodFile = newFiles.find((f) => fileSize(f) === MP4.length);
+    const crawlPushes = seen.filter((s) => s.url === crawlMovie);
+    const leaked = seen.filter((s) => s.url !== crawlMovie && /mov-no-crawl|movie-code-456/.test(s.url));
+    const done = crawlPushes.some((s) => s.status === "done");
+
+    if (done && goodFile) {
+      pass("H crawler auto-send over WS", "JAV-host page crawled -> add-to-list -> WS relay -> resolver -> download; statuses " + crawlPushes.map((s) => s.status).join("->") + "; " + path.basename(goodFile) + " byte-exact (" + MP4.length + "B)" + (sw && sw.crawlCaptured ? "; SW captured acked" : "; SW detail=" + JSON.stringify(sw)) + " (" + why + ")");
+    } else {
+      fail("H crawler auto-send over WS", JSON.stringify({ why, crawlPushes, newFiles: newFiles.map((f) => path.basename(f) + ":" + fileSize(f)), goodFile: goodFile ? path.basename(goodFile) : null, sw }));
+    }
+    if (!leaked.length && !newFiles.some((f) => /456/.test(path.basename(f))) && sw && sw.plainFound === false && sw.plainCaptured === false) {
+      pass("H host-scope gate (non-JAV host)", "127.0.0.1 list page never auto-sent: 0 WS pushes, no file, SW captured=false");
+    } else {
+      fail("H host-scope gate (non-JAV host)", JSON.stringify({ leaked: leaked.map((s) => s.url + ":" + s.status), newFiles: newFiles.map((f) => path.basename(f)), sw }));
+    }
+  } catch (e) {
+    fail("H crawler auto-send relay", "drill error: " + ((e && e.message) || e));
+  } finally {
+    killChromeG();
+  }
+}
+
 // Who holds the drill port? On the self-hosted CI runner (buffy-runner == this
 // machine) the culprit is almost always a local task-2 sandbox app left running
 // on 8766. Name the pid + the exact kill command so an abort is never a mystery
@@ -866,7 +1138,11 @@ async function main() {
   }
   const port = await startFixture();
   await startFairFixture(MP4);
-  writeConfig({});
+  // autoProxy:true + one rule routes ONLY supjav.com through the fixture as a
+  // proxy (Phase H: the app's own fetch of the JAV pages + media must reach
+  // it; every other drill URL is 127.0.0.1/::1, where the empty pool makes
+  // pickBest fall through to null -> direct).
+  writeConfig({ autoProxy: true, proxyRules: [{ host: "supjav.com", proxy: "http://127.0.0.1:" + port }] });
   console.log("sandbox: " + sandbox + "\nfixture on 127.0.0.1:" + port);
   launchApp();
 
@@ -875,14 +1151,17 @@ async function main() {
   pass("app boot", "WS hello on 8766");
 
   try {
-    await phaseA(port);
-    await phaseB(port);
-    await phaseC(port);
-    await phaseC2(port);
-    await phaseD(port);
-    await phaseE(port, lastExhaustedId);
-    await phaseF();
-    await phaseG(port);
+    // --only=<NAME> skips every phase but the named one (drill iteration).
+    const run = (name, fn) => { if (!ONLY || ONLY === "--only=" + name) return fn(); };
+    await run("A", () => phaseA(port));
+    await run("B", () => phaseB(port));
+    await run("C", () => phaseC(port));
+    await run("C2", () => phaseC2(port));
+    await run("D", () => phaseD(port));
+    await run("E", () => phaseE(port, lastExhaustedId));
+    await run("F", () => phaseF());
+    await run("G", () => phaseG(port));
+    await run("H", () => phaseH(port));
   } catch (e) {
     fail("uncaught", (e && e.stack) || String(e));
   }
