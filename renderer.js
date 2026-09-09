@@ -118,19 +118,30 @@ function errorSummary(it) {
   return p ? p.label + ": " + p.detail : "Error: " + (it.error || "Unknown error");
 }
 
-// Virtualized list: only rows in the viewport are in the DOM, with spacer rows
-// keeping the scrollbar sized to the full list. Keeps the UI smooth with
+// Virtualized list: only rows in the viewport are in the DOM, with spacer
+// rows keeping the scrollbar sized to the full list. Keeps the UI smooth with
 // thousands of queued downloads. ROW_H is an approximate fixed row height.
 const ROW_H = 40;
 let renderTimer = null;
 
-function spacer(px) {
-  const tr = document.createElement("tr");
-  tr.style.height = px + "px";
-  tr.style.border = "none";
-  tr.innerHTML = '<td colspan="9" style="border:none;padding:0;"></td>';
-  return tr;
+// Scroll metrics are read only in clean frames (scroll events and the
+// ResizeObserver's initial/resize callbacks), never inside the render path:
+// renderHistory's scrollTop read used to chase render()'s row writes and
+// force a 38-42ms synchronous layout (measured forced-reflow insight).
+// Renders consume the cached numbers.
+const scrollMetrics = { dls: { st: 0, vh: 400 }, hist: { st: 0, vh: 300 } };
+function watchScrollMetrics(id, key) {
+  const el = $(id);
+  if (!el) return;
+  const read = () => {
+    scrollMetrics[key].st = el.scrollTop || 0;
+    scrollMetrics[key].vh = el.clientHeight || scrollMetrics[key].vh;
+  };
+  el.addEventListener("scroll", read, { passive: true });
+  if (window.ResizeObserver) new ResizeObserver(read).observe(el);
 }
+watchScrollMetrics("dlsScroll", "dls");
+watchScrollMetrics("histScroll", "hist");
 
 function rowHtml(it, showing) {
   const pct = it.total ? Math.min(100, (it.received / it.total) * 100) : 0;
@@ -229,19 +240,21 @@ function render() {
     updateSummary();
     return;
   }
-  const scroll = $("dlsScroll");
-  const st = scroll.scrollTop || 0;
-  const vh = scroll.clientHeight || 400;
+  const m = scrollMetrics.dls;
+  const st = m.st;
+  const vh = m.vh;
   const start = Math.max(0, Math.floor(st / ROW_H) - 6);
   const end = Math.min(total, Math.ceil((st + vh) / ROW_H) + 6);
-  tbody.innerHTML = "";
-  if (start > 0) tbody.appendChild(spacer(start * ROW_H));
-  for (let i = start; i < end; i++) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = rowHtml(displayItems[i], "active");
-    tbody.appendChild(tr);
-  }
-  if (end < total) tbody.appendChild(spacer((total - end) * ROW_H));
+  // One innerHTML write, like renderHistory: N tr.appendChild calls left the
+  // document dirty and forced the next scroll-read (renderHistory) into a
+  // 38.7ms synchronous layout (measured forced-reflow insight).
+  let html = "";
+  if (start > 0) html += `<tr style="height:${start * ROW_H}px;"><td colspan="9" style="border:none;padding:0;"></td></tr>`;
+  // rowHtml emits cells only — the <tr> wrapper is supplied here (unlike
+  // historyRowHtml, which includes its own).
+  for (let i = start; i < end; i++) html += "<tr>" + rowHtml(displayItems[i], "active") + "</tr>";
+  if (end < total) html += `<tr style="height:${(total - end) * ROW_H}px;"><td colspan="9" style="border:none;padding:0;"></td></tr>`;
+  tbody.innerHTML = html;
   updateBatchBar();
   updateSummary();
 }
@@ -430,10 +443,12 @@ function renderHistory() {
     return;
   }
   // Virtualized like the active list: only rows near the viewport are in the
-  // DOM so a multi-thousand-entry history stays responsive.
-  const scroll = $("histScroll");
-  const st = scroll.scrollTop || 0;
-  const vh = scroll.clientHeight || 400;
+  // DOM so a multi-thousand-entry history stays responsive. Metrics come from
+  // the clean-frame scroll cache (see scrollMetrics) — reading scrollTop here
+  // chased render()'s writes and forced a synchronous layout.
+  const m = scrollMetrics.hist;
+  const st = m.st;
+  const vh = m.vh;
   const start = Math.max(0, Math.floor(st / ROW_H) - 6);
   const end = Math.min(list.length, Math.ceil((st + vh) / ROW_H) + 6);
   let html = "";
@@ -515,6 +530,7 @@ async function loadSettings() {
 
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
+  refreshCssVarCache(); // re-warm after the flip so cached values match, whatever the order with the load warm
   $("themeToggle").textContent = theme === "dark" ? "☀️ Light mode" : "🌙 Dark mode";
   window.api.saveSettings({ theme });
 }
@@ -750,8 +766,22 @@ window.api.onFileOpened((data) => {
 let bwChart = null;
 
 // Canvas fillStyle can't resolve CSS var(); pull the computed value instead.
+// Cached: reading computed style on every frame forced layouts on the cold
+// document (58ms measured in the trace). applyTheme is the single chokepoint
+// that flips data-theme, so it invalidates the cache.
+let cssVarCache = new Map();
+function refreshCssVarCache() {
+  const cs = getComputedStyle(document.documentElement);
+  for (const name of ["--muted", "--accent"])
+    cssVarCache.set(name, cs.getPropertyValue(name).trim() || "#94a3b8");
+}
+// Warm once the document has settled: reading computed style mid-load (the
+// first canvas draws) or at script eval (before any layout exists) forced
+// 60-120ms of reflow in the trace. Two warm reads per load, none in the
+// draw path. :root is the dark theme, so pre-warm draws use its constants.
+addEventListener("load", refreshCssVarCache);
 function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#94a3b8";
+  return cssVarCache.get(name) || "#94a3b8";
 }
 
 function drawBandwidthChart(samples) {

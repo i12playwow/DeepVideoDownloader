@@ -204,7 +204,10 @@ body {
 }
 
 /* ---------------- downloads table ---------------- */
-#dlsScroll { max-height: 60vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; }
+/* Heights are reserved, not capped: rows arrive asynchronously after first
+   paint, and a max-height box growing 0→N px shoved everything below it down
+   (measured CLS 0.37 — the 943px Advanced panel was the shifting victim). */
+#dlsScroll { height: 60vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; }
 table { width: 100%; border-collapse: collapse; }
 th, td {
   text-align: left;
@@ -225,7 +228,7 @@ th.sel input, td.sel input { margin: 0; }
 .history-section { margin-top: 14px; }
 .hist-head { display: flex; align-items: center; gap: 8px; margin: 4px 2px; }
 .hist-head h3 { font-size: 14px; margin: 0; }
-#histScroll { max-height: 42vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; }
+#histScroll { height: 42vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; }
 #hist th, #hist td { font-size: 12px; }
 
 .name-cell { display: flex; align-items: center; gap: 8px; }
