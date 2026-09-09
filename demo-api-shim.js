@@ -193,7 +193,10 @@
     resume: async (id) => {
       const it = items.find((i) => i.id === id);
       if (it && (it.status === "paused" || it.status === "error" || it.status === "scheduled" || it.status === "queued")) {
-        it.status = "running"; it.speed = 2 * MB; emit([it]);
+        // Mirror DownloadManager.resume: leaving paused/error/scheduled clears
+        // the error fields and the auto-retry arming, so a later completion
+        // can't push stale error data onto a done history entry.
+        it.status = "running"; clearErrorFields(it); it._autoRetryAt = null; it._autoRetries = 0; it.speed = 2 * MB; emit([it]);
       }
       return { ok: true };
     },
