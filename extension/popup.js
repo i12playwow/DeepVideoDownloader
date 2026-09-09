@@ -92,22 +92,22 @@ function foundItem(v) {
   title.textContent = v.title || (v.url ? v.url.split("/").pop() : "");
   title.title = v.url || "";
   const meta = document.createElement("div");
+  meta.className = "dv-meta";
   const err = v.error || v.errorCode ? errorDetail(v) : "";
   // Distinct terminal-vs-retryable presentation: a retryable failure (network /
   // 5xx — the engine auto-requeues it with backoff) renders amber with ⟳,
   // a terminal failure (404/403/expired/…) renders red with ✕. The flag comes
   // straight off the status push (mirrored by the SW), never re-derived here.
-  meta.className = "dv-meta" + (err ? (v.retryable ? " dv-retry" : " dv-err") : "");
-  meta.textContent = err
-    ? (v.retryable ? "⟳ Retryable error: " + err : "✕ Terminal error: " + err)
-    : fmtSize(v.size || 0);
   if (err) {
-    const label = (v.retryable ? "Retryable error: " : "Terminal error: ") + err;
-    // Keep the compact icon/text presentation while exposing the same explicit
-    // terminal-vs-retryable label used by the desktop renderer to assistive
-    // technology and the native tooltip.
+    meta.className += v.retryable ? " dv-retry" : " dv-err";
+    const label = (v.retryable ? "⟳ Retryable error: " : "✕ Terminal error: ") + err;
+    // The same explicit label feeds text, assistive technology, and the native
+    // tooltip (parity with the desktop renderer's presentation).
+    meta.textContent = label;
     meta.setAttribute("aria-label", label);
     meta.title = label;
+  } else {
+    meta.textContent = fmtSize(v.size || 0);
   }
   info.appendChild(title);
   info.appendChild(meta);

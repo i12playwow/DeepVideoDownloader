@@ -1355,7 +1355,7 @@ function startServer(portRef, segBytesFn) {
   const checkPopupErr11 = (src) =>
     src.includes('" dv-retry"') && src.includes('" dv-err"') &&
     src.includes("errorStatus") && src.includes("errorCode") && src.includes("retryable") &&
-    src.includes('"⟳ Retryable error: " + err') && src.includes('"✕ Terminal error: " + err');
+    src.includes('"⟳ Retryable error: "') && src.includes('"✕ Terminal error: "');
   assert("P11 popup renders retryable (⟳ dv-retry) vs terminal (✕ dv-err) distinctly from the push fields",
     checkPopupErr11(popupSrc11), "popup error presentation missing");
   const neg11 = popupSrc11.replace('v.retryable ? " dv-retry" : " dv-err"', '" dv-err"');

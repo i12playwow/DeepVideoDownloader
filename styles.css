@@ -260,11 +260,10 @@ th.sel input, td.sel input { margin: 0; }
 }
 .pct { color: var(--muted); font-size: 11px; margin-top: 3px; }
 .error-detail { font-weight: 600; }
-.error-detail.error-retryable { color: var(--amber); }
-.error-detail.error-terminal { color: var(--red); }
 .error-marker { font-weight: 800; }
-.error-marker.error-retryable { color: var(--amber); }
-.error-marker.error-terminal { color: var(--red); }
+/* one policy per state: retryable amber ⟳, terminal red ✕ */
+.error-detail.error-retryable, .error-marker.error-retryable { color: var(--amber); }
+.error-detail.error-terminal, .error-marker.error-terminal { color: var(--red); }
 .refreshed { color: var(--amber); font-size: 10px; margin-top: 2px; }
 
 .speed { color: var(--amber); font-weight: 600; white-space: nowrap; }
