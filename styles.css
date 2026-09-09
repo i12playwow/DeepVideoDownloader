@@ -172,9 +172,9 @@ body {
   border-radius: 9px;
 }
 .batch-bar .btn { padding: 5px 10px; font-size: 11px; }
-.batch-count { color: var(--muted); font-size: 11px; margin-left: 4px; }
+.batch-count { color: var(--muted); margin-left: 4px; }
 .batch-bar .spacer { flex: 1; }
-#dlSummary { font-size: 11px; white-space: nowrap; }
+#dlSummary { white-space: nowrap; }
 .btn:disabled { opacity: 0.4; cursor: default; }
 
 /* ---------------- buttons ---------------- */
@@ -262,7 +262,7 @@ th.sel input, td.sel input { margin: 0; }
   background: linear-gradient(90deg, var(--accent), var(--green));
   transition: width 0.2s;
 }
-.pct { color: var(--muted); font-size: 11px; margin-top: 3px; }
+.pct { color: var(--muted); margin-top: 3px; }
 .error-detail { font-weight: 600; }
 .error-marker { font-weight: 800; }
 /* one policy per state: retryable amber ⟳, terminal red ✕ */
@@ -271,8 +271,8 @@ th.sel input, td.sel input { margin: 0; }
 .refreshed { color: var(--amber); font-size: 10px; margin-top: 2px; }
 
 .speed { color: var(--amber); font-weight: 600; white-space: nowrap; }
-.proxy { color: var(--muted); font-size: 11px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sched { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.proxy { color: var(--muted); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched { color: var(--muted); white-space: nowrap; }
 
 .status { font-weight: 600; white-space: nowrap; }
 .st-queued, .st-paused, .st-cancelled { color: var(--muted); }
@@ -440,8 +440,24 @@ td.actions button:focus-visible { outline: 2px solid var(--accent); outline-offs
   from { transform: translateX(-100%); }
   to { transform: translateX(100%); }
 }
+@media (prefers-reduced-motion: reduce) {
+  .bar::after { animation: none; }
+  .btn { transition: none; }
+}
 
 /* Typography: tabular numbers for sizes/speeds, micro-caps headers */
+/* ---------------- data type voice ----------------
+   The queue is read at a distance and ticks every second: everything the
+   engine emits (sizes, speeds, percents, schedules, proxies, statuses) is
+   set monospaced with tabular figures so digits never shift under the eye.
+   Prose (file titles, labels, buttons) stays in the humanist body face. */
+.pct, .speed, .sched, .proxy, .batch-count, #dlSummary, .badge, #histCount {
+  font-family: Consolas, "Cascadia Mono", ui-monospace, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+}
+.speed { font-size: 11px; }
+
 td { font-variant-numeric: tabular-nums; }
 th {
   text-transform: uppercase;
