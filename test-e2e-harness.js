@@ -1194,7 +1194,7 @@ function startServer(portRef, segBytesFn) {
   const checkCrawler10 = (src) =>
     src.includes("autoCrawl: true") &&
     src.includes("function maybeAutoCrawl(url)") &&
-    src.includes("if (!config.autoCrawl) return;") &&
+    src.includes("if (!config.autoCrawl || !isCrawlHost(url)) return;") &&
     !/maybeAutoDownload\([^)]*\);\s*$/.test(src.slice(src.indexOf("function maybeAutoCrawl"), src.indexOf("function flushAutoPending"))) &&
     (src.match(/maybeAutoCrawl\(clean\)/g) || []).length >= 4;
   assert("P10 content.js defines the always-on crawler (autoCrawl default ON + maybeAutoCrawl)",
@@ -1210,14 +1210,43 @@ function startServer(portRef, segBytesFn) {
     assert("P10 " + name + " auto-sends its link match (maybeAutoCrawl call)",
       slice.includes("maybeAutoCrawl("), name + " missing auto-crawl call");
   }
-  // Negative drills: strip the crawler gate and each call site in turn; the
-  // guard must bite so the feature can never silently regress to manual sends.
+  // The crawler is scoped to the JAV families (supjav/supremejav, sextb,
+  // cnporn, missav): isCrawlHost must match each family and reject other hosts.
+  // isCrawlHost closes over isSupjavHostname/isSextbHostname, so eval all
+  // three declarations in one scope and return the real function.
+  const crawlFns10 = ["isSupjavHostname", "isSextbHostname", "isCrawlHost"]
+    .map((f) => contentSrc10.match(new RegExp("function " + f + "\\(h\\) \\{[\\s\\S]*?\\n  \\}"))[0])
+    .join("\n");
+  const isCrawlHost10 = new Function(crawlFns10 + "\nreturn isCrawlHost;")();
+  const crawlHosts10 = [
+    ["supjav.com", "supjav list page"],
+    ["supremejav.net", "supremejav mirror"],
+    ["sextb.net", "sextb movie page"],
+    ["sextb.cc", "sextb mirror"],
+    ["cnporn.org", "cnporn embed page"],
+    ["missav.ai", "missav player"],
+    ["missav123.ws", "missav mirror"],
+    ["missav.live", "missav live mirror"]
+  ];
+  for (const [host, label] of crawlHosts10) {
+    assert("P10 isCrawlHost matches " + label + " (" + host + ")",
+      isCrawlHost10(host), host + " must be a crawl host");
+  }
+  for (const host of ["youtube.com", "vimeo.com", "example.com", "notmissav.com", "cnporn.net"]) {
+    assert("P10 isCrawlHost rejects " + host,
+      !isCrawlHost10(host), host + " must NOT be a crawl host");
+  }
   const neg10a = contentSrc10.replace("autoCrawl: true", "autoCrawl: false");
   assert("P10 NEGATIVE: autoCrawl default flipped OFF -> guard bites",
     neg10a !== contentSrc10 && !checkCrawler10(neg10a), "guard missed the autoCrawl flip");
-  const neg10b = contentSrc10.replace("if (!config.autoCrawl) return;", "/* P10 gate stripped */");
+  // Negative drills: strip the crawler gate and each call site in turn; the
+  // guard must bite so the feature can never silently regress to manual sends.
+  const neg10b = contentSrc10.replace("if (!config.autoCrawl || !isCrawlHost(url)) return;", "/* P10 gate stripped */");
   assert("P10 NEGATIVE: maybeAutoCrawl gate stripped -> guard bites",
     neg10b !== contentSrc10 && !checkCrawler10(neg10b), "guard missed the gate strip");
+  const neg10d = contentSrc10.replace("|| !isCrawlHost(url)", "/* P10 host gate stripped */");
+  assert("P10 NEGATIVE: isCrawlHost gate stripped -> guard bites",
+    neg10d !== contentSrc10 && !checkCrawler10(neg10d), "guard missed the host-gate strip");
   // Strip the FIRST maybeAutoCrawl(clean) call (the best-only tryCapture site,
   // which is uniquely followed by "return;"). Source files carry CRLF, so
   // rebuild the drill on the normalized line content, not raw \r\n layout.
