@@ -136,7 +136,7 @@ function rowHtml(it, showing) {
   const pct = it.total ? Math.min(100, (it.received / it.total) * 100) : 0;
   const done = it.status === "done" || it.status === "cancelled";
   return `
-      <td class="sel">${showing === "history" ? "" : `<input type="checkbox" data-sel="${esc(it.id)}" ${selected.has(it.id) ? "checked" : ""}>`}</td>
+      <td class="sel">${showing === "history" ? "" : `<input type="checkbox" aria-label="Select ${esc(it.fileName)}" data-sel="${esc(it.id)}" ${selected.has(it.id) ? "checked" : ""}>`}</td>
       <td class="name-cell" title="${esc(it.url)}">
         ${it.thumb ? `<img class="thumb" src="file:///${String(it.thumb).replace(/\\/g, "/")}" alt="" onerror="this.remove()">` : ""}
         <div class="name-col">

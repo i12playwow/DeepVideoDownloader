@@ -6,6 +6,8 @@
   --hover: rgba(255, 255, 255, 0.05);
   --accent: #3b82f6;
   --accent-strong: #2563eb;
+  --accent-hover: #60a5fa;
+  --on-accent: #0b1220;
   --text: #e2e8f0;
   --muted: #94a3b8;
   --green: #22c55e;
@@ -24,6 +26,8 @@
   --hover: rgba(15, 23, 42, 0.05);
   --accent: #2563eb;
   --accent-strong: #1d4ed8;
+  --accent-hover: #1d4ed8;
+  --on-accent: #ffffff;
   --text: #1e293b;
   --muted: #64748b;
   --green: #16a34a;
@@ -125,7 +129,7 @@ body {
 
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
 .seg .btn.ghost { border: none; border-radius: 0; padding: 6px 12px; }
-.seg .btn.ghost.active { background: var(--accent); color: #fff; }
+.seg .btn.ghost.active { background: var(--accent); color: var(--on-accent); }
 
 .search {
   min-width: 210px;
@@ -176,7 +180,7 @@ body {
 /* ---------------- buttons ---------------- */
 .btn {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border: none;
   border-radius: 9px;
   padding: 8px 14px;
@@ -186,7 +190,7 @@ body {
   transition: background 0.15s, border-color 0.15s, color 0.15s;
   white-space: nowrap;
 }
-.btn:hover { background: var(--accent-strong); }
+.btn:hover { background: var(--accent-hover); }
 .btn.ghost {
   background: transparent;
   color: var(--text);
