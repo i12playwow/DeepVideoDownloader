@@ -34,9 +34,10 @@
     pipelineQty: 0,
     // Always-on background link crawler (ON by default = no toggle needed).
     // When set, every captured link match (video URL, JAV movie page, host dl
-    // entry) is auto-sent to the desktop app the moment the page scan reports
-    // it — unlike maybeAutoDownload, which only fires for the best-only video
-    // path while the manual "Send" toggle (grabOn) is armed.
+    // entry) on a crawl host (supjav/supremejav, sextb, cnporn, missav — see
+    // isCrawlHost) is auto-sent to the desktop app the moment the page scan
+    // reports it — unlike maybeAutoDownload, which only fires for the best-only
+    // video path while the manual "Send" toggle (grabOn) is armed.
     autoCrawl: true
   };
 
@@ -270,6 +271,13 @@
   }
   function isJavHostname(h) {
     return isSupjavHostname(h) || isSextbHostname(h);
+  }
+  // The always-on crawler is scoped to the JAV families the extension targets:
+  // supjav/supremejav, sextb, cnporn, missav. Link matches on any other host
+  // stay in the found list (manual send) instead of auto-sending.
+  function isCrawlHost(h) {
+    return isSupjavHostname(h) || isSextbHostname(h) ||
+      /^cnporn\.org$/i.test(h) || /^missav\d*\.(?:ws|ai|com|live|xyz)$/i.test(h);
   }
   function isSupjavMoviePath(p) {
     if (!/\.html?$/i.test(p)) return false;
@@ -642,7 +650,7 @@
   // autoSending/autoPending sets so a URL is sent at most once per page session
   // and an offline send is re-attempted when the background comes back.
   function maybeAutoCrawl(url) {
-    if (!config.autoCrawl) return;
+    if (!config.autoCrawl || !isCrawlHost(url)) return;
     const v = found.get(url);
     if (!v || v.added || autoSending.has(url)) return;
     autoSending.add(url);
