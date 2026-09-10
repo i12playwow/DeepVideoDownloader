@@ -7,7 +7,7 @@ const fs = require("fs");
 const path = require("path");
 
 const files = [];
-for (const f of ["main.js", "downloader.js", "proxy.js", "preload.js", "renderer.js", "browser-preload.js", "config.js", "sync-extension.js"]) {
+for (const f of ["main.js", "downloader.js", "proxy.js", "preload.js", "renderer.js", "browser-preload.js", "config.js", "sync-extension.js", "mcp-server.js"]) {
   const p = path.join(__dirname, f);
   if (fs.existsSync(p)) files.push(p);
 }

@@ -739,8 +739,15 @@ function startServer(portRef, segBytesFn) {
   delete require.cache[dmPathP];
 
   // ---- P0: isJunkUrl (dev/portal hosts, 0.0.0.N residuals, group-list paths) ----
+  // The host core (isJunkHostUrl) and the supjav/sextb list-path rule
+  // (isJunkListPath) live in extension/guards.js — shared with the extension;
+  // the engine's isJunkUrl is the composition plus its fetchable-scheme gate.
   console.log("\n-- P0: isJunkUrl --");
   const { isJunkUrl } = require("./downloader");
+  const guardsApi0 = require("./extension/guards.js");
+  assert("P0 engine imports the shared guards core",
+    typeof guardsApi0.isJunkHostUrl === "function" && typeof guardsApi0.isJunkListPath === "function",
+    "guards.js core shape wrong");
   const junkUrls = [
     "https://github.com/tashfeenahmed/freellmapi/releases/tag/v0.9.2",
     "https://ai.google.dev/gemini-api/docs/pricing",
@@ -770,6 +777,28 @@ function startServer(portRef, segBytesFn) {
     "https://cdn.example.com/x/abc.mp4"
   ];
   for (const lu of legitUrls) assert("P0 legit kept: " + lu, !isJunkUrl(lu), "rejected legit");
+  // Parity: the engine result must EQUAL the shared core it is composed from
+  // (junk = host-core OR list-path; legit = neither), so the engine can never
+  // silently disagree with the module the extension runs.
+  for (const ju of junkUrls) {
+    const viaGuards = guardsApi0.isJunkHostUrl(ju) || guardsApi0.isJunkListPath(ju);
+    assert("P0 engine result equals guards composition: " + ju,
+      isJunkUrl(ju) === true && viaGuards === true,
+      "engine=" + isJunkUrl(ju) + " guards=" + viaGuards);
+  }
+  for (const lu of legitUrls) {
+    const viaGuards = guardsApi0.isJunkHostUrl(lu) || guardsApi0.isJunkListPath(lu);
+    assert("P0 engine result equals guards composition: " + lu,
+      isJunkUrl(lu) === false && viaGuards === false,
+      "engine=" + isJunkUrl(lu) + " guards=" + viaGuards);
+  }
+  // The asymmetry is deliberate: the extension's isJunkUrl (host core only)
+  // skips the list-path rule — capture sees URL-shaped links, the engine is
+  // the list-expansion authority. Pin it so a future "fix" that merges the
+  // list-path rule into the extension gate is at least a conscious change.
+  assert("P0 extension gate intentionally skips the list-path rule",
+    guardsApi0.isJunkUrl("https://supjav.com/category/cast/itou-mayuki/page/5") === false,
+    "extension gate now rejects list paths");
 
   // ---- P1: titleFromUrl auto-titles for bulk pastes ----
   // Export-shape pins FIRST: the 1.3.7 crash class was downloader.js calling a
@@ -846,23 +875,43 @@ function startServer(portRef, segBytesFn) {
     }
   }
 
-  // ---- P4: extension background drift (isAdUrl / isJunkUrl) ----
-  // background.js hand-maintains AD_DOMAINS and isJunkUrl that content.js and
-  // downloader.js also define. Both sides must reject the same hosts; the
-  // 2026-09-03 supjav ad-network hosts landed in content.js only and leaked
-  // through background's webRequest capture until aligned. Guards that drift.
-  console.log("-- P4: extension background contract --");
+  // ---- P4: extension capture-guard single source (extension/guards.js) ----
+  // guards.js is THE source for AD_DOMAINS/isAdUrl, ST_GETVIDEO_RE and
+  // JUNK_BASE_RE/isJunkUrl: the manifest injects it before content.js and
+  // background.js importScripts it (typeof-guarded for these offline evals),
+  // so the service worker and the content scripts run ONE code object that
+  // cannot drift (the 2026-09-03 supjav ad-host leak was exactly that drift).
+  // These pins assert the wiring exists AND the shared guards still agree with
+  // the engine's own copies.
+  console.log("-- P4: extension capture-guard single source --");
   const fs4 = require("fs");
+  const guardsSrc4 = fs4.readFileSync("extension/guards.js", "utf8");
   const contentSrc4 = fs4.readFileSync("extension/content.js", "utf8");
   const bgSrc4 = fs4.readFileSync("extension/background.js", "utf8");
-  const adMarker4 = "const AD_DOMAINS = ";
-  const iAdC4 = contentSrc4.indexOf(adMarker4);
-  const iAdB4 = bgSrc4.indexOf(adMarker4);
-  const litC4 = iAdC4 >= 0 ? contentSrc4.slice(iAdC4 + adMarker4.length, contentSrc4.indexOf(";", iAdC4)) : "";
-  const litB4 = iAdB4 >= 0 ? bgSrc4.slice(iAdB4 + adMarker4.length, bgSrc4.indexOf(";", iAdB4)) : "";
-  assert("P4 content.js AD_DOMAINS literal found", litC4.length > 10, "len " + litC4.length);
-  assert("P4 background.js AD_DOMAINS literal found", litB4.length > 10, "len " + litB4.length);
-  assert("P4 AD_DOMAINS literals identical (content == background)", litC4 === litB4, "content=" + litC4.length + " bg=" + litB4.length);
+  const manifest4 = JSON.parse(fs4.readFileSync("extension/manifest.json", "utf8"));
+  const contentJs4 = manifest4.content_scripts.flatMap((cs) => cs.js || []);
+  const gi4 = contentJs4.indexOf("guards.js");
+  assert("P4 manifest injects guards.js before content.js",
+    gi4 >= 0 && gi4 < contentJs4.indexOf("content.js"),
+    "content_scripts js[] = " + JSON.stringify(contentJs4));
+  assert("P4 background.js importScripts guards.js",
+    /typeof\s+importScripts\s*===?\s*"function"\s*\)?\s*;?\s*importScripts\("guards\.js"\)/.test(bgSrc4.replace(/\r?\n/g, " ")),
+    "guarded importScripts(guards.js) missing");
+  assert("P4 content.js has no local AD_DOMAINS copy", !contentSrc4.includes("const AD_DOMAINS"), "drifted copy leaked back");
+  assert("P4 background.js has no local AD_DOMAINS copy", !bgSrc4.includes("const AD_DOMAINS"), "drifted copy leaked back");
+  // The engine is the third consumer of the same module — no local literal.
+  assert("P4 downloader.js has no local JUNK_BASE_RE copy", !fs4.readFileSync("downloader.js", "utf8").includes("const JUNK_BASE_RE"), "drifted copy leaked back");
+  const guardsApi4 = require("./extension/guards.js");
+  assert("P4 guards.js exports the shared guard names",
+    typeof guardsApi4.isAdUrl === "function" && typeof guardsApi4.isJunkUrl === "function" &&
+    guardsApi4.AD_DOMAINS instanceof RegExp && guardsApi4.ST_GETVIDEO_RE instanceof RegExp,
+    "require(guards.js) shape wrong");
+  assert("P4 ST_GETVIDEO_RE matches streamtape get_video only",
+    guardsApi4.ST_GETVIDEO_RE.test("https://streamtape.com/get_video?id=x") && !guardsApi4.ST_GETVIDEO_RE.test("https://streamtape.com/v/abc"),
+    "regex shape wrong");
+  // background.js expects guards.js globals (importScripts in the real SW);
+  // every offline eval of its source below must mirror that wiring.
+  const bgWithGuards = (src) => guardsSrc4 + "\n" + src;
   // Load background.js as a service worker under a chrome stub so its real
   // isJunkUrl / isAdUrl run against the same corpus as the engine copies.
   const chromeStub4 = {
@@ -876,26 +925,28 @@ function startServer(portRef, segBytesFn) {
   WsStub4.OPEN = 1; WsStub4.CONNECTING = 0; WsStub4.CLOSING = 2; WsStub4.CLOSED = 3;
   let bgApi4 = null;
   try {
+    // Simulate the SW runtime: guards.js source first (as importScripts would
+    // load it), then background.js in the same scope — the exact global wiring
+    // the service worker gets. guards.js's module.exports block is inert here.
     const bgFactory4 = new Function("chrome", "WebSocket", "self", "console",
-      bgSrc4 + "\n;return { isJunkUrl: isJunkUrl, isAdUrl: isAdUrl };");
+      guardsSrc4 + "\n" + bgSrc4 + "\n;return { isJunkUrl: isJunkUrl, isAdUrl: isAdUrl };");
     bgApi4 = bgFactory4(chromeStub4, WsStub4, {}, console);
-    assert("P4 background.js loads under chrome stub", !!bgApi4 && typeof bgApi4.isJunkUrl === "function", "load failed");
+    assert("P4 background.js loads under chrome stub with guards", !!bgApi4 && typeof bgApi4.isJunkUrl === "function", "load failed");
   } catch (e) {
-    assert("P4 background.js loads under chrome stub", false, e.message);
+    assert("P4 background.js loads under chrome stub with guards", false, e.message);
   }
   if (bgApi4) {
-    const contentAd4 = new Function("return " + litC4)();
     const adHosts4 = ["eix304.com", "tapioni.com", "mnaspm.com", "mayzaent.com", "googletagmanager.com", "www.googletagmanager.com", "djsalcbhew47.lol", "doubleclick.net", "adsterra.com", "googlesyndication.com"];
     for (const h of adHosts4) {
-      assert("P4 ad host rejected by content+background: " + h,
-        contentAd4.test(h) && bgApi4.isAdUrl("https://" + h + "/x"),
-        "content=" + contentAd4.test(h) + " bg=" + bgApi4.isAdUrl("https://" + h + "/x"));
+      assert("P4 ad host rejected by guards+background: " + h,
+        guardsApi4.isAdUrl("https://" + h + "/x") && bgApi4.isAdUrl("https://" + h + "/x"),
+        "guards=" + guardsApi4.isAdUrl("https://" + h + "/x") + " bg=" + bgApi4.isAdUrl("https://" + h + "/x"));
     }
     const legitAd4 = ["supjav.com", "streamtape.com", "tiktokcdn.com", "cdn.example.com", "surrit.com"];
     for (const h of legitAd4) {
       assert("P4 legit host not an ad: " + h,
-        !contentAd4.test(h) && !bgApi4.isAdUrl("https://" + h + "/x"),
-        "content=" + contentAd4.test(h) + " bg=" + bgApi4.isAdUrl("https://" + h + "/x"));
+        !guardsApi4.isAdUrl("https://" + h + "/x") && !bgApi4.isAdUrl("https://" + h + "/x"),
+        "guards=" + guardsApi4.isAdUrl("https://" + h + "/x") + " bg=" + bgApi4.isAdUrl("https://" + h + "/x"));
     }
     // Host-level junk parity only: the engine also rejects supjav/sextb
     // group-LISTING paths that the browser never captures (not video-shaped),
@@ -965,7 +1016,7 @@ function startServer(portRef, segBytesFn) {
     WsStub6.OPEN = 1; WsStub6.CONNECTING = 0; WsStub6.CLOSING = 2; WsStub6.CLOSED = 3;
     WsStub6.prototype.addEventListener = function () {};
     WsStub6.prototype.removeEventListener = function () {};
-    new Function("chrome", "WebSocket", "self", "console", bgSource + "\n;return true;")(chrome6, WsStub6, {}, console);
+    new Function("chrome", "WebSocket", "self", "console", bgWithGuards(bgSource) + "\n;return true;")(chrome6, WsStub6, {}, console);
     if (!listener) throw new Error("P6 listener not captured");
     return Promise.race([
       new Promise((resolve) => {
@@ -1029,7 +1080,7 @@ function startServer(portRef, segBytesFn) {
     WsStub7.OPEN = 1; WsStub7.CONNECTING = 0; WsStub7.CLOSING = 2; WsStub7.CLOSED = 3;
     WsStub7.prototype.addEventListener = function () {};
     WsStub7.prototype.removeEventListener = function () {};
-    new Function("chrome", "WebSocket", "self", "console", bgSource + "\n;return true;")(chrome7, WsStub7, {}, console);
+    new Function("chrome", "WebSocket", "self", "console", bgWithGuards(bgSource) + "\n;return true;")(chrome7, WsStub7, {}, console);
     if (!listener) throw new Error("P7 listener not captured");
     return {
       seed(url) { listener({ type: "video-found", url }, { tab: { id: 1 } }, () => {}); },
@@ -1126,7 +1177,7 @@ function startServer(portRef, segBytesFn) {
     WsStub8.OPEN = 1; WsStub8.CONNECTING = 0; WsStub8.CLOSING = 2; WsStub8.CLOSED = 3;
     WsStub8.prototype.addEventListener = function () {};
     WsStub8.prototype.removeEventListener = function () {};
-    new Function("chrome", "WebSocket", "self", "console", bgSource + "\n;return true;")(chrome8, WsStub8, {}, console);
+    new Function("chrome", "WebSocket", "self", "console", bgWithGuards(bgSource) + "\n;return true;")(chrome8, WsStub8, {}, console);
     if (!wreq) throw new Error("P8 webRequest listener not captured");
     if (!wsInstance.onmessage) throw new Error("P8 ws.onmessage not wired");
     // webRequest capture of the tab's video: addFound persists pageUrl "" and
@@ -1315,7 +1366,7 @@ function startServer(portRef, segBytesFn) {
     };
     function WsStub11() { return wsInstance; }
     WsStub11.OPEN = 1; WsStub11.CONNECTING = 0; WsStub11.CLOSING = 2; WsStub11.CLOSED = 3;
-    new Function("chrome", "WebSocket", "self", "console", bgSource + "\n;return true;")(chrome11, WsStub11, {}, console);
+    new Function("chrome", "WebSocket", "self", "console", bgWithGuards(bgSource) + "\n;return true;")(chrome11, WsStub11, {}, console);
     if (!wreq || !wsInstance.onmessage) throw new Error("P11 sandbox wiring failed");
     const URL = "http://127.0.0.1:9/v/status-test.mp4";
     wreq({ url: URL, tabId: 5, type: "media" }); // seed the found entry
@@ -1351,15 +1402,33 @@ function startServer(portRef, segBytesFn) {
     !!(st11.e3 && st11.e3.error === "" && !st11.e3.errorCode && st11.e3.errorStatus === 0 && st11.e3.retryable === false),
     JSON.stringify(st11.e3));
   // popup presentation contract: retryable and terminal get distinct classes/text
+  // (explicit "Retryable error:"/"Terminal error:" labels for a11y + tooltip).
   const checkPopupErr11 = (src) =>
     src.includes('" dv-retry"') && src.includes('" dv-err"') &&
     src.includes("errorStatus") && src.includes("errorCode") && src.includes("retryable") &&
-    src.includes('"⟳ " + err') && src.includes('"✕ " + err');
+    src.includes('"⟳ Retryable error: "') && src.includes('"✕ Terminal error: "');
   assert("P11 popup renders retryable (⟳ dv-retry) vs terminal (✕ dv-err) distinctly from the push fields",
     checkPopupErr11(popupSrc11), "popup error presentation missing");
   const neg11 = popupSrc11.replace('v.retryable ? " dv-retry" : " dv-err"', '" dv-err"');
   assert("P11 NEGATIVE: retryable class collapsed into terminal -> guard bites",
     neg11 !== popupSrc11 && !checkPopupErr11(neg11), "guard missed the collapse");
+
+  // Desktop renderer presentation mirrors the popup: the same pushed fields
+  // produce a visible amber ⟳ retryable marker or red ✕ terminal marker in
+  // both the progress detail and status badge, with an accessible label.
+  const rendererSrc11 = fs11.readFileSync("renderer.js", "utf8");
+  const checkRendererErr11 = (src) =>
+    src.includes("errorStatus") && src.includes("errorCode") && src.includes("retryable") &&
+    src.includes('marker: retryable ? "⟳" : "✕"') &&
+    src.includes('className: retryable ? "error-retryable" : "error-terminal"') &&
+    src.includes('label: retryable ? "Retryable error" : "Terminal error"') &&
+    src.includes("errorMarkup") && src.includes("statusBadge") &&
+    src.includes("aria-label");
+  assert("P11 desktop renderer mirrors retryable (amber ⟳) vs terminal (red ✕) markers",
+    checkRendererErr11(rendererSrc11), "desktop error presentation missing");
+  const negRenderer11 = rendererSrc11.replace('className: retryable ? "error-retryable" : "error-terminal"', 'className: "error-terminal"');
+  assert("P11 NEGATIVE: desktop retryable class collapsed into terminal -> guard bites",
+    negRenderer11 !== rendererSrc11 && !checkRendererErr11(negRenderer11), "guard missed the desktop collapse");
 
   // ---- P5: preload / renderer IPC contract ----
   // Every window.api.<method> a renderer file calls must exist in the preload

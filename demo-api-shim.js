@@ -22,7 +22,12 @@
       scheduledStart: new Date(now + 2 * hr).toISOString(), scheduledStop: new Date(now + 4 * hr).toISOString() },
     { id: "d5", url: "https://sextb.net/video/9999.html", fileName: "SSIS-999 (sextb) [720p].mp4",
       total: 0, received: 0, speed: 0, status: "error", proxy: "direct",
-      error: "403 — requires-browser: Cloudflare wall, open in the built-in browser", errorCategory: "requires-browser", refreshCount: 2 },
+      error: "403 — requires-browser: Cloudflare wall, open in the built-in browser", errorCategory: "requires-browser",
+      errorStatus: 403, errorCode: "REQUIRES_BROWSER", retryable: false, refreshCount: 2 },
+    { id: "d8", url: "https://cdn.example.com/media/RETRY-502.mp4", fileName: "RETRY-502 (upstream) [1080p].mp4",
+      total: 502 * MB, received: 187 * MB, speed: 0, status: "error", proxy: "direct",
+      error: "502 — upstream temporarily unavailable", errorCategory: "http",
+      errorStatus: 502, errorCode: "HTTP", retryable: true, retryCount: 2 },
     { id: "d6", url: "https://missav.ai/dupe/MMK-123", fileName: "MMK-123 (missav) [1080p].mp4",
       total: 1540 * MB, received: 1540 * MB, speed: 0, status: "duplicate", proxy: "direct" },
     { id: "d7", url: "https://example.com/finished.mp4", fileName: "PRED-777 (finished) [1080p].mp4",
@@ -35,7 +40,11 @@
     { id: "h2", url: "https://example.com/b.mp4", fileName: "MIAA-555 (done) [720p].mp4", total: 402 * MB,
       endTime: now - 5 * hr, timestamp: now - 5 * hr, status: "done" },
     { id: "h3", url: "https://example.com/c.mp4", fileName: "SVDVD-666 (error) [1080p].mp4", total: 21 * MB,
-      endTime: now - 26 * hr, timestamp: now - 26 * hr, status: "error", error: "expired direct link (1.2.9+ auto-refreshes up to 2×)" },
+      endTime: now - 26 * hr, timestamp: now - 26 * hr, status: "error", error: "expired direct link (1.2.9+ auto-refreshes up to 2×)",
+      errorCategory: "expired", errorCode: "EXPIRED", errorStatus: 0, retryable: false },
+    { id: "h5", url: "https://cdn.example.com/history-502.mp4", fileName: "RETRY-501 (history error).mp4", total: 51 * MB,
+      endTime: now - 28 * hr, timestamp: now - 28 * hr, status: "error", error: "502 — service temporarily unavailable",
+      errorCategory: "http", errorCode: "HTTP", errorStatus: 502, retryable: true },
     { id: "h4", url: "https://example.com/d.mp4", fileName: "HMN-777 (cancelled).mp4", total: 190 * MB,
       endTime: now - 30 * hr, timestamp: now - 30 * hr, status: "cancelled" }
   ];
@@ -93,7 +102,9 @@
   const pushHistory = (item) => {
     history.unshift(clone({ id: "h" + Date.now() + Math.floor(Math.random() * 1e4), url: item.url, fileName: item.fileName,
       total: item.total || item.received, endTime: Date.now(), timestamp: Date.now(), status: item.status,
-      error: item.error, finalPath: item.status === "done" ? (item.finalPath || settings.downloadDir + "\\" + item.fileName) : undefined }));
+      error: item.error, errorCategory: item.errorCategory || "", errorStatus: item.errorStatus || 0,
+      errorCode: item.errorCode || "", retryable: item.retryable === true,
+      finalPath: item.status === "done" ? (item.finalPath || settings.downloadDir + "\\" + item.fileName) : undefined }));
     if (history.length > 50) history.length = 50;
   };
 
@@ -117,7 +128,7 @@
         }
       }
       if (it.status === "error" && it._autoRetryAt && now >= it._autoRetryAt) {
-        it.status = "queued"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null;
+        it.status = "queued"; clearErrorFields(it); it._autoRetryAt = null;
       }
     }
     // global schedule window: only START new downloads inside the window
@@ -182,7 +193,10 @@
     resume: async (id) => {
       const it = items.find((i) => i.id === id);
       if (it && (it.status === "paused" || it.status === "error" || it.status === "scheduled" || it.status === "queued")) {
-        it.status = "running"; it.speed = 2 * MB; emit([it]);
+        // Mirror DownloadManager.resume: leaving paused/error/scheduled clears
+        // the error fields and the auto-retry arming, so a later completion
+        // can't push stale error data onto a done history entry.
+        it.status = "running"; clearErrorFields(it); it._autoRetryAt = null; it._autoRetries = 0; it.speed = 2 * MB; emit([it]);
       }
       return { ok: true };
     },
@@ -205,7 +219,7 @@
     },
     retry: async (id) => {
       const it = items.find((x) => x.id === id);
-      if (it && it.status === "error") { it.total = it.total || Math.round((30 + Math.random() * 900) * MB); it.status = "running"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null; it._autoRetries = 0; it.speed = 2 * MB; emit([it]); }
+      if (it && it.status === "error") { it.total = it.total || Math.round((30 + Math.random() * 900) * MB); it.status = "running"; clearErrorFields(it); it._autoRetryAt = null; it._autoRetries = 0; it.speed = 2 * MB; emit([it]); }
       return { ok: true };
     },
     prioritize: async (id) => {
@@ -233,7 +247,7 @@
       let n = 0;
       for (const it of items) {
         if (it.status === "error" && it.errorCategory !== "requires-browser") {
-          it.total = it.total || Math.round((30 + Math.random() * 900) * MB); it.status = "running"; it.error = ""; it.errorCategory = ""; it._autoRetryAt = null; it._autoRetries = 0; it.speed = 2 * MB; n++;
+          it.total = it.total || Math.round((30 + Math.random() * 900) * MB); it.status = "running"; clearErrorFields(it); it._autoRetryAt = null; it._autoRetries = 0; it.speed = 2 * MB; n++;
         }
       }
       if (n) emit(items.filter((x) => x.status === "running"));
@@ -328,6 +342,14 @@
     }
     const pool = (settings.proxies || []).filter((p) => typeof p === "string" && p.trim());
     return pool.length ? pool[0] : "direct";
+  }
+
+  function clearErrorFields(it) {
+    it.error = "";
+    it.errorCategory = "";
+    it.errorStatus = 0;
+    it.errorCode = "";
+    it.retryable = false;
   }
 
   function enqueue(urls) {

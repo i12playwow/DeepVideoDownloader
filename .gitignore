@@ -2,6 +2,12 @@ node_modules/
 config.json
 ws-debug.log
 
+# Agent/thread tooling scratch (logs, probes, sandbox checkouts) — only the
+# two tracked dev scripts stay visible; everything else in here is disposable
+.freebuff/*
+!.freebuff/demo-server.js
+!.freebuff/sync-demo.js
+
 # Desktop-copy artifacts — extension/ is tracked; keep the Firefox copy, packed
 # artifacts, and signing key ignored
 build/
@@ -12,3 +18,8 @@ extension.crx
 extension.pem
 *.user.js
 * - Copy*
+
+# Regenerable test fixture: test-extension-live.js generates it with ffmpeg when
+# missing and SKIPs cleanly when it cannot; test-engine-regression.js takes it as
+# an argv argument. Opt-in suites only — npm test / CI never need it.
+test-video.mp4

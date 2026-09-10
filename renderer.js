@@ -76,29 +76,78 @@ function statusClass(st) {
   return "st-" + st;
 }
 
-function errorColor(it) {
-  return (it.errorCategory === "expired" || it.errorCategory === "requires-browser") ? "var(--amber)" : "var(--red)";
+// Keep the desktop error presentation aligned with the extension popup: the
+// app is the source of truth for errorCode/errorStatus/retryable, and clients
+// only render the pushed fields. A retryable failure is amber with ⟳; a
+// terminal failure is red with ✕ (including expired/requires-browser errors).
+function errorDetail(it) {
+  let s = it.error || "";
+  const code = it.errorStatus ? "HTTP " + it.errorStatus : (it.errorCode || "");
+  if (code && s.indexOf(code) === -1) s = (s ? s + " · " : "") + code;
+  return s;
 }
 
-// Virtualized list: only rows in the viewport are in the DOM, with spacer rows
-// keeping the scrollbar sized to the full list. Keeps the UI smooth with
+function errorPresentation(it) {
+  const detail = errorDetail(it);
+  if (!detail) return null;
+  const retryable = it.retryable === true;
+  return {
+    detail,
+    marker: retryable ? "⟳" : "✕",
+    className: retryable ? "error-retryable" : "error-terminal",
+    label: retryable ? "Retryable error" : "Terminal error"
+  };
+}
+
+function errorMarkup(it) {
+  const p = errorPresentation(it);
+  if (!p) return "";
+  return ` — <span class="error-detail ${p.className}" title="${esc(p.label + ": " + p.detail)}"><span class="error-marker" aria-hidden="true">${p.marker}</span> ${esc(p.detail)}</span>`;
+}
+
+function statusBadge(it) {
+  const p = errorPresentation(it);
+  const marker = p
+    ? ` <span class="error-marker ${p.className}" title="${esc(p.label + ": " + p.detail)}" aria-label="${esc(p.label)}">${p.marker}</span>`
+    : "";
+  return `<span class="badge ${statusClass(it.status)}">${esc(it.status)}${it.resolving ? " ⟳" : ""}${marker}</span>`;
+}
+
+function errorSummary(it) {
+  const p = errorPresentation(it);
+  return p ? p.label + ": " + p.detail : "Error: " + (it.error || "Unknown error");
+}
+
+// Virtualized list: only rows in the viewport are in the DOM, with spacer
+// rows keeping the scrollbar sized to the full list. Keeps the UI smooth with
 // thousands of queued downloads. ROW_H is an approximate fixed row height.
 const ROW_H = 40;
 let renderTimer = null;
 
-function spacer(px) {
-  const tr = document.createElement("tr");
-  tr.style.height = px + "px";
-  tr.style.border = "none";
-  tr.innerHTML = '<td colspan="9" style="border:none;padding:0;"></td>';
-  return tr;
+// Scroll metrics are read only in clean frames (scroll events and the
+// ResizeObserver's initial/resize callbacks), never inside the render path:
+// renderHistory's scrollTop read used to chase render()'s row writes and
+// force a 38-42ms synchronous layout (measured forced-reflow insight).
+// Renders consume the cached numbers.
+const scrollMetrics = { dls: { st: 0, vh: 400 }, hist: { st: 0, vh: 300 } };
+function watchScrollMetrics(id, key) {
+  const el = $(id);
+  if (!el) return;
+  const read = () => {
+    scrollMetrics[key].st = el.scrollTop || 0;
+    scrollMetrics[key].vh = el.clientHeight || scrollMetrics[key].vh;
+  };
+  el.addEventListener("scroll", read, { passive: true });
+  if (window.ResizeObserver) new ResizeObserver(read).observe(el);
 }
+watchScrollMetrics("dlsScroll", "dls");
+watchScrollMetrics("histScroll", "hist");
 
 function rowHtml(it, showing) {
   const pct = it.total ? Math.min(100, (it.received / it.total) * 100) : 0;
   const done = it.status === "done" || it.status === "cancelled";
   return `
-      <td class="sel">${showing === "history" ? "" : `<input type="checkbox" data-sel="${esc(it.id)}" ${selected.has(it.id) ? "checked" : ""}>`}</td>
+      <td class="sel">${showing === "history" ? "" : `<input type="checkbox" aria-label="Select ${esc(it.fileName)}" data-sel="${esc(it.id)}" ${selected.has(it.id) ? "checked" : ""}>`}</td>
       <td class="name-cell" title="${esc(it.url)}">
         ${it.thumb ? `<img class="thumb" src="file:///${String(it.thumb).replace(/\\/g, "/")}" alt="" onerror="this.remove()">` : ""}
         <div class="name-col">
@@ -109,12 +158,12 @@ function rowHtml(it, showing) {
       <td>${fmtBytes(it.total)}</td>
       <td class="wide">
         <div class="bar-wrap"><div class="bar" style="width:${pct}%"></div></div>
-        <div class="pct">${pct.toFixed(1)}%${it.error ? ' — <span style="color:' + errorColor(it) + '">' + esc(it.error) + '</span>' : ""}${it.refreshCount ? '<div class="refreshed">↻ refreshed ' + it.refreshCount + '×</div>' : ""}${it.retryCount ? '<div class="refreshed">↻ retry ' + it.retryCount + '×</div>' : ""}</div>
+        <div class="pct">${pct.toFixed(1)}%${errorMarkup(it)}${it.refreshCount ? '<div class="refreshed">↻ refreshed ' + it.refreshCount + '×</div>' : ""}${it.retryCount ? '<div class="refreshed">↻ retry ' + it.retryCount + '×</div>' : ""}</div>
       </td>
       <td class="speed">${done ? "—" : fmtSpeed(it.speed)}</td>
       <td class="proxy" title="${esc(it.proxy)}">${esc(it.proxy)}</td>
       <td class="sched">${fmtSched(it)}</td>
-      <td class="status"><span class="badge ${statusClass(it.status)}">${esc(it.status)}${it.resolving ? " ⟳" : ""}</span></td>
+      <td class="status">${statusBadge(it)}</td>
       <td class="actions">${showing === "history" ? histActionButtons(it) : actionButtons(it)}</td>`;
 }
 
@@ -191,19 +240,21 @@ function render() {
     updateSummary();
     return;
   }
-  const scroll = $("dlsScroll");
-  const st = scroll.scrollTop || 0;
-  const vh = scroll.clientHeight || 400;
+  const m = scrollMetrics.dls;
+  const st = m.st;
+  const vh = m.vh;
   const start = Math.max(0, Math.floor(st / ROW_H) - 6);
   const end = Math.min(total, Math.ceil((st + vh) / ROW_H) + 6);
-  tbody.innerHTML = "";
-  if (start > 0) tbody.appendChild(spacer(start * ROW_H));
-  for (let i = start; i < end; i++) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = rowHtml(displayItems[i], "active");
-    tbody.appendChild(tr);
-  }
-  if (end < total) tbody.appendChild(spacer((total - end) * ROW_H));
+  // One innerHTML write, like renderHistory: N tr.appendChild calls left the
+  // document dirty and forced the next scroll-read (renderHistory) into a
+  // 38.7ms synchronous layout (measured forced-reflow insight).
+  let html = "";
+  if (start > 0) html += `<tr style="height:${start * ROW_H}px;"><td colspan="9" style="border:none;padding:0;"></td></tr>`;
+  // rowHtml emits cells only — the <tr> wrapper is supplied here (unlike
+  // historyRowHtml, which includes its own).
+  for (let i = start; i < end; i++) html += "<tr>" + rowHtml(displayItems[i], "active") + "</tr>";
+  if (end < total) html += `<tr style="height:${(total - end) * ROW_H}px;"><td colspan="9" style="border:none;padding:0;"></td></tr>`;
+  tbody.innerHTML = html;
   updateBatchBar();
   updateSummary();
 }
@@ -249,8 +300,8 @@ function actionButtons(it) {
 
 function histActionButtons(it) {
   let html = "";
-  if (it.error) {
-    html += `<button data-act="history-error" data-id="${it.id}" title="${esc(it.error)}" class="ghost">ⓘ</button>`;
+  if (errorPresentation(it)) {
+    html += `<button data-act="history-error" data-id="${it.id}" title="${esc(errorSummary(it))}" class="ghost">ⓘ</button>`;
   }
   html += `<button data-act="history-date" data-id="${it.id}" title="${fmtDate(it.timestamp)}">📅</button>`;
   if (it.status === "done" && it.finalPath) {
@@ -291,7 +342,7 @@ $("dlsBody").addEventListener("click", (e) => {
   } else if (act === "history-error" || act === "history-date") {
     const it = historyItems.get(id);
     if (it && act === "history-error") {
-      alert("Error: " + it.error);
+      alert(errorSummary(it));
     } else if (it && act === "history-date") {
       alert("Completed: " + fmtDate(it.endTime || it.timestamp));
     }
@@ -336,7 +387,7 @@ $("histBody").addEventListener("click", (e) => {
   if (!btn) return;
   const it = historyItems.get(btn.dataset.id);
   if (!it) return;
-  if (btn.dataset.act === "history-error") alert("Error: " + it.error);
+  if (btn.dataset.act === "history-error") alert(errorSummary(it));
   else if (btn.dataset.act === "history-date") alert("Completed: " + fmtDate(it.endTime || it.timestamp));
   else if (btn.dataset.act === "move") handleMove(it.id);
 });
@@ -370,7 +421,7 @@ function historyRowHtml(it) {
       <div class="name-col"><div class="name">${esc(it.fileName)}</div><div class="sub">${esc(it.url)}</div></div>
     </td>
     <td>${fmtBytes(it.total)}</td>
-    <td class="wide">${fmtDate(it.endTime || it.timestamp)}</td>     <td class="status"><span class="badge ${statusClass(it.status)}">${esc(it.status)}${it.resolving ? " ⟳" : ""}</span></td>
+    <td class="wide">${fmtDate(it.endTime || it.timestamp)}</td>     <td class="status">${statusBadge(it)}</td>
     <td class="actions">${histActionButtons(it)}</td>
   </tr>`;
 }
@@ -392,10 +443,12 @@ function renderHistory() {
     return;
   }
   // Virtualized like the active list: only rows near the viewport are in the
-  // DOM so a multi-thousand-entry history stays responsive.
-  const scroll = $("histScroll");
-  const st = scroll.scrollTop || 0;
-  const vh = scroll.clientHeight || 400;
+  // DOM so a multi-thousand-entry history stays responsive. Metrics come from
+  // the clean-frame scroll cache (see scrollMetrics) — reading scrollTop here
+  // chased render()'s writes and forced a synchronous layout.
+  const m = scrollMetrics.hist;
+  const st = m.st;
+  const vh = m.vh;
   const start = Math.max(0, Math.floor(st / ROW_H) - 6);
   const end = Math.min(list.length, Math.ceil((st + vh) / ROW_H) + 6);
   let html = "";
@@ -477,6 +530,7 @@ async function loadSettings() {
 
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
+  refreshCssVarCache(); // re-warm after the flip so cached values match, whatever the order with the load warm
   $("themeToggle").textContent = theme === "dark" ? "☀️ Light mode" : "🌙 Dark mode";
   window.api.saveSettings({ theme });
 }
@@ -712,8 +766,22 @@ window.api.onFileOpened((data) => {
 let bwChart = null;
 
 // Canvas fillStyle can't resolve CSS var(); pull the computed value instead.
+// Cached: reading computed style on every frame forced layouts on the cold
+// document (58ms measured in the trace). applyTheme is the single chokepoint
+// that flips data-theme, so it invalidates the cache.
+let cssVarCache = new Map();
+function refreshCssVarCache() {
+  const cs = getComputedStyle(document.documentElement);
+  for (const name of ["--muted", "--accent"])
+    cssVarCache.set(name, cs.getPropertyValue(name).trim() || "#94a3b8");
+}
+// Warm once the document has settled: reading computed style mid-load (the
+// first canvas draws) or at script eval (before any layout exists) forced
+// 60-120ms of reflow in the trace. Two warm reads per load, none in the
+// draw path. :root is the dark theme, so pre-warm draws use its constants.
+addEventListener("load", refreshCssVarCache);
 function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#94a3b8";
+  return cssVarCache.get(name) || "#94a3b8";
 }
 
 function drawBandwidthChart(samples) {

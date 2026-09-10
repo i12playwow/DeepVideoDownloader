@@ -328,3 +328,68 @@ app                          client
   `retryable: false`.
 - `hello` from the app is sent on connect and on every reconnect; the extension
   re-sends its own `hello` on `ws.onopen`.
+
+---
+
+## 7. Capability / trust model (local companion app, not a user-accounted service)
+
+This app has **no user login, no passphrase, no account, and no remote identity**.
+"Auth" here means *who can do what on the local machine*, enforced by two
+independent seams.
+
+### 7.1 Connection pairing (the only enforced client identity)
+
+`isAllowedWsOrigin` (`lib/ws-bridge.js`) is the gate.
+
+| Origin header | Who it is | Allowed | Why |
+|---|---|---|---|
+| `chrome-extension://<id>` | the Deep Grab extension (packaged or unpacked dev) | yes | the companion capture client |
+| `moz-extension://<id>` | the Firefox port | yes | same contract |
+| *(absent)* | native loopback client (another local process, test, or tool) | yes | no browser Origin header on a local ws connection |
+| anything else (`https://…`, `http://…`, `file://`, `null`) | a webpage that opened `ws://127.0.0.1:<port>` | **no** | a site you visit can open that ws with any Origin, so this closes the drive-by enqueue/probe hole |
+
+Rejected origins get `ws.close(1008, "origin not allowed")`.
+
+### 7.2 What a paired client can do
+
+Once paired, both extension-origin and native-loopback clients speak the same
+message surface (`download`, `probe`, `ping`, `dv-monitor-set`, and the
+auto-grab/monitor control flow). The two client classes differ in *how they get
+there*, not in the protocol they are then allowed to use:
+
+- **Extension-origin client** — the intended companion. It is the only client
+  that can carry a real page `cookieHeader` gathered from the extension's
+  partition, and the only client the app treats as the capture source for
+  auto-grab (`dv-auto-grab` / `dv-monitor-grab` / `dv-close-tab`).
+- **Native loopback client** — a local tool or test process. It is trusted only
+  by virtue of being on the same machine and connecting to the loopback port
+  without an Origin header. It has the same enqueue/probe/ping/monitor surface,
+  but it does **not** bring extension-captured cookies or page context; the
+  `cookieHeader` it sends (if any) is whatever the caller supplies, and the
+  engine falls back to server-side cookie gathering exactly as it does for any
+  other `download`.
+
+There is **no per-client capability restriction inside the message protocol**:
+the pairing gate is the only auth seam. If a future feature needs finer-grained
+client roles (e.g. a read-only monitor, a delegated remote client, or a
+restrictable extension id), add it explicitly there instead of widening the
+loopback trust boundary.
+
+### 7.3 Privileged local admin action (not user auth)
+
+`extension-install` (`lib/ipc.js`, wired from `main.js`) launches a real
+Chrome/Edge/Brave on a dedicated persistent profile with `--load-extension` so
+the Deep Grab extension is loaded without manual `chrome://extensions` work.
+This is an **operator action initiated from the local window**, not a login or
+an account sync. It does not authenticate the user; it only runs an Electron
+`execFile` against browser executables found by `findBrowser` and writes a
+profile under `app.getPath("userData")`.
+
+### 7.4 What the app intentionally does NOT provide
+
+- No passphrase / PIN / window lock to keep a passerby from using the open
+  window. The app runs as the logged-in Windows user, so whoever can sit at that
+  session can already enqueue, probe, change settings, export history, and launch
+  browsers on that machine.
+- No remote access. The WebSocket listens only on `127.0.0.1`; the app does not
+  expose itself on a LAN or public interface.
