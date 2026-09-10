@@ -802,6 +802,9 @@ const GROUP_STYLES = {
 };
 async function groupVideoTab(tabId) {
   if (tabId <= 0) return;
+  // Firefox has no tab groups (no chrome.tabGroups/tabs.group) — skip there
+  // explicitly instead of relying on the catch below swallowing a TypeError.
+  if (!chrome.tabGroups) return;
   try {
     const tab = await chrome.tabs.get(tabId);
     if (!tab) return;

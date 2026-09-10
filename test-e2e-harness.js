@@ -739,8 +739,15 @@ function startServer(portRef, segBytesFn) {
   delete require.cache[dmPathP];
 
   // ---- P0: isJunkUrl (dev/portal hosts, 0.0.0.N residuals, group-list paths) ----
+  // The host core (isJunkHostUrl) and the supjav/sextb list-path rule
+  // (isJunkListPath) live in extension/guards.js — shared with the extension;
+  // the engine's isJunkUrl is the composition plus its fetchable-scheme gate.
   console.log("\n-- P0: isJunkUrl --");
   const { isJunkUrl } = require("./downloader");
+  const guardsApi0 = require("./extension/guards.js");
+  assert("P0 engine imports the shared guards core",
+    typeof guardsApi0.isJunkHostUrl === "function" && typeof guardsApi0.isJunkListPath === "function",
+    "guards.js core shape wrong");
   const junkUrls = [
     "https://github.com/tashfeenahmed/freellmapi/releases/tag/v0.9.2",
     "https://ai.google.dev/gemini-api/docs/pricing",
@@ -770,6 +777,28 @@ function startServer(portRef, segBytesFn) {
     "https://cdn.example.com/x/abc.mp4"
   ];
   for (const lu of legitUrls) assert("P0 legit kept: " + lu, !isJunkUrl(lu), "rejected legit");
+  // Parity: the engine result must EQUAL the shared core it is composed from
+  // (junk = host-core OR list-path; legit = neither), so the engine can never
+  // silently disagree with the module the extension runs.
+  for (const ju of junkUrls) {
+    const viaGuards = guardsApi0.isJunkHostUrl(ju) || guardsApi0.isJunkListPath(ju);
+    assert("P0 engine result equals guards composition: " + ju,
+      isJunkUrl(ju) === true && viaGuards === true,
+      "engine=" + isJunkUrl(ju) + " guards=" + viaGuards);
+  }
+  for (const lu of legitUrls) {
+    const viaGuards = guardsApi0.isJunkHostUrl(lu) || guardsApi0.isJunkListPath(lu);
+    assert("P0 engine result equals guards composition: " + lu,
+      isJunkUrl(lu) === false && viaGuards === false,
+      "engine=" + isJunkUrl(lu) + " guards=" + viaGuards);
+  }
+  // The asymmetry is deliberate: the extension's isJunkUrl (host core only)
+  // skips the list-path rule — capture sees URL-shaped links, the engine is
+  // the list-expansion authority. Pin it so a future "fix" that merges the
+  // list-path rule into the extension gate is at least a conscious change.
+  assert("P0 extension gate intentionally skips the list-path rule",
+    guardsApi0.isJunkUrl("https://supjav.com/category/cast/itou-mayuki/page/5") === false,
+    "extension gate now rejects list paths");
 
   // ---- P1: titleFromUrl auto-titles for bulk pastes ----
   // Export-shape pins FIRST: the 1.3.7 crash class was downloader.js calling a
@@ -870,6 +899,8 @@ function startServer(portRef, segBytesFn) {
     "guarded importScripts(guards.js) missing");
   assert("P4 content.js has no local AD_DOMAINS copy", !contentSrc4.includes("const AD_DOMAINS"), "drifted copy leaked back");
   assert("P4 background.js has no local AD_DOMAINS copy", !bgSrc4.includes("const AD_DOMAINS"), "drifted copy leaked back");
+  // The engine is the third consumer of the same module — no local literal.
+  assert("P4 downloader.js has no local JUNK_BASE_RE copy", !fs4.readFileSync("downloader.js", "utf8").includes("const JUNK_BASE_RE"), "drifted copy leaked back");
   const guardsApi4 = require("./extension/guards.js");
   assert("P4 guards.js exports the shared guard names",
     typeof guardsApi4.isAdUrl === "function" && typeof guardsApi4.isJunkUrl === "function" &&

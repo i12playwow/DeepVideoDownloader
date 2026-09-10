@@ -22,6 +22,10 @@ const { SJ_PLAYER_RE, resolveUrl, resolveStreamtape, resolveSupjav, resolveCnPor
 const { unwrapExtensionUrl } = require("./lib/urls");
 const { HistoryStore, canonicalKeys } = require("./lib/history-store");
 const { isTransientError, errorCodeFor } = require("./lib/status");
+// The shared capture-guard module the Deep Grab extension also loads (manifest
+// content_scripts + background importScripts) — one code object for the
+// blocklists on both sides of the WS bridge.
+const { isJunkHostUrl, isJunkListPath } = require("./extension/guards.js");
 
 // A file must be at least this big to count as a real downloaded video for the
 // on-disk duplicate check. Smaller files are partials/stubs (failed CF probes,
@@ -129,32 +133,17 @@ function isFetchableUrl(s) {
   return /^(?:https?|blob):/i.test(s || "");
 }
 
-// Dev/portal/tooling hosts that never serve the JAV media this app downloads.
-// They leak into the queue because the user's real Chrome browses them while
-// Deep Grab is active (github, google accounts/policies/mail, firecrawl, the
-// download managers of record, violentmonkey, etc.). Rejecting the hostname
-// (with any subdomain) keeps them out of enqueue/addPending entirely.
-const JUNK_BASE_RE = /(?:^|\.)(github\.io|github\.com|google\.com|google\.dev|googleapis\.com|firecrawl\.dev|jdownloader\.org|violentmonkey\.github\.io|webextension\.org|internetdownloadmanager\.com|vn-zoom\.com|wikipedia\.org)$/i;
-
-// List-page / browse churn is never media. The observed junk came as supjav
-// group pages (…/category/cast/<name>/page/N) and multi-segment nav paths whose
-// last segment is just a number — distinct from a movie slug (…/<code>.html).
-const JUNK_PATH_SEG = /(?:^|\/)(?:category|categories|genres|genre|cats|tags|tag|actors|actress|cast|studios|studio|search|watch|browse|page|paged|feed|author|date|archives)\b/i;
-
+// The host junk core (dev/portal blocklist, dotless hosts, 0.0.0.N residuals)
+// and the supjav/sextb group-LISTING path rule live in extension/guards.js —
+// the same module the extension loads, so a blocklist addition can never again
+// land in one copy only (the 2026-09-03 supjav ad-host leak class). The engine
+// wraps the shared core with its own scheme gate (blob: sources are fetchable
+// and may enqueue) and applies the list-path rule (the engine is the
+// list-expansion authority; the extension's capture gate intentionally skips
+// it).
 function isJunkUrl(u) {
   if (!isFetchableUrl(u)) return false;
-  try {
-    const url = new URL(u);
-    const host = url.hostname.toLowerCase().replace(/^www\./, "");
-    if (host && !/[.:]/.test(host)) return true; // dotless single-word host (https://Mouth)
-    if (/^0\.0\.0\.[0-9]+$/.test(host)) return true; // URL shorthand residuals (https://1 → 0.0.0.1)
-    if (JUNK_BASE_RE.test(host)) return true;
-    // supjav/sextb-style group/browse listing paths are never media.
-    if (/(?:supjav|supremejav|sextb)\.(?:com|ph|net|live)/i.test(host) && JUNK_PATH_SEG.test(url.pathname)) return true;
-    return false;
-  } catch (e) {
-    return false;
-  }
+  return isJunkHostUrl(u) || isJunkListPath(u);
 }
 
 const PART_EXT = ".part";
