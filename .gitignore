@@ -18,3 +18,8 @@ extension.crx
 extension.pem
 *.user.js
 * - Copy*
+
+# Regenerable test fixture: test-extension-live.js generates it with ffmpeg when
+# missing and SKIPs cleanly when it cannot; test-engine-regression.js takes it as
+# an argv argument. Opt-in suites only — npm test / CI never need it.
+test-video.mp4
