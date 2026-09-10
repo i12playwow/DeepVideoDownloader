@@ -1,6 +1,14 @@
 // Background service worker: aggregates videos found by content scripts and
 // forwards them to the Deep Video Downloader desktop app over WebSocket.
 
+// Shared capture guards (AD_DOMAINS/isAdUrl, ST_GETVIDEO_RE, JUNK_BASE_RE/
+// isJunkUrl) live in guards.js — the same file the manifest injects before
+// content.js, so the SW and the content scripts can never drift again (the
+// 2026-09-03 supjav ad-host leak was exactly that drift). typeof-guarded:
+// the offline harness evals this file under new Function with no worker
+// global, and no top-level code here calls a guard function.
+if (typeof importScripts === "function") importScripts("guards.js");
+
 const WS_URL = "ws://127.0.0.1:8765";
 const FOUND_CAP = 10000;
 const RECONNECT_DELAY = 3000;
@@ -41,31 +49,6 @@ let probeActive = 0;
 const probing = new Set();
 
 const NET_VIDEO_RE = /\.(mp4|m4v|webm|mov|mkv|flv|m3u8)([?#]|$)/i;
-// streamtape/fstape serve the file from /get_video?.. (no extension) — match it
-// by host so webRequest captures it in suspended/background tabs too.
-const ST_GETVIDEO_RE = /^https?:\/\/(?:[^/]*\.)?(?:streamtape|fstape)\.com\/get_video\?/i;
-
-// Ad-network hosts whose streams/players must never be captured as videos.
-const AD_DOMAINS = /(?:^|\.)(?:doubleclick\.net|googlesyndication\.com|adservice\.google\.com|ads\.youtube\.com|adroll\.com|criteo\.com|taboola\.com|outbrain\.com|adnxs\.com|amazon-adsystem\.com|adform\.net|adcolony\.com|smartadserver\.com|rubiconproject\.com|pubmatic\.com|openx\.net|appnexus\.com|casalemedia\.com|adsrvr\.org|exoclick\.com|popads\.net|propellerads\.com|mgid\.com|revcontent\.com|adsterra\.com|juicyads\.com|eix304\.com|tapioni\.com|mnaspm\.com|mayzaent\.com|googletagmanager\.com|djsalcbhew47\.lol)$/i;
-function isAdUrl(u) {
-  if (!u) return false;
-  try { return AD_DOMAINS.test(new URL(u).hostname); } catch (e) { return false; }
-}
-
-// Dev/portal/tooling hosts that never serve JAV media. They leak into the
-// capture flow when the user's real Chrome browses them while Deep Grab is
-// active (github, google accounts/policies/mail, firecrawl, download managers,
-// violentmonkey, etc.). Rejecting here keeps them from ever reaching the app.
-const JUNK_BASE_RE = /(?:^|\.)(github\.io|github\.com|google\.com|google\.dev|googleapis\.com|firecrawl\.dev|jdownloader\.org|violentmonkey\.github\.io|webextension\.org|internetdownloadmanager\.com|vn-zoom\.com|wikipedia\.org)$/i;
-function isJunkUrl(u) {
-  if (!u || !/^(?:https?):/i.test(u)) return false;
-  try {
-    const host = new URL(u).hostname.toLowerCase().replace(/^www\./, "");
-    if (host && !/[.:]/.test(host)) return true;
-    if (/^0\.0\.0\.[0-9]+$/.test(host)) return true;
-    return JUNK_BASE_RE.test(host);
-  } catch (e) { return false; }
-}
 
 function persist() {
   chrome.storage.local.set({

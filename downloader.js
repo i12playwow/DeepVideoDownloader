@@ -1117,7 +1117,11 @@ class DownloadManager {
       if (Array.isArray(r)) {
         let n = 0;
         for (const u of r) {
-          try { await this.enqueue({ url: u, title: "", referer: item.url, markDuplicate: true }); n++; } catch (e) {}
+          // enqueue legitimately rejects per URL (junk-host/nav guards, dup
+          // storms, unsupported schemes) — a list expansion must skip those
+          // silently, but count only what actually landed in the queue so
+          // listCount reflects real items, not attempts.
+          try { await this.enqueue({ url: u, title: "", referer: item.url, markDuplicate: true }); n++; } catch { /* per-URL skip by design */ }
         }
         item.listCount = n;
         item.status = "done";

@@ -241,7 +241,10 @@ function startWsServer() {
           send: (o) => { try { ws.send(JSON.stringify(o)); } catch (e) { /* ignore */ } }
         });
       } catch (e) {
-        try { ws.send(JSON.stringify(wsBridge.errorReply(wsBridge.ERROR_CODES.INTERNAL, e.message, { url: msg.url || "" }))); } catch (_) {}
+        // Best-effort error reply: if this socket is closing, the send throws
+        // synchronously and there is nothing left to report to — same rule as
+        // the pace-limited reply above.
+        try { ws.send(JSON.stringify(wsBridge.errorReply(wsBridge.ERROR_CODES.INTERNAL, e.message, { url: msg.url || "" }))); } catch (_) { /* socket closing */ }
       }
     });
     ws.on("error", () => {});
