@@ -1,4 +1,5 @@
 const statusEl = document.getElementById("status");
+const statusDetailEl = document.getElementById("status-detail");
 const feedbackEl = document.getElementById("feedback");
 const rescanBtn = document.getElementById("rescan");
 const urlInput = document.getElementById("url");
@@ -9,9 +10,28 @@ const monitorBtn = document.getElementById("monitor");
 
 let found = []; // {url, title, pageUrl, kind, size, mime, added, error}
 
-function setStatus(s) {
-  statusEl.textContent = s;
-  statusEl.className = s;
+// The SW owns link state (linkState() in background.js) and the popup renders
+// exactly what it is handed — it never re-derives the reason. A bare state
+// string is still accepted defensively, but the SW always sends the full
+// payload (status, detail, and the compat code) so the pill can be backed by a
+// reason line: which app we are paired with (version + protocol), or why the
+// link is down.
+function setStatus(state) {
+  const s = typeof state === "string" ? { status: state, ok: state === "connected" } : (state || {});
+  const pill = s.ok ? "connected" : (s.status === "connecting" ? "connecting" : "disconnected");
+  statusEl.textContent = pill === "disconnected" ? "disconnected" : (pill === "connecting" ? "connecting…" : "connected");
+  statusEl.className = pill;
+  renderDetail(s);
+}
+
+// Reason line under the pill. A protocol mismatch is the one link failure the
+// user can act on (update the app), so it is colored as actionable instead of
+// reading like a plain outage.
+function renderDetail(s) {
+  if (!statusDetailEl) return;
+  const actionable = s.code === "extension-newer" || s.code === "app-older";
+  statusDetailEl.textContent = s.detail || "";
+  statusDetailEl.className = actionable ? "compat" : "";
 }
 
 // Operation feedback (Send / Add / Send all). The status pill is reserved for
@@ -19,11 +39,26 @@ function setStatus(s) {
 // URL, pace limit) must never masquerade as a link failure, so the real reason
 // from the reply is surfaced here instead.
 let feedbackTimer = 0;
-function showFeedback(text, isError) {
+// tone: false = ok (green), true = error (red), "warn" = amber — a queued retry
+// is neither a success nor a dead end, and the amber matches the ⟳ retryable
+// convention the found rows use.
+function showFeedback(text, tone) {
   clearTimeout(feedbackTimer);
   feedbackEl.textContent = text || "";
-  feedbackEl.className = text ? (isError ? "fb-err" : "fb-ok") : "";
+  feedbackEl.className = text ? (tone === "warn" ? "fb-warn" : (tone ? "fb-err" : "fb-ok")) : "";
   if (text) feedbackTimer = setTimeout(() => { feedbackEl.textContent = ""; feedbackEl.className = ""; }, 5000);
+}
+
+// A retryable refusal (the app's pace limit) is not always a dead end: when the
+// SW actually QUEUED a retry (`queued` — it has a pending entry to re-send) it
+// re-sends after the app's own retryAfter window, so say that instead of
+// dressing it up as the same ✕ a terminal failure gets. A raw Send has nothing
+// to re-send, so its refusal stays a plain ✕. Both fields come from the SW's
+// reply, never re-derived here.
+function refuseFeedback(r, fallback) {
+  const reason = r.error || fallback;
+  if (r.queued) return "⟳ " + reason + " — queued, retrying in " + (r.retryAfter || 60) + "s";
+  return "✕ " + reason;
 }
 
 function fmtSize(b) {
@@ -36,7 +71,7 @@ function fmtSize(b) {
 function refreshStatus() {
   chrome.runtime.sendMessage({ type: "getStatus" }, (r) => {
     if (!r) return;
-    setStatus(r.ok ? "connected" : "disconnected");
+    setStatus(r);
   });
 }
 
@@ -128,7 +163,7 @@ function foundItem(v) {
     btn.textContent = "…";
     chrome.runtime.sendMessage({ type: "add-to-list", url: v.url, title: v.title || "", pageUrl: v.pageUrl || "" }, (r) => {
       if (r && r.ok) { v.added = true; renderFound(); }
-      else if (r) { btn.disabled = false; btn.textContent = "+ Add"; showFeedback("✕ " + (r.error || "Could not add"), true); }
+      else if (r) { btn.disabled = false; btn.textContent = "+ Add"; showFeedback(refuseFeedback(r, "Could not add"), r.queued ? "warn" : true); }
       else { btn.disabled = false; btn.textContent = "+ Add"; refreshStatus(); } // no SW reply — show the true link state
     });
   });
@@ -143,8 +178,9 @@ addAllBtn.addEventListener("click", () => {
   addAllBtn.textContent = "Sending…";
   chrome.runtime.sendMessage({ type: "add-all-found", urls }, (r) => {
     loadFound();
-    if (r && r.ok) { showFeedback("Sent " + r.added + " of " + r.total + " to desktop ✓", false); }
-    else if (r) { showFeedback("✕ " + (r.error || "Nothing sent"), true); }
+    if (r && r.ok) { showFeedback("Sent " + r.added + " of " + r.total + " to desktop ✓" +
+      (r.queued ? " — rest queued, retrying in " + (r.retryAfter || 60) + "s" : ""), r.queued ? "warn" : false); }
+    else if (r) { showFeedback(refuseFeedback(r, "Nothing sent"), r.queued ? "warn" : true); }
     else { refreshStatus(); } // no SW reply — show the true link state
   });
 });
@@ -162,7 +198,7 @@ sendBtn.addEventListener("click", () => {
     } else if (r) {
       // The app answered and refused — surface the real reason; do NOT flip the
       // status pill, which reflects the WS link, not the operation's outcome.
-      showFeedback("✕ " + (r.error || "Not sent"), true);
+      showFeedback(refuseFeedback(r, "Not sent"), r.queued ? "warn" : true);
     } else {
       refreshStatus(); // no reply at all — show the true link state
     }
@@ -230,7 +266,7 @@ monitorBtn.addEventListener("click", () => {
 // wrong direction.
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "dv-found-updated") loadFound();
-  else if (msg && msg.type === "desktop-status") setStatus(msg.ok ? "connected" : "disconnected");
+  else if (msg && msg.type === "desktop-status") setStatus(msg);
   else if (msg && msg.type === "dv-monitor-changed") renderMonitor(msg.on === true);
 });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) resyncFromSw(); });

@@ -25,6 +25,11 @@ const { registerIpc } = require("./lib/ipc");
 const CONFIG_PATH = app.isPackaged
   ? path.join(app.getPath("userData"), "config.json")
   : path.join(__dirname, "config.json");
+
+// Build version advertised to clients in the WS hello. Cosmetic on the wire,
+// but the extension's popup renders it in its link line, so it must be the real
+// build — app.getVersion() reads the packaged package.json.
+const APP_VERSION = app.getVersion() || require("./package.json").version;
 // Config defaults + (de)serialization/validation live in ./config (unit-tested via `node test-config.js`).
 
 
@@ -116,17 +121,22 @@ function flushUpdates() {
   // relay status back to the extension over WebSocket (one status per entry)
   const clients = wss ? Array.from(wss.clients) : [];
   if (clients.length && clients.some((c) => c.readyState === 1)) {
-    const ext = clients.find((c) => c.readyState === 1 && c.isExtension);
-    // autoGrab: when the setting is on, each completed download closes its
-    // source tab and harvests everything new the extension has found.
-    if (ext && batch.some((it) => it.status === "done") && settings.get().autoGrab) {
-      const doneItems = batch.filter((it) => it.status === "done" && it.url);
+    // Auto-grab pushes go to EVERY paired extension, not just the first: the
+    // user's real Chrome and the app's own built-in browser can both hold the
+    // extension, and each one owns different tabs / found lists. Picking only
+    // the first socket left the second client's movie tabs open and its
+    // captures unsent (whichever browser connected first silently won).
+    const extClients = clients.filter((c) => c.readyState === 1 && c.isExtension);
+    if (extClients.length && batch.some((it) => it.status === "done") && settings.get().autoGrab) {
+      const doneItems = batch.filter((it) => it.status === "done" && it.url && it.referer);
       for (const it of doneItems) {
-        if (it.referer) {
-          try { ext.send(JSON.stringify({ type: "dv-close-tab", pageUrl: it.referer })); } catch (e) { /* ignore */ }
+        for (const c of extClients) {
+          try { c.send(JSON.stringify({ type: "dv-close-tab", pageUrl: it.referer })); } catch (e) { /* ignore */ }
         }
       }
-      try { ext.send(JSON.stringify({ type: "dv-monitor-grab" })); } catch (e) { /* ignore */ }
+      for (const c of extClients) {
+        try { c.send(JSON.stringify({ type: "dv-monitor-grab" })); } catch (e) { /* ignore */ }
+      }
     }
     // The status push carries the item's human error string plus a structured
     // code derived from its errorCategory and whether the failure is transient
@@ -175,6 +185,59 @@ async function gatherCookieHeader(urls) {
   return parts.join("; ");
 }
 
+// ---- paired WS clients (the window's "Extension bridge" panel) ----
+// Every socket that passed the origin gate is tracked with enough context to
+// answer "who is talking to the app right now": its class (extension vs native
+// loopback), the browser it came from (read off the user-agent — the user's real
+// Chrome AND the app's own built-in browser can both be paired at once), the
+// wire protocol it speaks, and when it was last heard from.
+let clientSeq = 0;
+
+function describeClient(origin, userAgent) {
+  const ua = String(userAgent || "");
+  if (!origin) return "Native client";
+  if (/Firefox\//i.test(ua)) return "Firefox extension";
+  if (/Edg\//i.test(ua)) return "Edge extension";
+  if (/OPR\//i.test(ua)) return "Opera extension";
+  if (/Electron\//i.test(ua)) return "Built-in browser extension";
+  if (/Chrome\//i.test(ua)) return "Chrome extension";
+  return "Browser extension";
+}
+
+function clientSnapshot() {
+  const port = settings.get().port;
+  const clients = (wss ? Array.from(wss.clients) : [])
+    .filter((c) => c.readyState === 1 && c.meta)
+    .map((c) => Object.assign({}, c.meta, { ageMs: Date.now() - c.meta.connectedAt, idleMs: Date.now() - c.meta.lastSeenAt }));
+  return { url: "ws://127.0.0.1:" + port, port, protocolVersion: wsBridge.PROTOCOL_VERSION, clients };
+}
+
+function pushClients() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send("ws-clients", clientSnapshot()); } catch (e) { /* window closing */ }
+}
+
+// Liveness: a browser answers a protocol-level ping without waking the
+// extension code, so this detects a truly dead socket (killed app, suspended
+// peer) and prunes it from the paired list. Two missed beats (~60s) is enough.
+const WS_KEEPALIVE_MS = 30000;
+let wsKeepalive = null;
+
+function startWsKeepalive() {
+  if (wsKeepalive) return;
+  wsKeepalive = setInterval(() => {
+    if (!wss) return;
+    for (const c of wss.clients) {
+      if (c.isAlive === false) {
+        try { c.terminate(); } catch (e) { /* already closing */ }
+        continue;
+      }
+      c.isAlive = false;
+      try { c.ping(); } catch (e) { /* closing */ }
+    }
+  }, WS_KEEPALIVE_MS);
+}
+
 function startWsServer() {
   wss = new WebSocketServer({ host: "127.0.0.1", port: settings.get().port });
 
@@ -191,11 +254,31 @@ function startWsServer() {
       try { ws.close(1008, "origin not allowed"); } catch (e) { /* ignore */ }
       return;
     }
-    ws.send(JSON.stringify({ type: "hello", version: "1.0.0", protocolVersion: wsBridge.PROTOCOL_VERSION, port: settings.get().port }));
+    ws.send(JSON.stringify({ type: "hello", version: APP_VERSION, protocolVersion: wsBridge.PROTOCOL_VERSION, port: settings.get().port }));
     ws.isExtension = origin.startsWith("chrome-extension://") || origin.startsWith("moz-extension://");
     ws.monitorEnabled = false;
-    if (wss) wss._extWs = ws; // extension socket handle for autoGrab / monitor pushes
+    // Registry entry for the window's bridge panel (main.js owns this state; the
+    // renderer only renders the snapshot it is handed).
+    ws.meta = {
+      id: "c" + (++clientSeq),
+      origin,
+      label: describeClient(origin, req && req.headers && req.headers["user-agent"]),
+      extensionId: (origin.match(/^[a-z-]+-extension:\/\/([^/]+)/) || [])[1] || "",
+      connectedAt: Date.now(),
+      lastSeenAt: Date.now(),
+      helloSeen: false,
+      protocolVersion: 0,
+      clientVersion: ""
+    };
+    ws.isAlive = true;
+    ws.on("pong", () => {
+      ws.isAlive = true;
+      if (ws.meta) ws.meta.lastSeenAt = Date.now();
+    });
+    ws.on("close", () => { pushClients(); });
+    pushClients();
     ws.on("message", async (data) => {
+      if (ws.meta) ws.meta.lastSeenAt = Date.now();
       let msg;
       try {
         msg = JSON.parse(data.toString());
@@ -215,6 +298,12 @@ function startWsServer() {
           return;
         }
         ws.protocolVersion = msg.protocolVersion == null ? wsBridge.PROTOCOL_VERSION : Number(msg.protocolVersion);
+        if (ws.meta) {
+          ws.meta.helloSeen = true;
+          ws.meta.protocolVersion = ws.protocolVersion;
+          ws.meta.clientVersion = String(msg.v || "");
+          pushClients();
+        }
         // Tell the extension the authoritative autoGrab state right after its hello.
         try { ws.send(JSON.stringify({ type: "dv-auto-grab", on: !!settings.get().autoGrab })); } catch (e) { /* ignore */ }
       }
@@ -252,6 +341,7 @@ function startWsServer() {
 
   wss.on("listening", () => {
     console.log(`[ws] listening on ws://127.0.0.1:${settings.get().port}`);
+    startWsKeepalive();
   });
 
   wss.on("error", (err) => {
@@ -564,7 +654,8 @@ if (gotLock) {
       external: (url, b) => openInExternalBrowser(url, b),
       install: (b) => launchExtensionInBrowser(b)
     },
-    bv: browser.bv
+    bv: browser.bv,
+    bridge: { snapshot: clientSnapshot, push: pushClients }
   });
 
 
@@ -606,6 +697,7 @@ if (gotLock) {
     settings.close(); // stop the config.json watcher
     if (tray) tray.destroy();
     if (dm && typeof dm.flush === "function") dm.flush();
+    if (wsKeepalive) { clearInterval(wsKeepalive); wsKeepalive = null; }
     if (wss) wss.close();
   });
 } else {

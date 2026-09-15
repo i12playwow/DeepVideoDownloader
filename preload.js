@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld("api", {
   openDir: () => ipcRenderer.invoke("open-dir"),
   chooseDir: () => ipcRenderer.invoke("select-dir"),
   getActiveDir: () => ipcRenderer.invoke("get-active-dir"),
+  listClients: () => ipcRenderer.invoke("clients-list"),
+  onClients: (cb) => ipcRenderer.on("ws-clients", (e, snapshot) => cb(snapshot)),
   showInFolder: (p) => ipcRenderer.invoke("open-path", p),
   openBrowser: (urls) => ipcRenderer.invoke("browser-open", urls),
   browserNav: (url) => ipcRenderer.invoke("browser-nav", url),
