@@ -127,6 +127,21 @@ function startFixture() {
         res.end(MP4);
         return;
       }
+      // Phase G's target page is deliberately fetch-only (NO <video> element).
+      // The extension's content script auto-sends any <video> it finds (its
+      // DEFAULT_CONFIG has autoGrab/bestOnly ON, independent of the app's
+      // autoGrab), so a <video> here races the drill's controlled harvest and
+      // ships the target with a pageUrl already set. The mp4 request is still
+      // captured by the SW's webRequest listener with the tab's id, so the
+      // entry lands in `found` and the drill can strip its pageUrl — the
+      // send-time-resolution shape under test.
+      if (p === "/movies/close-me/") {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end("<!doctype html><html><head><title>movies/close-me</title></head><body>" +
+          "<h1>movies/close-me</h1>" +
+          "<script>fetch('/v/mov-close-me.mp4',{mode:'no-cors'}).catch(function(){})</script></body></html>");
+        return;
+      }
       const cm = /^\/(actress|tag|movies)\/([^/]+)\//.exec(p);
       if (cm) {
         const v = cm[1] === "actress" ? "/v/act-" + cm[2] + ".mp4"
@@ -752,8 +767,8 @@ async function phaseG(port) {
     let src = fs.readFileSync(bg, "utf8");
     if (!src.includes('"ws://127.0.0.1:8766"')) {
       src = src.replace('"ws://127.0.0.1:8765"', '"ws://127.0.0.1:8766"');
-      fs.writeFileSync(bg, src);
     }
+    fs.writeFileSync(bg, src);
     if (!fs.readFileSync(bg, "utf8").includes('"ws://127.0.0.1:8766"')) throw new Error("WS port override failed");
 
     const chromeUd = path.join(sandbox, "chrome-ud");
@@ -768,7 +783,7 @@ async function phaseG(port) {
       "--remote-debugging-port=0",
       "--enable-unsafe-extension-debugging",
       "--no-first-run", "--no-default-browser-check", "--disable-session-crashed-bubble",
-      "--disable-component-update", "--no-service-autorun",
+      "--disable-component-update",
       "about:blank"
     ], { detached: true, windowsHide: false, stdio: ["ignore", cOut, cErr] });
     cChild.unref();
@@ -790,10 +805,40 @@ async function phaseG(port) {
     const swEval = makeSwEval(b, wakeUrl).value;
     G("chrome up on " + cdpPort + ", close-me=" + closeTabUrl);
 
-    // Open the close-me tab FIRST: its video capture wakes the SW and lands
-    // the entry (autoGrab is still OFF, so nothing is harvested yet). A fresh
-    // Chrome profile defers the first navigation, so activate the tab and poll
-    // for the committed URL instead of trusting a blind sleep.
+    // ---- start the worker BEFORE the capture page loads ----
+    // An MV3 service worker that is not running does not receive a page's
+    // webRequest events, and this fixture fetches its mp4 within milliseconds
+    // of the commit. Waking the worker on the first swEval below (after the tab
+    // had already loaded) made the capture a pure startup race: `found` stayed
+    // empty, the harvest had nothing to send, no download completed and no
+    // dv-close-tab ever arrived — the phase failed as "movies tab still open"
+    // (diagnosed 2026-09-14: mem/stored/captured all empty pre-kill while the
+    // fixture logged 5 GETs of the mp4, and a probe request issued once the
+    // worker was up captured fine). Wake it here through the drill's own path:
+    // a fixture page's content script messages the worker, which starts it for
+    // good. The page's own capture is pruned by the remove-found step below.
+    const gObs = wsObserve(["http://127.0.0.1:" + port + "/v/mov-close-me.mp4"], 55000);
+
+    const wakeTabId = await gopen(b, wakeUrl);
+    if (wakeTabId) { try { await b.send("Target.activateTarget", { targetId: wakeTabId }); } catch (e) {} }
+    // Wait for PROOF the worker is running: the wake page's own video has to
+    // land in `found`, which can only happen through the content script's
+    // runtime message (that message is what starts the worker). Closing the
+    // wake tab right away was the trap — the page's content script had not run
+    // yet, so nothing ever messaged the worker.
+    let workerUp = false;
+    for (let i = 0; i < 30 && !workerUp; i++) {
+      try { workerUp = (await swEval(`found.length`)) > 0; } catch (e) { workerUp = false; }
+      if (!workerUp) await sleep(500);
+    }
+    if (wakeTabId) await gclose(b, wakeTabId);
+    if (!workerUp) throw new Error("extension worker never woke: no capture from the wake page (" + wakeUrl + ")");
+    G("worker running before the capture page loads");
+
+    // Open the close-me tab: its video capture lands the entry (autoGrab is
+    // still OFF, so nothing is harvested yet). A fresh Chrome profile defers
+    // the first navigation, so activate the tab and poll for the committed URL
+    // instead of trusting a blind sleep.
     const closeTabId2 = await gopen(b, closeTabUrl);
     if (closeTabId2) { try { await b.send("Target.activateTarget", { targetId: closeTabId2 }); } catch (e) {} }
     let closeTabId = -1;
@@ -830,8 +875,22 @@ async function phaseG(port) {
     G("popup open");
 
     // Prune everything except the close-me capture so the harvest is focused.
-    // (Runs now that the popup receiver is open; before the kill.)
-    await swEval(`chrome.runtime.sendMessage({ type: "remove-found", urls: found.filter(f => !f.url.includes("mov-close-me.mp4")).map(f => f.url) })`);
+    // This MUST be driven from the POPUP context (open above): a
+    // chrome.runtime.sendMessage from the SW does not deliver to the SW's own
+    // onMessage listener, so the old self-directed remove-found was a silent
+    // no-op. That mattered: the wake page's own capture then stayed in `found`,
+    // every later dv-monitor-grab re-sent it, and those extra `download`
+    // messages burned the app's global crawl throttle (cold burst 8s, then
+    // 4/min) — so the close-me enqueue came back PACE_LIMITED, no download ran,
+    // no dv-close-tab arrived and the tab stayed open (diagnosed 2026-09-14).
+    const pruned5 = await geval(popupWs, `new Promise((done) => {
+      chrome.runtime.sendMessage({ type: "get-found" }, (r) => {
+        const urls = ((r && r.found) || []).filter((f) => !f.url.includes("mov-close-me.mp4")).map((f) => f.url);
+        if (!urls.length) return done(0);
+        chrome.runtime.sendMessage({ type: "remove-found", urls }, () => done(urls.length));
+      });
+    })`);
+    G("pruned" + (pruned5 ? " " + pruned5 : " 0") + " non-target capture(s) via the popup receiver");
     await sleep(500);
 
     // ---- F5a: force the exact SW-death storage shape ----
@@ -853,37 +912,50 @@ async function phaseG(port) {
     // swDead can legitimately be 0 (already gone in the first poll) — guard on
     // null, not falsiness, or a fast kill is misread as a failure.
     if (swDead == null) { fail("G SW death", "service worker target never disappeared after closeTarget"); return; }
+
+    // Let the app's crawl throttle forget the wake-page traffic before the
+    // harvest. The page that started the worker is an ordinary video page, so
+    // the extension's always-on auto-grab (content.js DEFAULT_CONFIG.autoGrab /
+    // bestOnly are both ON) sent its video to the app; every one of those
+    // `download` messages counts against the throttle — 8s burst, then 4/min
+    // per socket — and the real target's enqueue would come back PACE_LIMITED
+    // (diagnosed 2026-09-14). The throttle clears itself after a 10s idle
+    // window, so waiting past that resets it without touching the product or
+    // the drill's isolated 8766 pairing.
+    await sleep(13000);
     G("toggle autoGrab ON via popup");
 
-    // ---- harvest: toggle autoGrab ON via the popup (config-truth clicks) ----
-    // The ON edge pushes dv-monitor-grab; the first click wakes a FRESH worker
-    // (loadPersisted restores the pageUrl-less entry) and the retry loop covers
-    // the SW-wake + WS-reconnect window.
+    // ---- harvest: arm auto-grab via the popup, then RE-FIRE the edge ----
+    // The ON edge pushes dv-monitor-grab, but the fresh worker's loadPersisted
+    // restore is async: the first harvest can run against an empty `found`.
+    // Waiting for the restore and then toggling OFF->ON guarantees the harvest
+    // sees the restored pageUrl-less entry.
+    //
+    // No swEval runs after the kill on purpose. An swEval against a sleeping
+    // worker opens the wake page, and with autoGrab ON that page's own video is
+    // auto-downloaded by the content script — every such `download` message
+    // counts against the app's crawl throttle (8s burst, then 4/min), so the
+    // real target's enqueue came back PACE_LIMITED and the tab stayed open
+    // (diagnosed 2026-09-14: the drill-copy counters read grab=2, ok=0 with
+    // lasterr "Pace limit: too many downloads in the last minute."). The tab
+    // state is therefore checked over CDP, not through the worker.
     const popupClick = () => geval(popupWs, `document.getElementById('monitor').click()`);
     await clickUntilMonitor(true, popupClick);
-    await sleep(4000);
-    // Fresh-worker loadPersisted is async — if the enable-edge harvest fired
-    // before the restore, re-toggle OFF->ON to re-fire dv-monitor-grab.
-    const grabbed5 = await swEval(`(() => { const f = found.find(x => x.url.includes('mov-close-me')); return f ? { added: !!f.added } : null; })()`);
-    G("post-toggle entry=" + JSON.stringify(grabbed5));
-    if (grabbed5 && !grabbed5.added) {
-      G("first harvest missed the restored entry (loadPersisted race) — re-toggling OFF->ON");
-      await clickUntilMonitor(false, popupClick);
-      await clickUntilMonitor(true, popupClick);
-      await sleep(2000);
-    }
+    await sleep(4000); // let the fresh worker's loadPersisted() settle
+    await clickUntilMonitor(false, popupClick);
+    await clickUntilMonitor(true, popupClick);
 
     let closed = false;
     for (let i = 0; i < 45; i++) {
       await sleep(1000);
-      const stillThere = await swEval(`chrome.tabs.query({}).then(ts => ts.some(t => t.url && t.url === ${JSON.stringify(closeTabUrl)}))`);
+      const stillThere = (await glist(cdpPort).catch(() => [])).some((t) => t.type === "page" && t.url === closeTabUrl);
       if (!stillThere) { closed = true; break; }
     }
-    const diag5 = await swEval(`(() => { const f = found.find(x => x.url.includes('mov-close-me')); return f ? { pageUrl: f.pageUrl, added: f.added } : null; })()`);
+    const gSeen = await gObs;
     if (closed) {
       pass("G auto-close across SW death", "pageUrl-less entry restored after SW death -> send-time referer -> download done -> dv-close-tab closed the movies tab (SW dead in " + swDead + "s)");
     } else {
-      fail("G auto-close across SW death", "movies tab still open after grab+done; diag=" + JSON.stringify(diag5) + " config.autoGrab=" + readConfigGrab());
+      fail("G auto-close across SW death", "movies tab still open after grab+done; appSeen=" + JSON.stringify(gSeen.seen.slice(-6)) + " why=" + gSeen.why + " config.autoGrab=" + readConfigGrab());
     }
   } catch (e) {
     fail("G auto-close across SW death", "drill error: " + ((e && e.message) || e));
@@ -1017,7 +1089,7 @@ async function phaseH(port) {
       "--remote-debugging-port=0",
       "--enable-unsafe-extension-debugging",
       "--no-first-run", "--no-default-browser-check", "--disable-session-crashed-bubble",
-      "--disable-component-update", "--no-service-autorun",
+      "--disable-component-update",
       // The fixture is served at the real supjav.com host: Chrome resolves it
       // to loopback so isCrawlHost sees a JAV host on the captured URL.
       "--host-resolver-rules=MAP supjav.com 127.0.0.1",
