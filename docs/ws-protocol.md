@@ -7,7 +7,11 @@ is wrong — fix the code, not this doc.
 
 - **Transport:** WebSocket, JSON text frames. One JSON object per frame.
 - **Default endpoint:** `ws://127.0.0.1:8765` (config `port`; the boot-verify
-  drill uses an isolated `8766`).
+  drill uses an isolated `8766`). The DEFAULT only — clients follow the app's
+  real port (§3.2.1). A live `port` change (settings save or a hand-edited
+  `config.json`) rebinds the running server on the spot; nothing this app
+  advertises — the `hello` below, the window's bridge panel — ever names a port
+  it is not listening on.
 - **Server:** the Electron app (`main.js` `startWsServer`, via `ws` lib).
 - **Client:** the Deep Grab extension's MV3 service worker
   (`extension/background.js`). Native loopback tools and tests may also connect
@@ -40,6 +44,8 @@ Rejected origins get `ws.close(1008, "origin not allowed")`.
 
    - `version` = app build version (cosmetic).
    - `protocolVersion` = the wire protocol this app speaks.
+   - `port` = the port the app is **actually bound to** — read from the listening
+     socket, not from the config, so it is authoritative even mid-change (§3.2.1).
 
 2. Client replies:
 
@@ -127,6 +133,32 @@ Request to enqueue one or more downloads.
 ```
 → **`pong`** (echoes `reqId`).
 
+The extension also uses this as a **heartbeat**: it pings every 20s and, when no
+`pong` arrives within 8s, treats the link as dead (`close()` → normal reconnect)
+and reports "Desktop app stopped responding" in its popup. A socket that never
+sends `hello` is not the app at all and is dropped after 2.5s.
+
+### 3.2.1 Port following
+
+The endpoint is not fixed at `8765`: the app's `port` is configurable and it
+falls forward to a free neighbour when the configured one is taken. The
+extension therefore keeps the last port that answered with a `hello` (persisted
+in `chrome.storage.local` as `dv_ws_port`, and re-read on every wake), and when
+an attempt finds nothing it sweeps `8765`–`8774` — the remembered port first,
+then the default neighbourhood, cycling after a full pass.
+
+**App side (same contract, the other direction):** a live `port` change does not
+wait for a restart. The app binds the new port FIRST and only then releases the
+old server, so a change can never leave it serving one port while advertising
+another; existing clients are closed with code `1001` and reconnect on the new
+port (the extension's retry-then-sweep order above is what finds it). When the
+configured port cannot be bound, the app falls forward to the next free port in
+a bounded scan (10 attempts, `WS_PORT_SCAN` in `main.js`) and **writes the port
+it actually bound back into `config.json`**, so config, `hello.port`, and the
+window's bridge panel always agree with the live socket. Only when every
+candidate is taken does it keep the old endpoint untouched — logging the reason
+and showing it in the bridge panel rather than advertising a dead port.
+
 ### 3.3 `probe`
 Ask the app to HEAD-probe a URL for size/mime (used by the extension panel).
 
@@ -150,6 +182,13 @@ Report back after a harvest triggered by the app's `dv-monitor-grab`.
 ```json
 { "type": "dv-monitor-result", "sent": 3, "remaining": 2 }
 ```
+When the crawl throttle refused part of the pass, the reply also carries
+`retryAfter` (seconds) — the exact window the client backed off for, so the two
+sides can never disagree about when the harvest resumes:
+
+```json
+{ "type": "dv-monitor-result", "sent": 0, "remaining": 2, "retryAfter": 60 }
+```
 Currently informational; the app does not act on it.
 
 ---
@@ -157,7 +196,10 @@ Currently informational; the app does not act on it.
 ## 4. App → client messages
 
 ### 4.1 `hello`
-Connection greeting — see §1.2.
+Connection greeting — see §1.2. The extension remembers the advertised
+`version`, `protocolVersion`, and `port` and renders them in its popup link
+line; a `protocolVersion` below the extension's own is reported there as an
+update hint (`app-older`), since the app accepts such a client silently.
 
 ### 4.2 `accepted`
 A `download` was accepted (replies to §3.1).
@@ -195,6 +237,29 @@ read only `message` still work). Fields:
 | `PACE_LIMITED` | crawl throttle refused a download | **yes**, `retryAfter: 60` |
 | `PROTOCOL_MISMATCH` | extension newer than the app | no |
 | `INTERNAL` | uncaught handler error | no |
+
+The extension renders a `PROTOCOL_MISMATCH` as an actionable "update Deep Video
+Downloader" warning in its popup and re-tries the link on a 60s beat (normal
+reconnects are 3s) — the app has already closed that socket with 1008, so
+retrying at the usual cadence would only flood it.
+
+A **retryable** refusal for a video the client still has pending is honored
+rather than dropped: the extension queues the url for the app's `retryAfter`
+window (`PACE_RETRY_DEFAULT_S` = 60s when the app omits it, clamped to 5
+minutes), flags the entry `retryable` with the refusal's `code` so the panel
+explains why it is still pending, and re-sends when the window closes. Those
+replies carry `queued: true` for the paths that report back to the popup
+(`add-to-list`, `send`, `add-all-found`), which is how the popup distinguishes a
+queued retry from a plain refusal instead of guessing. The queue is keyed by url
+(a re-refusal just moves the deadline) and persisted in `chrome.storage.local`
+under `dv_pace_retry`, so an MV3 service-worker eviction mid-window cannot lose
+it. A harvest **stops at the first** `PACE_LIMITED` — each further send only
+pushes the throttle's rolling window further out — and defers the rest of that
+pass on the same window; the same applies to the tail of an `add-all-found` bulk.
+A raw `send` from the popup's URL box has no pending entry to re-send (and its
+signed url may be stale by the time the window closes), so it stays a plain
+refusal (`queued: false`) the user can simply repeat. Terminal codes
+(`NO_USABLE_SOURCE`, `ENQUEUE_FAILED`, …) are never queued.
 
 ### 4.4 `pong`
 Replies to `ping`. `{ "type": "pong", "reqId": "…" }`.
@@ -257,6 +322,14 @@ lifecycle). Sent when `autoGrab` is on and a download reached `done`.
 Asks the extension to harvest (send every found-not-yet-grabbed video). Sent on
 auto-grab enable and after done downloads while auto-grab is on.
 
+Both `dv-close-tab` and `dv-monitor-grab` are sent to **every** paired
+extension, not just the first: the user's real browser extension and the app's
+own built-in-browser extension can be connected at the same time, and each one
+owns different tabs and a different found list. Each client applies the message
+to what it has (a `dv-close-tab` for a page a client does not have open is a
+no-op). The app also answers `ping` with `pong` at the WebSocket level for
+liveness and prunes a socket that misses two beats (~60s).
+
 ```json
 { "type": "dv-monitor-grab" }
 ```
@@ -303,7 +376,7 @@ app                          client
   | dv-monitor-grab             |
   |---------------------------->|
   |  (harvest: sends downloads) |
-  | dv-monitor-result {sent, remaining} |
+  | dv-monitor-result {sent, remaining, retryAfter?} |
   |<----------------------------|
 ```
 
@@ -313,7 +386,9 @@ app                          client
 
 - The app's crawl **throttle** rejects sustained download floods with
   `PACE_LIMITED` (`retryable: true`, `retryAfter: 60`) — the WS analogue of
-  HTTP 429 + Retry-After.
+  HTTP 429 + Retry-After. The extension treats it as a queued retry on that
+  window (see §4.3), not as a failed send: nothing is dropped, and the harvest
+  resumes by itself.
 - `status` pushes are broadcast to **all** connected clients; each client filters
   by `id`/`url`/`reqId`.
 - The `status` push carries both the human `error` string and a structured

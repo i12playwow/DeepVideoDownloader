@@ -37,6 +37,20 @@
   --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
 }
 
+/* Extension bridge: the paired WS clients (main.js owns the registry). */
+.client-list { list-style: none; margin: 0; padding: 0; }
+.client-row { display: flex; gap: 9px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--panel-2); margin-bottom: 6px; }
+.client-row:last-child { margin-bottom: 0; }
+.client-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; background: var(--muted); }
+.client-dot.ok { background: var(--green); }
+.client-dot.warn { background: var(--amber); }
+.client-label { font-weight: 600; }
+.client-label code { font-weight: 400; color: var(--muted); }
+.client-meta { color: var(--muted); font-size: 11px; margin-top: 1px; }
+.client-warn { color: var(--amber); font-size: 11px; margin-top: 2px; }
+.client-empty { color: var(--muted); font-size: 12px; padding: 2px 0; }
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {

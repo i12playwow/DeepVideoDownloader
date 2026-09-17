@@ -27,6 +27,19 @@
 //   NEWTV_IMPORT_URL / --newtv-url    default http://127.0.0.1:5050/api/import
 //   NEWTV_BRIDGE_MIN_MB / --min-mb    skip "done" pushes below this size (0 = off)
 //
+// Port discovery: when the import URL is left at its default, the bridge
+// discovers the desktop app's port instead of pinning 5050 — the app binds
+// 5050 when free, else the next free neighbor up to 5059, and /ping answers
+// { status:"ok", app:"NewTV", port }. Discovery scans the candidate range
+// (override with NEWTV_PORTS / --newtv-ports) and trusts only NewTV-signed
+// pings, so a foreign app on a candidate port is never mistaken for the app.
+// A scan that finds nothing LOGS the candidate ports it actually probed
+// (contiguous runs collapsed, so a sparse/comma spec keeps its real ports
+// instead of a misleading first-last span) before the relay fails loudly —
+// a mis-typed NEWTV_PORTS is then visible in the log, not silent.
+// When NEWTV_IMPORT_URL/--newtv-url IS set explicitly the behavior is exactly
+// as before: that URL is pinned, no pinging, no scanning (tests rely on it).
+//
 // Run: node scripts/newtv-catalog-bridge.js
 "use strict";
 
@@ -51,6 +64,44 @@ function parseArgs(argv) {
   return out;
 }
 
+/** Parse a port spec: "5050" → [5050]; "5050-5052" → [5050,5051,5052];
+ * "5050, 5060-5061" → [5050,5060,5061]. Invalid tokens are skipped; an
+ * empty/invalid spec yields []. Hoisted use above (NEWTV_PORTS) is safe. */
+function parsePortSpec(spec) {
+  const ports = [];
+  for (const part of String(spec || "").split(",")) {
+    const m = part.trim().match(/^(\d{1,5})(?:-(\d{1,5}))?$/);
+    if (!m) continue;
+    const lo = parseInt(m[1], 10);
+    const hi = m[2] ? parseInt(m[2], 10) : lo;
+    if (hi < lo || hi - lo > 999) continue; // sanity bounds
+    for (let p = lo; p <= hi; p++) ports.push(p);
+  }
+  return ports;
+}
+
+/** Render a candidate port set the way it was actually probed: ascending,
+ * deduped, with contiguous runs collapsed to `lo-hi`. The default 5050-5059
+ * still reads as a range, while a comma/sparse spec keeps its real ports
+ * ("5050, 52841-52844, 63417") instead of the first-last span, which would
+ * name ports nothing ever scans. Used by the startup banner, the discovery
+ * failure log, and the not-found errors. */
+function describePorts(ports) {
+  const uniq = [...new Set(Array.isArray(ports) ? ports : [])].sort((a, b) => a - b);
+  if (uniq.length === 0) return "(none)";
+  const out = [];
+  let start = uniq[0];
+  let prev = uniq[0];
+  for (const p of uniq.slice(1)) {
+    if (p === prev + 1) { prev = p; continue; }
+    out.push(start === prev ? String(start) : `${start}-${prev}`);
+    start = p;
+    prev = p;
+  }
+  out.push(start === prev ? String(start) : `${start}-${prev}`);
+  return out.join(", ");
+}
+
 const args = parseArgs(process.argv.slice(2));
 const DEEPGRAB_WS_URL = args["deepgrab-ws"] || process.env.DEEPGRAB_WS_URL || "ws://127.0.0.1:8765";
 const NEWTV_IMPORT_URL = args["newtv-url"] || process.env.NEWTV_IMPORT_URL || "http://127.0.0.1:5050/api/import";
@@ -58,6 +109,11 @@ const NEWTV_IMPORT_URL = args["newtv-url"] || process.env.NEWTV_IMPORT_URL || "h
 // set explicitly it must include the trailing base (e.g. http://127.0.0.1:5050/);
 // otherwise it is derived from NEWTV_IMPORT_URL by stripping /api/import.
 const NEWTV_BASE = args["newtv-base"] || process.env.NEWTV_BASE || NEWTV_IMPORT_URL.replace(/api\/import\/?$/, "");
+// Discovery is ACTIVE only when the import URL was NOT explicitly configured
+// (the default value means "no opinion" — pin whatever the user set).
+const NEWTV_URL_PINNED = args["newtv-url"] != null || process.env.NEWTV_IMPORT_URL != null;
+const NEWTV_PORTS_ARG = args["newtv-ports"] || process.env.NEWTV_PORTS || "";
+const NEWTV_PORTS = parsePortSpec(NEWTV_PORTS_ARG || "5050-5059");
 const NEWTV_FOLDERS_URL = NEWTV_BASE + (NEWTV_BASE.endsWith("/") ? "" : "/") + "api/watched-folders";
 // Auto-watch is on by default; disabled by the --no-auto-watch flag (any
 // value/none) or NEWTV_NO_AUTO_WATCH=1|true|yes in the environment.
@@ -176,7 +232,7 @@ function isNewWatchedFolder(dir, watched) {
   return !watched.some((w) => String(w).toLowerCase() === String(dir).toLowerCase());
 }
 
-module.exports = { TERMINAL_STATES, statusToImportPayload, shouldRelay, classifyRelay, failureSource, composeSource, splitPath, isNewWatchedFolder, parseArgs };
+module.exports = { TERMINAL_STATES, statusToImportPayload, shouldRelay, classifyRelay, failureSource, composeSource, splitPath, isNewWatchedFolder, parseArgs, parsePortSpec, describePorts };
 
 // ---------------------------------------------------------------------------
 // Runtime (only when executed directly — the contract test requires the core)
@@ -185,11 +241,89 @@ module.exports = { TERMINAL_STATES, statusToImportPayload, shouldRelay, classify
 if (require.main === module) {
   const log = (...m) => console.log(`[newtv-bridge] ${new Date().toISOString()} ${m.join(" ")}`);
 
-  log(`deepgrab ${DEEPGRAB_WS_URL} → newtv ${NEWTV_IMPORT_URL}${MIN_MB ? ` (min ${MIN_MB} MB)` : ""}`);
+  log(
+    `deepgrab ${DEEPGRAB_WS_URL} → newtv ${NEWTV_URL_PINNED ? NEWTV_IMPORT_URL : `discover ${describePorts(NEWTV_PORTS)}`}${MIN_MB ? ` (min ${MIN_MB} MB)` : ""}`
+  );
+
+  // ---- NewTV endpoint resolution (discovery / pinned) ---------------------
+  // Pinned mode (NEWTV_IMPORT_URL set): NEWTV_BASE is used as-is, no pinging.
+  // Discovery mode (default): scan candidate ports for a /ping that answers
+  // { app: "NewTV" }, cache it, and re-scan once on a connection failure so
+  // an app that moved ports (or came back on another one) heals transparently.
+  let newtvBase = NEWTV_BASE; // authoritative base URL, set by discovery
+  let resolved = NEWTV_URL_PINNED; // pinned mode needs no scan
+  let resolving = null; // in-flight scan promise (single-flight)
+
+  async function pingNewtvPort(port) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/ping`, { signal: AbortSignal.timeout(2500) });
+      const body = await res.json().catch(() => null);
+      return body && body.app === "NewTV" ? port : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function scanNewtvPorts() {
+    const results = await Promise.all(NEWTV_PORTS.map(pingNewtvPort));
+    const found = results.find((p) => p !== null && p !== undefined);
+    if (found != null) {
+      newtvBase = `http://127.0.0.1:${found}/`;
+      log(`NewTV discovered on port ${found}`);
+    } else {
+      // Name the candidates this scan really probed, so a failure is
+      // diagnosable from the log alone — an empty or mis-typed NEWTV_PORTS must
+      // not look like "the app is down". (Every retry that re-scans logs its
+      // own line, paired 1:1 with the relay's "import failed".)
+      log(`NewTV not found — scanned ${describePorts(NEWTV_PORTS)} (no /ping answered app:"NewTV")`);
+    }
+    resolved = found != null;
+    return resolved;
+  }
+
+  /** Resolve the base URL before a request: join/launch the single-flight
+   * scan in discovery mode; no-op once resolved (or when pinned). */
+  async function ensureNewtvBase() {
+    if (resolved && !resolving) return;
+    if (!resolving) resolving = scanNewtvPorts();
+    try {
+      await resolving;
+    } finally {
+      resolving = null;
+    }
+  }
+
+  /** fetch against the NewTV base with one-shot re-resolution on failure:
+   * a connection error means the cached port is stale — rescan once, retry
+   * once, so port moves heal without dropping the relay. HTTP-level errors
+   * (4xx/5xx) do NOT rescan: the app answered, so the endpoint is right.
+   * When discovery finds NOTHING, throw — never fall through to the default
+   * 5050 base, which would silently fire relays at whatever lives there (or
+   * at nothing, while believing the relay was aimed at a discovered app). */
+  async function fetchNewtv(path, options = {}) {
+    await ensureNewtvBase();
+    if (!resolved) throw new Error(`NewTV not found (scanned ${describePorts(NEWTV_PORTS)})`);
+    try {
+      return await fetch(newtvBase + path, options);
+    } catch (e) {
+      // Pinned mode means PINNED: the configured URL is authoritative, so a
+      // connection failure must surface ("import failed" log) — never a scan
+      // that could silently redirect relays to some other NewTV on loopback.
+      if (NEWTV_URL_PINNED || resolving) throw e;
+      resolving = scanNewtvPorts();
+      try {
+        await resolving;
+      } finally {
+        resolving = null;
+      }
+      if (!resolved) throw new Error(`NewTV not found after rescan (scanned ${describePorts(NEWTV_PORTS)})`);
+      return fetch(newtvBase + path, options);
+    }
+  }
 
   // ---- NewTV HTTP (plain POST/GET) ---------------------------------------
   async function importToNewtv(payload) {
-    const res = await fetch(NEWTV_IMPORT_URL, {
+    const res = await fetchNewtv("api/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -201,7 +335,7 @@ if (require.main === module) {
 
   async function getWatchedFolders() {
     try {
-      const res = await fetch(NEWTV_FOLDERS_URL);
+      const res = await fetchNewtv("api/watched-folders");
       if (!res.ok) return null;
       const list = await res.json();
       return Array.isArray(list) ? list : null;
@@ -211,7 +345,7 @@ if (require.main === module) {
   }
 
   async function addWatchedFolder(dir) {
-    const res = await fetch(NEWTV_FOLDERS_URL, {
+    const res = await fetchNewtv("api/watched-folders", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: dir }),

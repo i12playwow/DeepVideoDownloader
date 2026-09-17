@@ -1430,6 +1430,485 @@ function startServer(portRef, segBytesFn) {
   assert("P11 NEGATIVE: desktop retryable class collapsed into terminal -> guard bites",
     negRenderer11 !== rendererSrc11 && !checkRendererErr11(negRenderer11), "guard missed the desktop collapse");
 
+  // ---- P12: link-state / compat surfacing contract ----
+  // The app advertises its build version + wire protocol in `hello`, and refuses
+  // a client claiming a NEWER protocol (PROTOCOL_MISMATCH reply + close 1008).
+  // That refusal used to look exactly like an outage: the popup showed a bare
+  // "disconnected" and the user had no way to know the fix is updating the app.
+  // The SW must derive the whole link state (status + a human reason + the compat
+  // code) in linkState() and hand it to the popup, which renders it without
+  // re-deriving anything. Drives the real background.js under the chrome stub:
+  // capture its desktop-status broadcasts, feed it a hello + a mismatch reply,
+  // and read the state back through the production getStatus boundary.
+  console.log("-- P12: link-state / compat surfacing contract --");
+  const fs12 = require("fs");
+  const bgSrc12 = fs12.readFileSync("extension/background.js", "utf8").replace(/\r\n/g, "\n");
+  const popupSrc12 = fs12.readFileSync("extension/popup.js", "utf8");
+  const popupHtml12 = fs12.readFileSync("extension/popup.html", "utf8");
+  const runLink12 = async (bgSource, helloProtocol) => {
+    let listener = null;
+    const sent = []; // SW -> popup broadcasts (sendMessage with no callback)
+    const wsInstance = {
+      readyState: 1, // WebSocket.OPEN
+      onopen: null,
+      onclose: null,
+      onmessage: null,
+      addEventListener() {},
+      removeEventListener() {},
+      send() {},
+      close() {},
+    };
+    const chrome12 = {
+      storage: { local: { get() { return Promise.resolve({}); }, set() { return Promise.resolve(); } } },
+      runtime: {
+        sendMessage(msg, cb) {
+          if (typeof cb !== "function" && msg && msg.type === "desktop-status") sent.push(msg);
+          return Promise.resolve();
+        },
+        onMessage: { addListener(fn) { listener = fn; } },
+        onInstalled: { addListener() {} },
+        onStartup: { addListener() {} },
+      },
+      action: { onClicked: { addListener() {} } },
+      tabs: { onRemoved: { addListener() {} }, get() { return Promise.resolve(null); }, query() { return Promise.resolve([]); } },
+      tabGroups: {}, windows: {},
+      cookies: { getAll() { return Promise.resolve([]); } },
+      webRequest: { onBeforeRequest: { addListener() {} }, onHeadersReceived: { addListener() {} } },
+    };
+    function WsStub12() { return wsInstance; }
+    WsStub12.OPEN = 1; WsStub12.CONNECTING = 0; WsStub12.CLOSING = 2; WsStub12.CLOSED = 3;
+    new Function("chrome", "WebSocket", "self", "console", bgWithGuards(bgSource) + "\n;return true;")(chrome12, WsStub12, {}, console);
+    if (typeof wsInstance.onmessage !== "function" || typeof wsInstance.onopen !== "function") throw new Error("P12 sandbox wiring failed");
+    const getState = () => new Promise((resolve) => { listener({ type: "getStatus" }, {}, (r) => resolve(r)); });
+    const push = (data) => wsInstance.onmessage({ data: JSON.stringify(data) });
+    const connecting = await getState(); // status at eval time, before any handshake
+    wsInstance.onopen(); // the app accepted the socket
+    push({ type: "hello", version: "1.3.12", protocolVersion: helloProtocol == null ? 1 : helloProtocol, port: 8765 });
+    const helloState = await getState();
+    const helloBroadcast = sent[sent.length - 1];
+    push({ type: "error", code: "PROTOCOL_MISMATCH", message: "Extension is newer than the app", url: "", retryable: false });
+    const mismatch = await getState();
+    return { connecting, helloState, mismatch, helloBroadcast, lastBroadcast: sent[sent.length - 1] };
+  };
+  const st12 = await runLink12(bgSrc12);
+  assert("P12 pre-handshake state reads as connecting with a reason",
+    !!(st12.connecting && st12.connecting.ok === false && st12.connecting.status === "connecting" && /Connecting/.test(st12.connecting.detail || "")),
+    JSON.stringify(st12.connecting));
+  assert("P12 app hello identity reaches the popup link state (version + protocol)",
+    !!(st12.helloState && st12.helloState.ok === true && st12.helloState.status === "online" &&
+      st12.helloState.appVersion === "1.3.12" && st12.helloState.appProtocol === 1 &&
+      /1\.3\.12/.test(st12.helloState.detail || "") && /protocol v1/.test(st12.helloState.detail || "") && st12.helloState.code === ""),
+    JSON.stringify(st12.helloState));
+  assert("P12 the hello identity is broadcast to the popup, not only pullable",
+    !!(st12.helloBroadcast && st12.helloBroadcast.type === "desktop-status" && st12.helloBroadcast.appVersion === "1.3.12" && st12.helloBroadcast.appProtocol === 1),
+    JSON.stringify(st12.helloBroadcast));
+  assert("P12 a PROTOCOL_MISMATCH refusal is surfaced as the actionable cause (not a bare disconnected)",
+    !!(st12.mismatch && st12.mismatch.ok === false && st12.mismatch.status === "offline" && st12.mismatch.code === "extension-newer" &&
+      /Update Deep Video Downloader/.test(st12.mismatch.detail || "")),
+    JSON.stringify(st12.mismatch));
+  assert("P12 the mismatch is pushed to the popup too (lastBroadcast carries the code)",
+    !!(st12.lastBroadcast && st12.lastBroadcast.type === "desktop-status" && st12.lastBroadcast.code === "extension-newer"),
+    JSON.stringify(st12.lastBroadcast));
+  // Version skew the OTHER way: an app whose advertised protocol is behind ours
+  // is still accepted by the app (only a newer client is refused), so the SW has
+  // to flag the skew itself. Drive it by evaluating the same source with a bumped
+  // extension protocol against a v1 hello.
+  const skewSrc12 = bgSrc12.replace("const EXT_PROTOCOL_VERSION = 1;", "const EXT_PROTOCOL_VERSION = 2;");
+  assert("P12 version-skew drill hook applied (EXT_PROTOCOL_VERSION bump)",
+    skewSrc12 !== bgSrc12, "drill could not bump EXT_PROTOCOL_VERSION");
+  const skew12 = await runLink12(skewSrc12);
+  assert("P12 an app advertising an older protocol is flagged app-older with an update hint",
+    !!(skew12.helloState && skew12.helloState.code === "app-older" && skew12.helloState.ok === true &&
+      /Update Deep Video Downloader/.test(skew12.helloState.detail || "")),
+    JSON.stringify(skew12.helloState));
+  assert("P12 an incompatible app backs off to the slow retry beat",
+    bgSrc12.includes('compat === "extension-newer" ? RECONNECT_INCOMPATIBLE_DELAY : RECONNECT_DELAY') &&
+    bgSrc12.includes("const RECONNECT_INCOMPATIBLE_DELAY"), "backoff wiring missing");
+  // The popup now NAMES the app it is paired with, so the hello version must be
+  // the real build: a hardcoded literal would show every user a bogus version.
+  const appSrc12 = fs12.readFileSync("main.js", "utf8");
+  assert("P12 the app hello advertises the real build version (not a hardcoded literal)",
+    appSrc12.includes("version: APP_VERSION") && appSrc12.includes("const APP_VERSION = app.getVersion()"),
+    "hello version is not derived from the app build");
+  const checkLink12 = (bgSrc, popupSrc, htmlSrc) =>
+    bgSrc.includes("function linkState()") &&
+    bgSrc.includes('m.type === "hello"') &&
+    bgSrc.includes('m.code === "PROTOCOL_MISMATCH"') &&
+    bgSrc.includes('compat = "extension-newer"') &&
+    bgSrc.includes("sendResponse(linkState())") &&
+    popupSrc.includes("function renderDetail(s)") &&
+    popupSrc.includes('s.code === "extension-newer"') &&
+    popupSrc.includes('actionable ? "compat" : ""') &&
+    htmlSrc.includes('id="status-detail"');
+  assert("P12 SW derives + popup renders the link reason (linkState / renderDetail / status-detail slot)",
+    checkLink12(bgSrc12, popupSrc12, popupHtml12), "link-state surfacing missing");
+  const neg12a = bgSrc12.replace('if (m && m.type === "hello") {', "if (false) { /* P12 hello branch stripped */");
+  assert("P12 NEGATIVE: app hello branch stripped -> guard bites",
+    neg12a !== bgSrc12 && !checkLink12(neg12a, popupSrc12, popupHtml12), "guard missed the hello strip");
+  const neg12b = bgSrc12.replace('sendResponse(linkState())', 'sendResponse({ ok: wsStatus === "online" })');
+  assert("P12 NEGATIVE: link state downgraded to the legacy {ok} reply -> guard bites",
+    neg12b !== bgSrc12 && !checkLink12(neg12b, popupSrc12, popupHtml12), "guard missed the reply downgrade");
+  const neg12c = popupSrc12.replace('actionable ? "compat" : ""', '""');
+  assert("P12 NEGATIVE: popup compat styling stripped -> guard bites",
+    neg12c !== popupSrc12 && !checkLink12(bgSrc12, neg12c, popupHtml12), "guard missed the popup strip");
+
+  // ---- P13: port following + heartbeat (extension) and fan-out + paired-client
+  //          registry (app window) ----
+  // The app's WS port is configurable and it falls forward to a free neighbour,
+  // so an extension pinned to 8765 silently loses the link. The SW must
+  // remember the port the app answered on, sweep the neighbourhood when an
+  // attempt finds nothing, and refuse to sit on a port that never greets it.
+  // It must also notice a socket that stopped answering (heartbeat) instead of
+  // reporting progress forever. On the app side, auto-grab pushes (close-tab /
+  // monitor-grab) must reach EVERY paired extension — the user's real Chrome and
+  // the app's built-in browser can both be connected — and the window must show
+  // who is paired. Drives the real background.js under a stub WebSocket so the
+  // connect sequence is observable, plus source pins for the app-side wiring.
+  console.log("-- P13: port following + heartbeat + paired-client fan-out --");
+  const fs13 = require("fs");
+  const bgSrc13 = fs13.readFileSync("extension/background.js", "utf8").replace(/\r\n/g, "\n");
+  const mainSrc13 = fs13.readFileSync("main.js", "utf8").replace(/\r\n/g, "\n");
+  const ipcSrc13 = fs13.readFileSync("lib/ipc.js", "utf8");
+  const preloadSrc13 = fs13.readFileSync("preload.js", "utf8");
+  const rendererSrc13 = fs13.readFileSync("renderer.js", "utf8");
+  const htmlSrc13 = fs13.readFileSync("renderer.html", "utf8");
+  const runBridge13 = (bgSource) => {
+    let listener = null;
+    const sockets = [];
+    const stored = [];
+    // Every link state pushed to the popup (chrome.runtime.sendMessage), so an
+    // assertion can see WHAT the popup was handed at a given moment instead of
+    // only the state it could pull later.
+    const pushed = [];
+    class WsStub13 {
+      constructor(url) {
+        this.url = url;
+        this.readyState = 0; // CONNECTING
+        this.sent = [];
+        this.closed = 0;
+        this.onopen = null; this.onclose = null; this.onmessage = null; this.onerror = null;
+        sockets.push(this);
+      }
+      send(data) { this.sent.push(String(data)); }
+      // Faithful close: a real socket fires onclose exactly once (the SW's
+      // reconnect path depends on it, and the hello-watch close must be
+      // observable as a reconnect — not a silent no-op).
+      close() {
+        if (this.readyState === 3) return;
+        this.closed++;
+        this.readyState = 3;
+        const cb = this.onclose;
+        if (cb) setTimeout(cb, 0);
+      }
+      addEventListener() {}
+      removeEventListener() {}
+    }
+    WsStub13.OPEN = 1; WsStub13.CONNECTING = 0; WsStub13.CLOSING = 2; WsStub13.CLOSED = 3;
+    const chrome13 = {
+      storage: {
+        local: {
+          get() { return Promise.resolve({}); },
+          set(obj) { stored.push(obj); return Promise.resolve(); }
+        }
+      },
+      runtime: {
+        sendMessage(msg) { pushed.push(msg); return Promise.resolve(); },
+        onMessage: { addListener(fn) { listener = fn; } },
+        onInstalled: { addListener() {} },
+        onStartup: { addListener() {} },
+      },
+      action: { onClicked: { addListener() {} } },
+      tabs: { onRemoved: { addListener() {} }, get() { return Promise.resolve(null); }, query() { return Promise.resolve([]); } },
+      tabGroups: {}, windows: {},
+      cookies: { getAll() { return Promise.resolve([]); } },
+      webRequest: { onBeforeRequest: { addListener() {} }, onHeadersReceived: { addListener() {} } },
+    };
+    new Function("chrome", "WebSocket", "self", "console", bgWithGuards(bgSource) + "\n;return true;")(chrome13, WsStub13, {}, console);
+    const open = (s) => { s.readyState = 1; s.onopen(); };
+    const closeFromPeer = (s) => { s.readyState = 3; s.onclose(); };
+    const push = (s, data) => s.onmessage({ data: JSON.stringify(data) });
+    const frames = (s) => s.sent.map((x) => { try { return JSON.parse(x); } catch (e) { return {}; } });
+    const state = () => new Promise((resolve) => { listener({ type: "getStatus" }, {}, (r) => resolve(r)); });
+    return { sockets, stored, pushed, open, closeFromPeer, push, frames, state };
+  };
+  // ---- port following: sweep, hello-proves-the-port, and no progress on a
+  // stranger's port ----
+  const b13 = runBridge13(bgSrc13);
+  assert("P13 the extension connects to the default port from the WS_URL literal (8765)",
+    b13.sockets.length === 1 && /:8765$/.test(b13.sockets[0].url), JSON.stringify(b13.sockets.map((s) => s.url)));
+  b13.open(b13.sockets[0]);
+  assert("P13 a fresh socket still announces itself with hello",
+    b13.frames(b13.sockets[0]).some((f) => f.type === "hello"), JSON.stringify(b13.frames(b13.sockets[0])));
+  // Nothing greets us: the socket is dropped instead of being treated as the app.
+  const strangerDropped = await waitForCondition(() => b13.sockets[0].closed >= 1, 6000);
+  assert("P13 a socket that never greets is dropped (not the app)", strangerDropped,
+    "closed=" + b13.sockets[0].closed);
+  // ...and the sweep moves on to the next port in the neighbourhood.
+  const swept = await waitForCondition(() => b13.sockets.length >= 2, 8000);
+  assert("P13 an unproven port is swept past (8765 -> 8766)",
+    swept && /:8766$/.test(b13.sockets[1].url), JSON.stringify(b13.sockets.map((s) => s.url)));
+  // The app's hello proves the port: it is remembered, and the link line names it.
+  b13.open(b13.sockets[1]);
+  b13.push(b13.sockets[1], { type: "hello", version: "1.3.12", protocolVersion: 1, port: 8766 });
+  const proven = await b13.state();
+  assert("P13 the port that answered with a hello is remembered for the next SW wake",
+    b13.stored.some((o) => o.dv_ws_port === 8766), JSON.stringify(b13.stored));
+  assert("P13 the link line names the port the app answered on",
+    !!proven && proven.ok === true && proven.port === 8766 && /port 8766/.test(proven.detail || ""), JSON.stringify(proven));
+  // A proven port is retried in place (a dropped socket is not a port change).
+  b13.closeFromPeer(b13.sockets[1]);
+  const retried = await waitForCondition(() => b13.sockets.length >= 3, 8000);
+  assert("P13 a proven port is retried in place rather than swept past",
+    retried && /:8766$/.test(b13.sockets[2].url), JSON.stringify(b13.sockets.map((s) => s.url)));
+  // ---- heartbeat: ping on the wire, pong keeps it alive, a missed pong reconnects
+  const hb13 = runBridge13(bgSrc13
+    .replace("const PING_INTERVAL_MS = 20000;", "const PING_INTERVAL_MS = 300;")
+    .replace("const PONG_TIMEOUT_MS = 8000;", "const PONG_TIMEOUT_MS = 250;"));
+  assert("P13 heartbeat drill hook applied (ping/pong constants shrunk)",
+    hb13.sockets.length >= 1, "drill could not shrink the heartbeat constants");
+  hb13.open(hb13.sockets[0]);
+  const pinged = await waitForCondition(() => hb13.frames(hb13.sockets[0]).some((f) => f.type === "ping"), 4000);
+  assert("P13 the extension pings the app on its heartbeat interval", pinged,
+    JSON.stringify(hb13.frames(hb13.sockets[0])));
+  hb13.push(hb13.sockets[0], { type: "pong" });
+  await new Promise((r) => setTimeout(r, 400));
+  assert("P13 a pong keeps the socket alive (no false reconnect)",
+    hb13.sockets[0].closed === 0, "closed=" + hb13.sockets[0].closed);
+  const wentStale = await waitForCondition(() => hb13.sockets[0].closed >= 1, 6000);
+  assert("P13 a missed pong deadline closes the dead socket", wentStale, "closed=" + hb13.sockets[0].closed);
+  const staleState = await hb13.state();
+  assert("P13 the popup learns the app stopped responding (stale, not silent)",
+    !!staleState && staleState.stale === true && /stopped responding/.test(staleState.detail || ""), JSON.stringify(staleState));
+  // ...and the link is written off the moment the deadline misses, not a tick
+  // later when the async close lands: the FIRST state pushed after the heartbeat
+  // gave up must already say offline, or the popup renders a connected pill next
+  // to the stale "stopped responding" detail.
+  const firstStalePush = hb13.pushed.find((m) => m && m.type === "desktop-status" && m.stale === true);
+  assert("P13 the first link state pushed after the missed pong is already offline",
+    !!firstStalePush && firstStalePush.ok === false && firstStalePush.status === "offline",
+    JSON.stringify(firstStalePush));
+  // ---- app side: fan-out to EVERY paired extension + the paired-client panel ----
+  const checkBridge13 = (mainSrc, ipcSrc, preloadSrc, rendererSrc, htmlSrc) =>
+    mainSrc.includes("const extClients = clients.filter(") &&
+    // BOTH auto-grab pushes (close-tab and monitor-grab) fan out, not just one.
+    (mainSrc.match(/for \(const c of extClients\)/g) || []).length >= 2 &&
+    // The old first-extension-only lookup must not come back.
+    !mainSrc.includes("clients.find((c) => c.readyState === 1 && c.isExtension)") &&
+    mainSrc.includes("function describeClient(") &&
+    mainSrc.includes("ws.meta = {") &&
+    mainSrc.includes("function clientSnapshot()") &&
+    mainSrc.includes("function pushClients()") &&
+    mainSrc.includes("const WS_KEEPALIVE_MS") &&
+    ipcSrc.includes('ipcMain.handle("clients-list"') &&
+    preloadSrc.includes('onClients: (cb) => ipcRenderer.on("ws-clients"') &&
+    rendererSrc.includes("function renderBridge(snap)") &&
+    rendererSrc.includes("window.api.onClients(") &&
+    htmlSrc.includes('id="bridgeClients"') && htmlSrc.includes('id="bridgeSummary"');
+  assert("P13 app pushes auto-grab to every extension + tracks and shows the paired clients",
+    checkBridge13(mainSrc13, ipcSrc13, preloadSrc13, rendererSrc13, htmlSrc13), "paired-client wiring missing");
+  const neg13a = mainSrc13.replace("const extClients = clients.filter((c) => c.readyState === 1 && c.isExtension);",
+    "const extClients = [clients.find((c) => c.readyState === 1 && c.isExtension)];");
+  assert("P13 NEGATIVE: fan-out narrowed back to the first extension -> guard bites",
+    neg13a !== mainSrc13 && !checkBridge13(neg13a, ipcSrc13, preloadSrc13, rendererSrc13, htmlSrc13), "guard missed the narrowing");
+  const neg13b = mainSrc13.replace("for (const c of extClients) {", "for (const c of extClients.slice(0, 1)) {");
+  assert("P13 NEGATIVE: one auto-grab push fanned out to a single client -> guard bites",
+    neg13b !== mainSrc13 && !checkBridge13(neg13b, ipcSrc13, preloadSrc13, rendererSrc13, htmlSrc13), "guard missed the single-client push");
+  const neg13c = mainSrc13.replace("function describeClient(", "function describeClientRemoved(");
+  assert("P13 NEGATIVE: client labelling stripped -> guard bites",
+    neg13c !== mainSrc13 && !checkBridge13(neg13c, ipcSrc13, preloadSrc13, rendererSrc13, htmlSrc13), "guard missed the label strip");
+  const neg13d = rendererSrc13.replace("window.api.onClients(", "window.api.onClientsRemoved(");
+  assert("P13 NEGATIVE: renderer push subscription stripped -> guard bites",
+    neg13d !== rendererSrc13 && !checkBridge13(mainSrc13, ipcSrc13, preloadSrc13, neg13d, htmlSrc13), "guard missed the renderer strip");
+
+  // ---- P14: pace-limited retry (the app's retryAfter is honored) ----
+  // The app's crawl throttle refuses a sustained flood with PACE_LIMITED
+  // (`retryable: true`, `retryAfter: 60`). The SW used to drop those fields and
+  // treat the refusal as terminal, so a throttled harvest stalled: the entry sat
+  // in `found` with added:false and nothing ever re-sent it. The SW must queue
+  // the url for the window the app asked for, STOP the pass on the first refusal
+  // (each extra send only pushes the throttle's rolling window further out), and
+  // re-send when the window closes. Drives the real background.js against a stub
+  // WebSocket that plays the app: it refuses the first download with PACE_LIMITED
+  // and accepts the retry that follows the window.
+  console.log("-- P14: pace-limited retry honors the app's retryAfter --");
+  const fs14 = require("fs");
+  const bgSrc14 = fs14.readFileSync("extension/background.js", "utf8").replace(/\r\n/g, "\n");
+  const popupSrc14 = fs14.readFileSync("extension/popup.js", "utf8").replace(/\r\n/g, "\n");
+  const mainSrc14 = fs14.readFileSync("main.js", "utf8").replace(/\r\n/g, "\n");
+  const runPace14 = (bgSource) => {
+    let listener = null;
+    const stored = [];
+    const sockets = [];
+    class WsStub14 {
+      constructor(url) {
+        this.url = url;
+        this.readyState = 0; // CONNECTING
+        this.sent = [];
+        this.closed = 0;
+        this.onopen = null; this.onclose = null; this.onmessage = null; this.onerror = null;
+        this.msgListeners = []; // sendInner's addEventListener("message") correlation hook
+        sockets.push(this);
+      }
+      send(data) { this.sent.push(String(data)); }
+      close() {
+        if (this.readyState === 3) return;
+        this.closed++;
+        this.readyState = 3;
+        const cb = this.onclose;
+        if (cb) setTimeout(cb, 0);
+      }
+      addEventListener(type, fn) { if (type === "message") this.msgListeners.push(fn); }
+      removeEventListener(type, fn) { this.msgListeners = this.msgListeners.filter((f) => f !== fn); }
+    }
+    WsStub14.OPEN = 1; WsStub14.CONNECTING = 0; WsStub14.CLOSING = 2; WsStub14.CLOSED = 3;
+    const chrome14 = {
+      storage: {
+        local: {
+          get() { return Promise.resolve({}); },
+          set(obj) { stored.push(obj); return Promise.resolve(); }
+        }
+      },
+      runtime: {
+        sendMessage() { return Promise.resolve(); },
+        onMessage: { addListener(fn) { listener = fn; } },
+        onInstalled: { addListener() {} },
+        onStartup: { addListener() {} },
+      },
+      action: { onClicked: { addListener() {} } },
+      tabs: { onRemoved: { addListener() {} }, get() { return Promise.resolve(null); }, query() { return Promise.resolve([]); } },
+      tabGroups: {}, windows: {},
+      cookies: { getAll() { return Promise.resolve([]); } },
+      webRequest: { onBeforeRequest: { addListener() {} }, onHeadersReceived: { addListener() {} } },
+    };
+    new Function("chrome", "WebSocket", "self", "console", bgWithGuards(bgSource) + "\n;return true;")(chrome14, WsStub14, {}, console);
+    const frames = (s) => s.sent.map((x) => { try { return JSON.parse(x); } catch (e) { return {}; } });
+    // Deliver an app -> client message to BOTH handlers: the SW's onmessage and
+    // the per-request correlation listener sendInner registers.
+    const deliver = (s, data) => {
+      const ev = { data: JSON.stringify(data) };
+      if (typeof s.onmessage === "function") s.onmessage(ev);
+      for (const fn of s.msgListeners.slice()) fn(ev);
+    };
+    const seed = (v, tabId) => listener({ type: "video-found", ...v }, { tab: { id: tabId } }, () => {});
+    const foundState = () => new Promise((resolve) => { listener({ type: "get-found" }, {}, (r) => resolve(r)); });
+    const request = (msg) => new Promise((resolve) => { listener(msg, {}, (r) => resolve(r)); });
+    return { sockets, stored, deliver, frames, seed, foundState, request };
+  };
+  const p14 = runPace14(bgSrc14);
+  const sock14 = p14.sockets[0];
+  sock14.readyState = 1;
+  sock14.onopen();
+  p14.deliver(sock14, { type: "hello", version: "1.3.12", protocolVersion: 1, port: 8765 });
+  const A14 = "http://127.0.0.1/movies/a.mp4";
+  const B14 = "http://127.0.0.1/movies/b.mp4";
+  p14.seed({ url: A14, title: "a.mp4", pageUrl: "http://127.0.0.1/movies/a/", kind: "mp4" }, 1);
+  p14.seed({ url: B14, title: "b.mp4", pageUrl: "http://127.0.0.1/movies/b/", kind: "mp4" }, 1);
+  const seeded14 = await p14.foundState();
+  assert("P14 drill seeded two pending videos",
+    !!(seeded14 && Array.isArray(seeded14.found) && seeded14.found.length === 2),
+    JSON.stringify(seeded14 && seeded14.found && seeded14.found.map((x) => x.url)));
+  const downloads14 = () => p14.frames(sock14).filter((f) => f.type === "download");
+  // The app drives the harvest; the first video is refused the way the throttle does.
+  p14.deliver(sock14, { type: "dv-monitor-grab" });
+  const firstSent14 = await waitForCondition(() => downloads14().length >= 1, 4000);
+  const dl14 = downloads14()[0];
+  assert("P14 the harvest sends the first pending video to the app",
+    firstSent14 && !!dl14 && dl14.url === A14, JSON.stringify(dl14));
+  p14.deliver(sock14, {
+    type: "error", code: "PACE_LIMITED", message: "Pace limit: too many downloads in the last minute.",
+    url: A14, reqId: dl14 && dl14.reqId, retryable: true, retryAfter: 1
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  assert("P14 a pace refusal stops the pass instead of hammering every remaining video",
+    downloads14().length === 1, JSON.stringify(downloads14().map((f) => f.url)));
+  const result14 = p14.frames(sock14).filter((f) => f.type === "dv-monitor-result").pop();
+  assert("P14 the harvest reply reports the app's window (retryAfter) instead of stalling silently",
+    !!(result14 && result14.sent === 0 && result14.remaining === 2 && result14.retryAfter === 1), JSON.stringify(result14));
+  const marked14 = await p14.foundState();
+  const aMarked14 = (marked14.found || []).find((x) => x.url === A14);
+  assert("P14 the throttled entry is flagged retryable (PACE_LIMITED) rather than left silent",
+    !!(aMarked14 && aMarked14.retryable === true && aMarked14.errorCode === "PACE_LIMITED"), JSON.stringify(aMarked14));
+  assert("P14 the queued retry is persisted, so an MV3 eviction cannot lose it",
+    p14.stored.some((o) => Array.isArray(o.dv_pace_retry) && o.dv_pace_retry.length >= 1),
+    JSON.stringify(p14.stored));
+  // The window closes: the refused send is retried (and the deferred tail with it).
+  const retried14 = await waitForCondition(() => downloads14().filter((f) => f.url === A14).length >= 2, 6000);
+  assert("P14 a throttled send is retried after the app's retryAfter window", retried14,
+    JSON.stringify(downloads14().map((f) => f.url)));
+  // Accept everything outstanding (the retry, then the deferred tail) and confirm
+  // the pending list actually drains — the stall this drill exists to prevent.
+  const answered14 = new Set();
+  const answer14 = () => {
+    for (const f of downloads14()) {
+      const key = f.reqId || f.url;
+      if (answered14.has(key)) continue;
+      answered14.add(key);
+      p14.deliver(sock14, { type: "accepted", id: "dl-" + f.url, url: f.url, reqId: f.reqId });
+    }
+  };
+  let drained14 = await p14.foundState();
+  const drainStart14 = Date.now();
+  while (drained14 && drained14.found.length && Date.now() - drainStart14 < 6000) {
+    answer14();
+    await new Promise((r) => setTimeout(r, 100));
+    drained14 = await p14.foundState();
+  }
+  assert("P14 the retried harvest drains the pending list (nothing left stalled)",
+    !!(drained14 && drained14.found.length === 0),
+    JSON.stringify(drained14 && drained14.found.map((x) => x.url)));
+  // A raw Send (the popup's URL box) has no pending entry to re-send, so its
+  // refusal must stay a plain refusal and SAY so — promising a retry the SW will
+  // not make is the same lie as reporting a queued retry as a failure.
+  const rawUrl14 = "http://127.0.0.1/raw.mp4";
+  const rawReply14 = await new Promise((resolve) => {
+    p14.request({ type: "send", url: rawUrl14, title: "", referer: "" }).then(resolve);
+    waitForCondition(() => p14.frames(sock14).some((f) => f.type === "download" && f.url === rawUrl14), 4000).then((ok) => {
+      const f = p14.frames(sock14).find((x) => x.type === "download" && x.url === rawUrl14);
+      if (ok && f) {
+        p14.deliver(sock14, {
+          type: "error", code: "PACE_LIMITED", message: "Pace limit: too many downloads in the last minute.",
+          url: rawUrl14, reqId: f.reqId, retryable: true, retryAfter: 1
+        });
+      }
+    });
+  });
+  assert("P14 a raw Send with no pending entry is not promised a retry (queued stays false)",
+    !!(rawReply14 && rawReply14.ok === false && rawReply14.retryable === true && !rawReply14.queued),
+    JSON.stringify(rawReply14));
+  // Source pins: the app must keep advertising the window (the extension is the
+  // consumer), and the popup must say a queued send is retrying, not failed.
+  const checkPace14 = (bgSrc, popupSrc, appSrc) =>
+    bgSrc.includes("retryable: !!r.retryable") &&
+    bgSrc.includes("deferPaceRetry(url, r.retryAfter)") &&
+    bgSrc.includes("async function runHarvest()") &&
+    bgSrc.includes("retryAfterMs = paceRetryMs(r.retryAfter)") &&
+    bgSrc.includes("PACE_QUEUE_KEY") &&
+    bgSrc.includes("restorePaceQueue();") &&
+    bgSrc.includes("queued: true") &&
+    bgSrc.includes("reply.retryAfter = Math.round(r.retryAfterMs / 1000)") &&
+    popupSrc.includes('if (r.queued) return "⟳ "') &&
+    appSrc.includes("retryAfter: 60");
+  assert("P14 the pace window is honored end to end (SW queue + popup wording + app advertisement)",
+    checkPace14(bgSrc14, popupSrc14, mainSrc14), "pace-retry wiring missing");
+  const neg14a = bgSrc14.replace("retryable: !!r.retryable", "retryable: false");
+  assert("P14 NEGATIVE: the structured retryable flag dropped in grabUrl -> guard bites",
+    neg14a !== bgSrc14 && !checkPace14(neg14a, popupSrc14, mainSrc14), "guard missed the flag drop");
+  const neg14b = bgSrc14.replace("deferPaceRetry(url, r.retryAfter);", "");
+  assert("P14 NEGATIVE: the refusal no longer queued -> guard bites",
+    neg14b !== bgSrc14 && !checkPace14(neg14b, popupSrc14, mainSrc14), "guard missed the queue removal");
+  const neg14c = bgSrc14.replace("retryAfterMs = paceRetryMs(r.retryAfter);", "retryAfterMs = 0;");
+  assert("P14 NEGATIVE: the harvest stops reporting the window -> guard bites",
+    neg14c !== bgSrc14 && !checkPace14(neg14c, popupSrc14, mainSrc14), "guard missed the window drop");
+  const neg14d = popupSrc14.replace('if (r.queued) return "⟳ "', 'if (false) return "⟳ "');
+  assert("P14 NEGATIVE: a queued retry reads as a hard failure again -> guard bites",
+    neg14d !== popupSrc14 && !checkPace14(bgSrc14, neg14d, mainSrc14), "guard missed the popup revert");
+  const neg14f = popupSrc14.replace('if (r.queued) return "⟳ "', 'if (r.retryable) return "⟳ "');
+  assert("P14 NEGATIVE: the popup promises a retry the SW never queued -> guard bites",
+    neg14f !== popupSrc14 && !checkPace14(bgSrc14, neg14f, mainSrc14), "guard missed the unqueued promise");
+  const neg14e = mainSrc14.replace("retryAfter: 60", "retryAfter: 0");
+  assert("P14 NEGATIVE: the app stops advertising the window -> guard bites",
+    neg14e !== mainSrc14 && !checkPace14(bgSrc14, popupSrc14, neg14e), "guard missed the app revert");
+
   // ---- P5: preload / renderer IPC contract ----
   // Every window.api.<method> a renderer file calls must exist in the preload
   // it runs under, and every ipc channel a preload touches must have an ipcMain
