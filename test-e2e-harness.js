@@ -1576,6 +1576,10 @@ function startServer(portRef, segBytesFn) {
     let listener = null;
     const sockets = [];
     const stored = [];
+    // Every link state pushed to the popup (chrome.runtime.sendMessage), so an
+    // assertion can see WHAT the popup was handed at a given moment instead of
+    // only the state it could pull later.
+    const pushed = [];
     class WsStub13 {
       constructor(url) {
         this.url = url;
@@ -1608,7 +1612,7 @@ function startServer(portRef, segBytesFn) {
         }
       },
       runtime: {
-        sendMessage() { return Promise.resolve(); },
+        sendMessage(msg) { pushed.push(msg); return Promise.resolve(); },
         onMessage: { addListener(fn) { listener = fn; } },
         onInstalled: { addListener() {} },
         onStartup: { addListener() {} },
@@ -1625,7 +1629,7 @@ function startServer(portRef, segBytesFn) {
     const push = (s, data) => s.onmessage({ data: JSON.stringify(data) });
     const frames = (s) => s.sent.map((x) => { try { return JSON.parse(x); } catch (e) { return {}; } });
     const state = () => new Promise((resolve) => { listener({ type: "getStatus" }, {}, (r) => resolve(r)); });
-    return { sockets, stored, open, closeFromPeer, push, frames, state };
+    return { sockets, stored, pushed, open, closeFromPeer, push, frames, state };
   };
   // ---- port following: sweep, hello-proves-the-port, and no progress on a
   // stranger's port ----
@@ -1675,6 +1679,14 @@ function startServer(portRef, segBytesFn) {
   const staleState = await hb13.state();
   assert("P13 the popup learns the app stopped responding (stale, not silent)",
     !!staleState && staleState.stale === true && /stopped responding/.test(staleState.detail || ""), JSON.stringify(staleState));
+  // ...and the link is written off the moment the deadline misses, not a tick
+  // later when the async close lands: the FIRST state pushed after the heartbeat
+  // gave up must already say offline, or the popup renders a connected pill next
+  // to the stale "stopped responding" detail.
+  const firstStalePush = hb13.pushed.find((m) => m && m.type === "desktop-status" && m.stale === true);
+  assert("P13 the first link state pushed after the missed pong is already offline",
+    !!firstStalePush && firstStalePush.ok === false && firstStalePush.status === "offline",
+    JSON.stringify(firstStalePush));
   // ---- app side: fan-out to EVERY paired extension + the paired-client panel ----
   const checkBridge13 = (mainSrc, ipcSrc, preloadSrc, rendererSrc, htmlSrc) =>
     mainSrc.includes("const extClients = clients.filter(") &&

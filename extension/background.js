@@ -484,12 +484,15 @@ function startHeartbeat() {
 }
 
 // The socket still reads OPEN but the app stopped answering: close it so onclose
-// drives a normal reconnect, and tell the popup why the link blinked.
+// drives a normal reconnect, and tell the popup why the link blinked. Offline is
+// reported HERE, as the link is written off — onclose's own setStatus("offline")
+// lands a tick later (the stub/real close is async), and until then the popup
+// would render an "online" pill next to stale link state.
 function aliveFail() {
   if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }
   staleAt = Date.now();
   try { ws.close(); } catch (e) { /* ignore */ }
-  broadcastStatus();
+  setStatus("offline");
 }
 
 function connect(port) {
