@@ -1838,6 +1838,14 @@ class DownloadManager {
     const item = this.items.get(id);
     if (!item) return;
     if (item.status === "paused" || item.status === "error" || item.status === "scheduled") {
+      // Manual resume means "start now": a future scheduledStart would bounce
+      // the item straight back to scheduled inside pump(), and an already
+      // elapsed scheduledStop would pause it again on the next sweep, so both
+      // are dropped. A stop still in the future is kept — when to stop is a
+      // separate instruction from when to start.
+      const now = Date.now();
+      if (item.scheduledStart && now < item.scheduledStart) item.scheduledStart = null;
+      if (item.scheduledStop && now >= item.scheduledStop) item.scheduledStop = null;
       item.status = "queued";
       this._queuedIds.add(item.id);
       this._clearError(item);

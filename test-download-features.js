@@ -88,6 +88,60 @@ const netErr = () => { const e = new Error("network down"); e.category = "networ
     cleanup(dir);
   })();
 
+  // ---- manual resume of a scheduled item (the row's Resume button) ---------
+  // The bug this pins: resume() flipped status to queued but kept the future
+  // scheduledStart, so pump() parked the item straight back into scheduled and
+  // the button looked dead.
+  await (async () => {
+    const { dm, dir } = makeDm({ concurrency: 1 });
+    let runs = 0;
+    dm.run = async (item) => { runs++; item.status = "done"; };
+    const id = await dm.enqueue({ url: "https://example.com/now.mp4", title: "now",
+      scheduledStart: new Date(Date.now() + 3600000).toISOString() });
+    await sleep(40);
+    t("future scheduledStart parks the item in scheduled", () => {
+      assert.strictEqual(dm.items.get(id).status, "scheduled");
+      assert.strictEqual(runs, 0);
+    });
+    dm.resume(id);
+    t("resume() on a scheduled item drops the future start (start-now intent)", () => {
+      assert.strictEqual(dm.items.get(id).scheduledStart, null);
+    });
+    const it = await waitFor(dm, id, ["done"], 3000);
+    t("resume() on a scheduled item actually starts the download now", () => {
+      assert.strictEqual(runs, 1, "the download must run without waiting for the schedule");
+      assert.strictEqual(it.status, "done");
+    });
+    cleanup(dir);
+  })();
+
+  await (async () => {
+    const { dm, dir } = makeDm({ concurrency: 1 });
+    dm.run = async (item) => { item.status = "done"; };
+    // An elapsed stop must not re-pause what resume just started...
+    const id = await dm.enqueue({ url: "https://example.com/stop.mp4", title: "stop",
+      scheduledStart: new Date(Date.now() + 3600000).toISOString(),
+      scheduledStop: new Date(Date.now() - 1000).toISOString() });
+    dm.resume(id);
+    dm.checkScheduled(); // the sweep that used to re-pause the resumed item
+    t("resume() drops an already-elapsed stop instead of re-pausing", () => {
+      assert.strictEqual(dm.items.get(id).scheduledStop, null);
+      assert.ok(!["paused", "scheduled"].includes(dm.items.get(id).status), dm.items.get(id).status);
+    });
+    const it = await waitFor(dm, id, ["done"], 3000);
+    t("resumed item with an elapsed stop completes", () => assert.strictEqual(it.status, "done"));
+    // ...while a stop still in the future survives the resume.
+    const id2 = await dm.enqueue({ url: "https://example.com/keep.mp4", title: "keep",
+      scheduledStart: new Date(Date.now() + 3600000).toISOString(),
+      scheduledStop: new Date(Date.now() + 3600000).toISOString() });
+    dm.resume(id2);
+    t("resume() keeps a future stop (when to stop is a separate instruction)", () => {
+      assert.strictEqual(dm.items.get(id2).scheduledStart, null);
+      assert.ok(dm.items.get(id2).scheduledStop > Date.now());
+    });
+    cleanup(dir);
+  })();
+
   // ---- per-site rules ------------------------------------------------------
   await (async () => {
     const now = new Date();
