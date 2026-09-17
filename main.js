@@ -68,6 +68,7 @@ const settings = createSettings({
     dm.config = cfg;
     dm.proxyManager = proxyManager; // drop stale bad/latency proxy state
     pushAutoGrabState(); // keep the extension's auto-grab mirror in sync
+    applyConfiguredPort(cfg.port); // a live port change moves the listener with it
   }
 });
 let proxyManager = new ProxyManager(settings.get());
@@ -205,11 +206,22 @@ function describeClient(origin, userAgent) {
 }
 
 function clientSnapshot() {
-  const port = settings.get().port;
+  // The BOUND port, never the configured one: the two can only differ while a
+  // bind is failing, and pointing the panel (or a client) at a port nothing is
+  // listening on is the bug this replaced.
+  const port = wsBoundPort;
   const clients = (wss ? Array.from(wss.clients) : [])
     .filter((c) => c.readyState === 1 && c.meta)
     .map((c) => Object.assign({}, c.meta, { ageMs: Date.now() - c.meta.connectedAt, idleMs: Date.now() - c.meta.lastSeenAt }));
-  return { url: "ws://127.0.0.1:" + port, port, protocolVersion: wsBridge.PROTOCOL_VERSION, clients };
+  return {
+    url: port ? "ws://127.0.0.1:" + port : "",
+    port,
+    configuredPort: settings.get().port,
+    listening: !!port,
+    error: wsBindError,
+    protocolVersion: wsBridge.PROTOCOL_VERSION,
+    clients
+  };
 }
 
 function pushClients() {
@@ -238,12 +250,18 @@ function startWsKeepalive() {
   }, WS_KEEPALIVE_MS);
 }
 
-function startWsServer() {
-  wss = new WebSocketServer({ host: "127.0.0.1", port: settings.get().port });
+// The port the live server is ACTUALLY bound to (0 while nothing is bound) plus
+// the last bind failure. Every advertised endpoint — the handshake hello, the
+// window's bridge panel — reads these, never settings.port.
+let wsBoundPort = 0;
+let wsBindError = "";
 
+// Connection/handshake wiring for one server. Shared by boot and every live
+// port change, so a rebind can never drift from the boot-time behavior.
+function attachWsServer(server) {
   const crawlThrottle = wsBridge.makeCrawlThrottle();
 
-    wss.on("connection", (ws, req) => {
+    server.on("connection", (ws, req) => {
     // Pairing policy: only the Deep Grab extension (chrome-/moz-extension://)
     // and native loopback clients (no Origin header) may talk to the local
     // server. A website can open ws://127.0.0.1:<port> freely, so any other
@@ -254,7 +272,11 @@ function startWsServer() {
       try { ws.close(1008, "origin not allowed"); } catch (e) { /* ignore */ }
       return;
     }
-    ws.send(JSON.stringify({ type: "hello", version: APP_VERSION, protocolVersion: wsBridge.PROTOCOL_VERSION, port: settings.get().port }));
+    // The port advertised is the port this socket is served from — the
+    // authoritative answer to "where is the app?", taken from the socket
+    // itself rather than from a config value that may not be bound (yet).
+    const boundPort = (server.address() || {}).port || 0;
+    ws.send(JSON.stringify({ type: "hello", version: APP_VERSION, protocolVersion: wsBridge.PROTOCOL_VERSION, port: boundPort }));
     ws.isExtension = origin.startsWith("chrome-extension://") || origin.startsWith("moz-extension://");
     ws.monitorEnabled = false;
     // Registry entry for the window's bridge panel (main.js owns this state; the
@@ -339,14 +361,89 @@ function startWsServer() {
     ws.on("error", () => {});
   });
 
-  wss.on("listening", () => {
-    console.log(`[ws] listening on ws://127.0.0.1:${settings.get().port}`);
-    startWsKeepalive();
-  });
+  return server;
+}
 
-  wss.on("error", (err) => {
-    console.error("[ws] " + err.message);
+// Bounded fall-forward: the configured port first, then its neighbours — the
+// same neighbourhood the extension sweeps (docs/ws-protocol.md §3.2.1) — so a
+// port already held by something else can never leave the app with no bridge at
+// all. Always resolves: { ok: true, port, server } or { ok: false, error }.
+const WS_PORT_SCAN = 10;
+function bindWsServer(port) {
+  return new Promise((resolve) => {
+    const attempt = (p, triesLeft) => {
+      const server = attachWsServer(new WebSocketServer({ host: "127.0.0.1", port: p }));
+      // Keep a permanent error listener attached BEFORE the one-shot probe: a
+      // later socket error must never surface as an unhandled 'error' event on
+      // the server (that takes the whole app down).
+      server.on("error", (err) => console.error("[ws] " + err.message));
+      const onListening = () => {
+        server.removeListener("error", onError);
+        resolve({ ok: true, port: p, server });
+      };
+      const onError = (err) => {
+        server.removeListener("listening", onListening);
+        try { server.close(); } catch (e) { /* never actually listening */ }
+        if (triesLeft > 0) { attempt(p + 1, triesLeft - 1); return; }
+        resolve({ ok: false, port: p, error: err });
+      };
+      server.once("listening", onListening);
+      server.once("error", onError);
+    };
+    attempt(port, WS_PORT_SCAN - 1);
   });
+}
+
+// Apply a port to the running app: bind first, swap, then release the old
+// server. A failed bind leaves the working server (and the advertised port)
+// exactly as it was, and any fall-forward is written back to the config so
+// config.json, the hello, and the panel can never disagree with the socket.
+async function applyWsPort(port) {
+  if (wss && wsBoundPort === port) return { ok: true, port };
+  const previous = wss;
+  const previousPort = wsBoundPort;
+  const bound = await bindWsServer(port);
+  if (!bound.ok) {
+    wsBindError = "could not bind " + port + "-" + (port + WS_PORT_SCAN - 1) + " (" + bound.error.message + ")" +
+      (previous ? " — still listening on " + previousPort : " — no WS server is running");
+    console.error("[ws] " + wsBindError);
+    // Put the config back to the port that is really held, so config.json never
+    // names an endpoint nothing listens on either (nothing to revert to at boot,
+    // where no server has ever bound).
+    if (previous && settings.get().port !== previousPort) settings.update({ port: previousPort });
+    pushClients();
+    return { ok: false, port, error: wsBindError };
+  }
+  wss = bound.server;
+  wsBoundPort = bound.port;
+  wsBindError = "";
+  const moved = previous ? " (moved from " + previousPort + ")" : "";
+  console.log("[ws] listening on ws://127.0.0.1:" + bound.port + moved +
+    (bound.port !== port ? " — port " + port + " was taken" : ""));
+  startWsKeepalive();
+  if (previous) {
+    // A dropped link is not a port change for the extension (it retries the
+    // port that greeted it, then sweeps), so closing old clients is exactly the
+    // signal it needs to find the new one.
+    for (const c of previous.clients) { try { c.close(1001, "server moved"); } catch (e) { /* ignore */ } }
+    try { previous.close(); } catch (e) { /* ignore */ }
+  }
+  pushClients();
+  if (bound.port !== port) settings.update({ port: bound.port });
+  return { ok: true, port: bound.port };
+}
+
+function startWsServer() {
+  return applyWsPort(settings.get().port);
+}
+
+// A live config port change must move the listener with it — otherwise the app
+// keeps serving on the old port while advertising the new one. The bind is
+// async and the config write has already happened, so this is fire-and-forget:
+// on failure the panel keeps showing the endpoint that really works.
+function applyConfiguredPort(port) {
+  if (!wss || port === wsBoundPort) return;
+  applyWsPort(port).catch((err) => console.error("[ws] port change failed: " + ((err && err.message) || err)));
 }
 
 function createWindow() {

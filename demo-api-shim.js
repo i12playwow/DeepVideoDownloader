@@ -170,10 +170,16 @@
       connectedAt: now - 6 * 60 * 1000, lastSeenAt: now - 1 * 1000 }
   ];
   function bridgeSnapshot() {
+    // The demo has no real socket, so the bound port always equals the
+    // configured one here; `listening`/`error` mirror main.js's clientSnapshot()
+    // shape for the window's bridge panel.
     const t = Date.now();
     return {
-      url: "ws://127.0.0.1:8765",
-      port: 8765,
+      url: "ws://127.0.0.1:" + settings.port,
+      port: settings.port,
+      configuredPort: settings.port,
+      listening: true,
+      error: "",
       protocolVersion: 1,
       clients: bridgeClients.map((c) => Object.assign({}, c, { ageMs: t - c.connectedAt, idleMs: t - c.lastSeenAt }))
     };
@@ -221,7 +227,12 @@
       if (it && (it.status === "paused" || it.status === "error" || it.status === "scheduled" || it.status === "queued")) {
         // Mirror DownloadManager.resume: leaving paused/error/scheduled clears
         // the error fields and the auto-retry arming, so a later completion
-        // can't push stale error data onto a done history entry.
+        // can't push stale error data onto a done history entry. A scheduled
+        // row resumes NOW, so a future start (and an elapsed stop) go too —
+        // otherwise the ticker would park it straight back into scheduled.
+        const now = Date.now();
+        if (it.scheduledStart && now < new Date(it.scheduledStart).getTime()) it.scheduledStart = null;
+        if (it.scheduledStop && now >= new Date(it.scheduledStop).getTime()) it.scheduledStop = null;
         it.status = "running"; clearErrorFields(it); it._autoRetryAt = null; it._autoRetries = 0; it.speed = 2 * MB; emit([it]);
       }
       return { ok: true };

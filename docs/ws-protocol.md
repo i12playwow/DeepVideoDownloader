@@ -8,7 +8,10 @@ is wrong — fix the code, not this doc.
 - **Transport:** WebSocket, JSON text frames. One JSON object per frame.
 - **Default endpoint:** `ws://127.0.0.1:8765` (config `port`; the boot-verify
   drill uses an isolated `8766`). The DEFAULT only — clients follow the app's
-  real port (§3.2.1).
+  real port (§3.2.1). A live `port` change (settings save or a hand-edited
+  `config.json`) rebinds the running server on the spot; nothing this app
+  advertises — the `hello` below, the window's bridge panel — ever names a port
+  it is not listening on.
 - **Server:** the Electron app (`main.js` `startWsServer`, via `ws` lib).
 - **Client:** the Deep Grab extension's MV3 service worker
   (`extension/background.js`). Native loopback tools and tests may also connect
@@ -41,6 +44,8 @@ Rejected origins get `ws.close(1008, "origin not allowed")`.
 
    - `version` = app build version (cosmetic).
    - `protocolVersion` = the wire protocol this app speaks.
+   - `port` = the port the app is **actually bound to** — read from the listening
+     socket, not from the config, so it is authoritative even mid-change (§3.2.1).
 
 2. Client replies:
 
@@ -141,6 +146,18 @@ extension therefore keeps the last port that answered with a `hello` (persisted
 in `chrome.storage.local` as `dv_ws_port`, and re-read on every wake), and when
 an attempt finds nothing it sweeps `8765`–`8774` — the remembered port first,
 then the default neighbourhood, cycling after a full pass.
+
+**App side (same contract, the other direction):** a live `port` change does not
+wait for a restart. The app binds the new port FIRST and only then releases the
+old server, so a change can never leave it serving one port while advertising
+another; existing clients are closed with code `1001` and reconnect on the new
+port (the extension's retry-then-sweep order above is what finds it). When the
+configured port cannot be bound, the app falls forward to the next free port in
+a bounded scan (10 attempts, `WS_PORT_SCAN` in `main.js`) and **writes the port
+it actually bound back into `config.json`**, so config, `hello.port`, and the
+window's bridge panel always agree with the live socket. Only when every
+candidate is taken does it keep the old endpoint untouched — logging the reason
+and showing it in the bridge panel rather than advertising a dead port.
 
 ### 3.3 `probe`
 Ask the app to HEAD-probe a URL for size/mime (used by the extension panel).

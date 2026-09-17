@@ -23,6 +23,11 @@
 //                     movie-page link over the real WS relay, the resolver
 //                     resolves it, and the mp4 lands byte-exact; a same
 //                     page on plain 127.0.0.1 must NOT auto-send (scope gate)
+//   I live port move — a live config port change (the file watcher path) moves
+//                     the listener: the new port serves a hello advertising
+//                     ITSELF, the old port is released, config stays in sync;
+//                     a port held by something else falls forward to the next
+//                     free one, which is advertised AND persisted
 // Self-contained: the fixture MP4 is embedded and served by an in-process
 // static server (Range support) on an ephemeral port — no network egress.
 // Usage: npm run boot-verify [-- --keep] [-- --force] [-- --only=G]
@@ -713,11 +718,24 @@ async function phaseF() {
 // movies tab closes. Pre-fix this phase FAILS (referer "" -> relay skipped).
 let chromeG = null; // { pid, cdpPort, extId, sandboxDir }
 
+// Chrome can hand the real browser off to a NEW process: the chrome.exe we
+// spawn exits, so taskkill of that PID is a silent no-op and the browser — the
+// one holding scripts/bv-*/chrome-*-ud open — survives the run. That is exactly
+// how this drill left an orphan Chrome tree behind on every run here (its
+// profile locked, so the sandbox removal below quietly failed and the next
+// checkout carried the leftovers as untracked files). Kill by PID first (the
+// normal case) and then sweep every chrome.exe whose command line names THIS
+// run's sandbox directory, so nothing this drill launched can outlive it.
 function killChromeG() {
   if (chromeG && chromeG.pid != null) {
     try { execFileSync("taskkill", ["/PID", String(chromeG.pid), "/T", "/F"], { stdio: "ignore" }); } catch (e) { /* already gone */ }
     chromeG.pid = null;
   }
+  try {
+    execFileSync("powershell", ["-NoProfile", "-Command",
+      "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Where-Object { $_.CommandLine -like '*" + sandbox + "*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    ], { stdio: "ignore" });
+  } catch (e) { /* no powershell / no leftovers: nothing to sweep */ }
 }
 
 async function phaseG(port) {
@@ -1275,6 +1293,119 @@ function describePortHolder(port) {
   return "port " + port + " is in use by an unidentified process; refusing to run.";
 }
 
+// ---- Phase I helpers: a live port change must move the listener with it ----
+function configPort() {
+  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")).port; } catch (e) { return 0; }
+}
+
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+  });
+}
+
+// Hold a port the way any other app on the machine would, so the app's bind of
+// it is a real EADDRINUSE (libuv uses SO_EXCLUSIVEADDRUSE on Windows).
+function holdPort(port) {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer((s) => s.destroy());
+    srv.once("error", reject);
+    srv.listen(port, "127.0.0.1", () => resolve(srv));
+  });
+}
+
+function portAnswers(port, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    const s = net.connect({ host: "127.0.0.1", port });
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; try { s.destroy(); } catch (e) {} resolve(v); };
+    s.on("connect", () => finish(true));
+    s.on("error", () => finish(false));
+    s.setTimeout(timeoutMs, () => finish(false));
+  });
+}
+
+// Read the app's hello off a port. The payload's `port` is what the app CLAIMS
+// to be serving on — the whole point of the phase is that it equals the port
+// that actually answered.
+function wsHello(port, timeoutMs = 10000) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    let done = false;
+    let ws = null;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      try { if (ws) ws.terminate(); } catch (e) { /* ignore */ }
+      resolve(v);
+    };
+    const tryOnce = () => {
+      if (done) return;
+      if (Date.now() - t0 > timeoutMs) { finish({ ok: false, why: "timed out after " + timeoutMs + "ms" }); return; }
+      ws = new WebSocket("ws://127.0.0.1:" + port);
+      ws.on("message", (d) => {
+        let m;
+        try { m = JSON.parse(d.toString()); } catch (e) { return; }
+        if (m && m.type === "hello") finish({ ok: true, hello: m });
+      });
+      ws.on("error", () => { try { ws.terminate(); } catch (e) {} setTimeout(tryOnce, 400); });
+      ws.on("close", () => { if (!done) setTimeout(tryOnce, 400); });
+    };
+    tryOnce();
+  });
+}
+
+async function waitPortClosed(port, timeoutMs = 8000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    if (!(await portAnswers(port))) return true;
+    await sleep(300);
+  }
+  return false;
+}
+
+async function phaseI() {
+  console.log("--- Phase I: a live port change moves the WS server with it ---");
+  // Baseline: the hello must name the port it is served from.
+  const base = await wsHello(WS_PORT, 8000);
+  if (!base.ok) return fail("I baseline hello", "nothing answered on " + WS_PORT);
+  if (Number(base.hello.port) !== WS_PORT) return fail("I baseline advertises its own port", "hello.port=" + base.hello.port + " expected " + WS_PORT);
+
+  // A live config edit (the file-watcher path a hand-edited config.json takes)
+  // must move the listener, not just the value the panel prints.
+  const target = await findFreePort();
+  if (target === WS_PORT) return fail("I pick a target port", "ephemeral port collided with " + WS_PORT);
+  writeConfig({ port: target });
+  const moved = await wsHello(target, 15000);
+  if (!moved.ok) return fail("I new port serves", "nothing answered on " + target + ": " + moved.why);
+  if (Number(moved.hello.port) !== target) return fail("I hello follows the listener", "hello.port=" + moved.hello.port + " expected " + target);
+  if (!(await waitPortClosed(WS_PORT))) return fail("I old port released", WS_PORT + " still accepting connections after the move");
+  if (configPort() !== target) return fail("I config matches the bound port", "config.json port=" + configPort() + " expected " + target);
+  pass("I live port change", WS_PORT + " -> " + target + " (hello.port=" + moved.hello.port + ", old port released, config in sync)");
+
+  // A port someone else holds: fall forward, and persist the port really bound
+  // so config.json can never point at an endpoint nothing listens on.
+  const taken = target + 1;
+  let holder = null;
+  try { holder = await holdPort(taken); } catch (e) { return fail("I hold a busy port", taken + ": " + e.message); }
+  try {
+    writeConfig({ port: taken });
+    const fell = await wsHello(taken + 1, 15000);
+    if (!fell.ok) return fail("I fall-forward serves", "nothing answered on " + (taken + 1) + ": " + fell.why);
+    if (Number(fell.hello.port) !== taken + 1) return fail("I fall-forward advertises the real port", "hello.port=" + fell.hello.port + " expected " + (taken + 1) + " (the busy " + taken + " must never be advertised)");
+    if (configPort() !== taken + 1) return fail("I fall-forward persisted", "config.json port=" + configPort() + " expected " + (taken + 1));
+    if (!(await waitPortClosed(target))) return fail("I previous port released", target + " still accepting connections after the fall-forward");
+    pass("I busy port falls forward", "requested " + taken + " (held by the drill) -> bound + advertised + persisted " + (taken + 1));
+  } finally {
+    try { if (holder) holder.close(); } catch (e) { /* ignore */ }
+  }
+}
+
 async function main() {
   if (CFT_PROBE) process.exit(probeChromeForTesting());
   if (!fs.existsSync(ELECTRON)) { console.log("ABORT electron not found: " + ELECTRON); process.exit(1); }
@@ -1319,6 +1450,9 @@ async function main() {
     await run("F", () => phaseF());
     await run("G", () => phaseG(port));
     await run("H", () => phaseH(port));
+    // Last: it deliberately moves the app off WS_PORT (and persists the move),
+    // so every phase that dials 8766 has to run before it.
+    await run("I", () => phaseI());
   } catch (e) {
     fail("uncaught", (e && e.stack) || String(e));
   }
@@ -1337,9 +1471,14 @@ main().then(async (code) => {
     // taskkill returns before the dying tree releases file handles (GPU cache,
     // DIPS wal); give it a beat, then retry the removal until it sticks.
     await sleep(1200);
+    let removed = false;
     for (let i = 0; i < 12; i++) {
-      try { fs.rmSync(sandbox, { recursive: true, force: true }); break; } catch (e) { await sleep(500); }
+      try { fs.rmSync(sandbox, { recursive: true, force: true }); removed = true; break; } catch (e) { await sleep(500); }
     }
+    // Never leave the mess quietly: a surviving sandbox means something this
+    // drill started is still running (a chrome.exe holding the profile), which
+    // is worth saying out loud rather than leaving for the next run to trip over.
+    if (!removed && fs.existsSync(sandbox)) console.log("WARN  sandbox not removed (a process still holds it): " + sandbox);
     try { fs.unlinkSync(CONFIG_PATH); } catch (e) { /* ignore */ }
   } else {
     console.log("kept sandbox at " + sandbox + " (config.json left in place)");

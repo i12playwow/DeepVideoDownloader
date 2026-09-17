@@ -536,17 +536,29 @@ function clientRowHtml(c, appProtocol) {
 function renderBridge(snap) {
   const list = $("bridgeClients");
   if (!list) return;
+  const s = snap || {};
+  // The endpoint is whatever the main process is ACTUALLY listening on (it
+  // reports the bound socket, not the configured port), so this line can never
+  // name a port the app is not serving.
   const endpoint = $("wsEndpoint");
-  if (endpoint) endpoint.textContent = (snap && snap.url) || "ws://127.0.0.1:8765";
-  const clients = (snap && snap.clients) || [];
+  if (endpoint) {
+    endpoint.textContent = s.url || "not listening";
+    endpoint.title = s.url ? s.url : "The WebSocket server is not running";
+  }
+  const clients = s.clients || [];
   const summary = $("bridgeSummary");
   if (summary) {
-    summary.textContent = clients.length
-      ? clients.length + " client" + (clients.length === 1 ? "" : "s") + " \u00b7 app protocol v" + snap.protocolVersion
-      : "no client connected \u2014 install Deep Grab in a browser (or use the built-in browser)";
+    // A failed bind is the one case where the wanted port and the live one
+    // differ; the reason belongs on screen next to the endpoint.
+    summary.classList.toggle("client-warn", !!s.error);
+    summary.textContent = s.error
+      ? "\u26a0 " + s.error
+      : clients.length
+        ? clients.length + " client" + (clients.length === 1 ? "" : "s") + " \u00b7 app protocol v" + s.protocolVersion
+        : "no client connected \u2014 install Deep Grab in a browser (or use the built-in browser)";
   }
   list.innerHTML = clients.length
-    ? clients.map((c) => clientRowHtml(c, snap.protocolVersion)).join("")
+    ? clients.map((c) => clientRowHtml(c, s.protocolVersion)).join("")
     : `<li class="client-empty">No extension paired: load Deep Grab in Chrome/Firefox, or open the built-in browser.</li>`;
 }
 
