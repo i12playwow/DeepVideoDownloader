@@ -199,12 +199,35 @@ async function main() {
     wsServer.on("connection", (socket) => {
       sockets.add(socket);
       socket.on("close", () => sockets.delete(socket));
+      // Greet exactly like the real app does (hello = build version + wire
+      // protocol + port). The popup's link line renders the app identity from
+      // this message alone, so the fixture has to send it.
+      socket.send(JSON.stringify({
+        type: "hello",
+        version: "9.9.9-fixture",
+        protocolVersion: 1,
+        port: wsServer.address() ? wsServer.address().port : 0
+      }));
       socket.on("message", (data) => {
         let message;
         try { message = JSON.parse(data.toString()); } catch (error) { return; }
         if (message.type === "hello") helloSockets.add(socket);
         if (message.type === "probe" && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ type: "probe-result", reqId: message.reqId || "", url: message.url, size: 64 }));
+        }
+        // The real app's crawl throttle: refuse a download with the documented
+        // retryable envelope so the popup's pace-retry wording is exercised
+        // through the shipped code (SW queue + popup render), not a stub.
+        if (message.type === "download" && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({
+            type: "error",
+            code: "PACE_LIMITED",
+            message: "Pace limit: too many downloads in the last minute.",
+            url: message.url,
+            reqId: message.reqId,
+            retryable: true,
+            retryAfter: 45
+          }));
         }
       });
     });
@@ -216,9 +239,19 @@ async function main() {
     const profile = path.join(tempRoot, "profile");
     fs.cpSync(path.join(ROOT, "extension"), extension, { recursive: true });
     const backgroundPath = path.join(extension, "background.js");
-    fs.writeFileSync(backgroundPath, fs.readFileSync(backgroundPath, "utf8").replace(
+    // Point the shipped SW at the fixture bridge. This patch is the suite's only
+    // link to the extension, so it must not silently no-op: an unguarded
+    // String.replace stops matching the moment the SW stops hardcoding that
+    // literal, and the run then talks to a stale port (whatever else owns 8765)
+    // instead of failing where the cause is. Assert the override landed, the way
+    // scripts/boot-verify.js guards the identical patch.
+    const patchedBackground = fs.readFileSync(backgroundPath, "utf8").replace(
       '"ws://127.0.0.1:8765"', '"ws://127.0.0.1:' + wsPort + '"'
-    ));
+    );
+    if (!patchedBackground.includes('"ws://127.0.0.1:' + wsPort + '"')) {
+      throw new Error("WS port override failed: extension/background.js no longer hardcodes \"ws://127.0.0.1:8765\" — patch the SW's bridge URL here to keep the suite pointed at the fixture");
+    }
+    fs.writeFileSync(backgroundPath, patchedBackground);
 
     chrome = spawn(CHROME, [
       "--user-data-dir=" + profile,
@@ -384,6 +417,71 @@ async function main() {
     assert("retryable row uses the shipped amber color", retry.color === "rgb(251, 191, 36)", JSON.stringify(retry));
     assert("terminal row uses the shipped red color", terminal.color === "rgb(239, 68, 68)", JSON.stringify(terminal));
     assert("status pushes arrived on the extension's live WS", helloSockets.has(socket), "helloSockets=" + helloSockets.size);
+
+    // ---- pace-limited retry surfaced in the popup (real browser) ----
+    // The fixture app now refuses downloads the way the crawl throttle does. The
+    // SW must queue the retry (this row has a pending entry) and the popup must
+    // report a QUEUED retry with the app's own window — amber, not the red ✕ a
+    // dead end gets, and never a silent stall.
+    const clickAddRetryable = `(function () {
+      const target = ${JSON.stringify(retryableUrl)};
+      const row = Array.from(document.querySelectorAll('#found-list li')).find((li) => {
+        const t = li.querySelector('.dv-title');
+        return t && t.title === target;
+      });
+      if (!row) return 'no-row';
+      const btn = row.querySelector('.dv-add');
+      if (!btn) return 'no-btn';
+      btn.click();
+      return 'clicked';
+    })()`;
+    const readFeedback = () => popupEval(`(function () {
+      const el = document.getElementById('feedback');
+      return el ? { text: el.textContent, className: el.className, color: getComputedStyle(el).color } : null;
+    })()`);
+    const clickResult = await popupEval(clickAddRetryable);
+    assert("popup Add button drives a real download through the SW", clickResult === "clicked", String(clickResult));
+    const paceReady = await waitFor(async () => {
+      const fb = await readFeedback();
+      return !!fb && fb.text.includes("queued, retrying in 45s");
+    }, 10000, 100);
+    const paceFeedback = await readFeedback();
+    assert("a throttled Add surfaces as a queued retry with the app's window (not a stall or a dead end)",
+      paceReady && /⟳/.test(paceFeedback.text) && /Pace limit/.test(paceFeedback.text), JSON.stringify(paceFeedback));
+    assert("the queued retry uses the amber warn tone, not the red failure tone",
+      String(paceFeedback.className).includes("fb-warn") && paceFeedback.color === "rgb(251, 191, 36)", JSON.stringify(paceFeedback));
+
+    // ---- link state surfaced in the popup (real browser) ----
+    // The fixture's hello is the only source for the link line: the pill reads
+    // connected and the detail line names the app build + wire protocol. A
+    // PROTOCOL_MISMATCH refusal must then read as the actionable cause instead
+    // of a bare "disconnected" — the reason the SW derives the state at all.
+    const readLink = () => popupEval(`(function () {
+      const pill = document.getElementById('status');
+      const detail = document.getElementById('status-detail');
+      return {
+        pill: pill ? pill.textContent : '',
+        pillClass: pill ? pill.className : '',
+        detail: detail ? detail.textContent : '',
+        detailClass: detail ? detail.className : ''
+      };
+    })()`);
+    const linkReady = await waitFor(async () => {
+      const current = await readLink();
+      return current.pill === "connected" && current.detail.includes("9.9.9-fixture");
+    }, 10000, 100);
+    const link = await readLink();
+    assert("popup link line shows the app identity from the WS hello", linkReady, JSON.stringify(link));
+    assert("popup link pill carries the connected state class", link.pillClass === "connected", JSON.stringify(link));
+    socket.send(JSON.stringify({
+      type: "error", code: "PROTOCOL_MISMATCH", message: "Extension is newer than the app", url: "", retryable: false
+    }));
+    const mismatchReady = await waitFor(async () => {
+      const current = await readLink();
+      return current.pill === "disconnected" && /Update Deep Video Downloader/.test(current.detail) && current.detailClass === "compat";
+    }, 10000, 100);
+    const mismatchLink = await readLink();
+    assert("popup surfaces a protocol mismatch as an actionable compat warning", mismatchReady, JSON.stringify(mismatchLink));
   } catch (error) {
     failed++;
     console.log("  FAIL  browser fixture aborted -> " + ((error && error.stack) || error));

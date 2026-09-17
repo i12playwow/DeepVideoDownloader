@@ -155,12 +155,43 @@
     if (terminal) emitHistory(); // renderer reloads history ~1.5s later
   }, 1000);
 
+  // ---- extension bridge (demo) ------------------------------------------
+  // Mirrors main.js clientSnapshot(): the real app tracks every paired socket
+  // (the user's browser extension, the app's own built-in browser, native
+  // loopback tools). Two extension clients are seeded so the demo shows the
+  // multi-client shape without a live app.
+  let clientsCb = null;
+  const bridgeClients = [
+    { id: "c1", label: "Chrome extension", extensionId: "abcdefghijklmnopabcdefghijklmnop",
+      helloSeen: true, protocolVersion: 1, clientVersion: "1.1.0",
+      connectedAt: now - 42 * 60 * 1000, lastSeenAt: now - 3 * 1000 },
+    { id: "c2", label: "Built-in browser extension", extensionId: "ponmlkjihgfedcbaponmlkjihgfedcba",
+      helloSeen: true, protocolVersion: 1, clientVersion: "1.1.0",
+      connectedAt: now - 6 * 60 * 1000, lastSeenAt: now - 1 * 1000 }
+  ];
+  function bridgeSnapshot() {
+    // The demo has no real socket, so the bound port always equals the
+    // configured one here; `listening`/`error` mirror main.js's clientSnapshot()
+    // shape for the window's bridge panel.
+    const t = Date.now();
+    return {
+      url: "ws://127.0.0.1:" + settings.port,
+      port: settings.port,
+      configuredPort: settings.port,
+      listening: true,
+      error: "",
+      protocolVersion: 1,
+      clients: bridgeClients.map((c) => Object.assign({}, c, { ageMs: t - c.connectedAt, idleMs: t - c.lastSeenAt }))
+    };
+  }
+
   // ---- the mock bridge --------------------------------------------------
   const api = {
     onUpdate: (cb) => { updateCb = cb; },
     onHistoryUpdated: (cb) => { historyCb = cb; },
     onClipboardUrl: (cb) => { clipboardCb = cb; },
     onFileOpened: (cb) => { fileCb = cb; },
+    onClients: (cb) => { clientsCb = cb; },
 
     getSettings: async () => clone(settings),
     saveSettings: async (s) => { Object.assign(settings, s); return { ok: true }; },
@@ -168,6 +199,7 @@
     history: async () => clone(history),
     bandwidthStats: async () => bandwidthStats(),
 
+    listClients: async () => bridgeSnapshot(),
     getActiveDir: async () => settings.downloadDir,
     chooseDir: async () => "C:\\Users\\Demo\\Downloads\\Picked",
     openDir: async () => { toast("Opening folder (demo)"); return { ok: true }; },
@@ -195,7 +227,12 @@
       if (it && (it.status === "paused" || it.status === "error" || it.status === "scheduled" || it.status === "queued")) {
         // Mirror DownloadManager.resume: leaving paused/error/scheduled clears
         // the error fields and the auto-retry arming, so a later completion
-        // can't push stale error data onto a done history entry.
+        // can't push stale error data onto a done history entry. A scheduled
+        // row resumes NOW, so a future start (and an elapsed stop) go too —
+        // otherwise the ticker would park it straight back into scheduled.
+        const now = Date.now();
+        if (it.scheduledStart && now < new Date(it.scheduledStart).getTime()) it.scheduledStart = null;
+        if (it.scheduledStop && now >= new Date(it.scheduledStop).getTime()) it.scheduledStop = null;
         it.status = "running"; clearErrorFields(it); it._autoRetryAt = null; it._autoRetries = 0; it.speed = 2 * MB; emit([it]);
       }
       return { ok: true };
@@ -389,6 +426,7 @@
   // expose for the live demo: clipboard/file-open events can be fired manually
   window.__demo = {
     api,
+    fireClients: () => { if (clientsCb) clientsCb(bridgeSnapshot()); },
     fireClipboard: (url) => { if (clipboardCb) clipboardCb({ url }); },
     fireFileOpened: (path, name) => { if (fileCb) fileCb({ path, name }); },
     get state() { return { items: items.map((i) => ({ id: i.id, status: i.status, received: i.received })), history: history.length }; }

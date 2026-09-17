@@ -10,7 +10,7 @@
   <header class="topbar">
     <div class="brand">
       <h1>▶ Deep Video Downloader</h1>
-      <div class="subtitle">WebSocket server: <code>ws://127.0.0.1:8765</code> — links arrive from the browser extension</div>
+      <div class="subtitle">WebSocket server: <code id="wsEndpoint">ws://127.0.0.1:8765</code> — links arrive from the browser extension</div>
     </div>
     <div class="panel-actions">
       <button id="themeToggle" class="btn ghost">🌓 Toggle theme</button>
@@ -18,6 +18,18 @@
   </header>
 
   <main>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Extension bridge</h2>
+        <div class="panel-actions">
+          <span id="bridgeSummary" class="hint"></span>
+        </div>
+      </div>
+      <ul id="bridgeClients" class="client-list">
+        <li class="client-empty">Checking for a paired Deep Grab extension…</li>
+      </ul>
+    </section>
+
     <section class="panel">
       <div class="capture-row">
         <select id="browserTarget" title="Open the URL in which browser">

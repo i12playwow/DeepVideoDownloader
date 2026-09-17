@@ -483,13 +483,15 @@ window.api.onUpdate((msg) => {
   scheduleRender();
 });
 
+// passive: scroll handlers never preventDefault; the flag keeps scrolling off the
+// main thread's input pipeline (same rule the perf pass applied to the metrics listeners).
 $("dlsScroll").addEventListener("scroll", () => {
   if (!renderTimer) render(); // virtualized render is cheap; keep rows in view
-});
+}, { passive: true });
 
 $("histScroll").addEventListener("scroll", () => {
   if (!renderTimer) renderHistory(); // keep history rows in view
-});
+}, { passive: true });
 
 $("search").addEventListener("input", () => {
   searchQuery = $("search").value.trim();
@@ -498,6 +500,74 @@ $("search").addEventListener("input", () => {
   render();
   renderHistory();
 });
+
+// ---------------- extension bridge ----------------
+// Live view of who is paired with the local WS server: the Deep Grab extension
+// in the user's browser, the app's own built-in browser, or a native loopback
+// tool. main.js owns this state (it tracks every socket), so the window renders
+// the snapshot it is handed and re-pulls on the dashboard's 5s cadence so the
+// relative ages keep ticking.
+function fmtAge(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "\u2014";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.round(s / 60);
+  if (m < 60) return m + "m";
+  return Math.round(m / 60) + "h";
+}
+
+function clientRowHtml(c, appProtocol) {
+  const handshaken = !!c.helloSeen;
+  const skew = handshaken && c.protocolVersion && appProtocol && c.protocolVersion < appProtocol;
+  const meta = handshaken
+    ? "protocol v" + c.protocolVersion + (c.clientVersion ? " \u00b7 ext " + esc(c.clientVersion) : "") +
+      " \u00b7 connected " + fmtAge(c.ageMs) + " \u00b7 last heard " + fmtAge(c.idleMs) + " ago"
+    : "connected \u00b7 waiting for its hello handshake";
+  return `<li class="client-row">
+    <span class="client-dot ${handshaken && !skew ? "ok" : "warn"}"></span>
+    <div class="client-info">
+      <div class="client-label">${esc(c.label)}${c.extensionId ? ` <code>${esc(String(c.extensionId).slice(0, 8))}\u2026</code>` : ""}</div>
+      <div class="client-meta">${meta}</div>
+      ${skew ? `<div class="client-warn">This client speaks protocol v${c.protocolVersion}; the app speaks v${appProtocol} \u2014 update the extension.</div>` : ""}
+    </div>
+  </li>`;
+}
+
+function renderBridge(snap) {
+  const list = $("bridgeClients");
+  if (!list) return;
+  const s = snap || {};
+  // The endpoint is whatever the main process is ACTUALLY listening on (it
+  // reports the bound socket, not the configured port), so this line can never
+  // name a port the app is not serving.
+  const endpoint = $("wsEndpoint");
+  if (endpoint) {
+    endpoint.textContent = s.url || "not listening";
+    endpoint.title = s.url ? s.url : "The WebSocket server is not running";
+  }
+  const clients = s.clients || [];
+  const summary = $("bridgeSummary");
+  if (summary) {
+    // A failed bind is the one case where the wanted port and the live one
+    // differ; the reason belongs on screen next to the endpoint.
+    summary.classList.toggle("client-warn", !!s.error);
+    summary.textContent = s.error
+      ? "\u26a0 " + s.error
+      : clients.length
+        ? clients.length + " client" + (clients.length === 1 ? "" : "s") + " \u00b7 app protocol v" + s.protocolVersion
+        : "no client connected \u2014 install Deep Grab in a browser (or use the built-in browser)";
+  }
+  list.innerHTML = clients.length
+    ? clients.map((c) => clientRowHtml(c, s.protocolVersion)).join("")
+    : `<li class="client-empty">No extension paired: load Deep Grab in Chrome/Firefox, or open the built-in browser.</li>`;
+}
+
+async function loadClients() {
+  const snap = await window.api.listClients();
+  renderBridge(snap);
+}
+
+window.api.onClients((snap) => renderBridge(snap));
 
 // ---------------- settings ----------------
 async function loadSettings() {
@@ -824,5 +894,7 @@ loadSettings();
 loadAll();
 loadHistory();
 updateBandwidth();
+loadClients();
 setInterval(loadAll, 5000);
 setInterval(updateBandwidth, 5000);
+setInterval(loadClients, 5000);

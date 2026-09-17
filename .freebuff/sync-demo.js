@@ -452,11 +452,12 @@ const SELF_GOLDEN = {
   batch: ["cancel", "pause", "remove", "resume"],
   apiRouted: ["cancel", "forceDownload", "pause", "remove", "resume", "retry"],
   browseTotal: 3,
-  idCount: 61,
+  idCount: 64, // 61 + the Extension bridge panel (wsEndpoint, bridgeSummary, bridgeClients)
+
   selHandlers: [{ id: "dlsBody", ref: "closest(input[data-sel])" }],
   selEmitters: [{ fn: "rowHtml", checkbox: true }],
   selPathVia: ["render"],
-  shimExposed: 34
+  shimExposed: 36 // 34 + listClients/onClients (Extension bridge panel)
 };
 
 const sorted = (xs) => [...xs].sort();

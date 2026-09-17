@@ -23,9 +23,15 @@
 //                     movie-page link over the real WS relay, the resolver
 //                     resolves it, and the mp4 lands byte-exact; a same
 //                     page on plain 127.0.0.1 must NOT auto-send (scope gate)
+//   I live port move — a live config port change (the file watcher path) moves
+//                     the listener: the new port serves a hello advertising
+//                     ITSELF, the old port is released, config stays in sync;
+//                     a port held by something else falls forward to the next
+//                     free one, which is advertised AND persisted
 // Self-contained: the fixture MP4 is embedded and served by an in-process
 // static server (Range support) on an ephemeral port — no network egress.
-// Usage: npm run boot-verify [-- --keep] [-- --force]
+// Usage: npm run boot-verify [-- --keep] [-- --force] [-- --only=G]
+//        npm run boot-verify -- --cft-probe   # where would G/H look for Chrome for Testing?
 // Exit 0 = all phases passed; 1 = any assertion failed / setup aborted.
 
 const { spawn, execFileSync } = require("child_process");
@@ -42,6 +48,7 @@ const WS_PORT = 8766;
 const KEEP = process.argv.includes("--keep");
 const FORCE = process.argv.includes("--force");
 const ONLY = process.argv.find((a) => a.startsWith("--only="));
+const CFT_PROBE = process.argv.includes("--cft-probe");
 
 // 1-second testsrc 160x90 x264 MP4 (generated with ffmpeg, 8680 bytes).
 const MP4 = Buffer.from("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", "base64");
@@ -63,6 +70,94 @@ const results = [];
 const pass = (name, detail) => { results.push([true, name]); console.log("PASS  " + name + (detail ? " - " + detail : "")); };
 const fail = (name, detail) => { results.push([false, name]); console.log("FAIL  " + name + (detail ? " - " + detail : "")); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---- Chrome for Testing discovery (Phases G + H) ----
+// Both phases need a CfT binary: branded Chrome 137+ dropped --load-extension,
+// so an ordinary install cannot run them. Discovery used to be $CFT_CHROME or
+// ONE hardcoded path, and anything else made the phase report PASS-as-SKIPPED
+// — a green drill that proved nothing. That is exactly what happened here: the
+// documented .freebuff/xt-cft/chrome-win64/ held a half-extracted tree with no
+// chrome.exe (emptied by a large-binary sweep) while the working browser sat in
+// the agent-runner cache at .freebuff/runner/xt-cft/chrome-win64/chrome.exe, so
+// Phases G and H skipped for weeks without anyone noticing.
+// Candidates are probed in order and a skip says where it looked, so a skipped
+// run tells you where to put the browser instead of hiding the reason
+// (`--cft-probe` prints the full candidate list).
+const CFT_SWEEP_MAX = 400;
+function isDirSafe(p) { try { return fs.statSync(p).isDirectory(); } catch (e) { return false; } }
+function readdirSafe(p) { try { return fs.readdirSync(p); } catch (e) { return []; } }
+
+function cftCandidates() {
+  const out = [];
+  if (process.env.CFT_CHROME) out.push(process.env.CFT_CHROME);
+  out.push(path.join(ROOT, ".freebuff", "xt-cft", "chrome-win64", "chrome.exe"));
+  // A CfT Windows package is always <dir>/chrome-win64/chrome.exe, so sweep the
+  // two scratch levels this repo actually uses — .freebuff/<x>/chrome-win64 and
+  // .freebuff/<x>/<y>/chrome-win64, which is where an agent/CI runner keeps its
+  // copy (.freebuff/runner/xt-cft/...). Bounded on purpose: one readdir of
+  // .freebuff plus one per directory in it, with a hard cap, so this can never
+  // turn a drill's precondition check into a filesystem walk.
+  const scratch = path.join(ROOT, ".freebuff");
+  for (const one of readdirSafe(scratch)) {
+    if (out.length >= CFT_SWEEP_MAX) break;
+    const d1 = path.join(scratch, one);
+    if (!isDirSafe(d1)) continue;
+    out.push(path.join(d1, "chrome-win64", "chrome.exe"));
+    for (const two of readdirSafe(d1)) {
+      if (out.length >= CFT_SWEEP_MAX) break;
+      const d2 = path.join(d1, two);
+      if (isDirSafe(d2)) out.push(path.join(d2, "chrome-win64", "chrome.exe"));
+    }
+  }
+  out.push(path.join(ROOT, "chrome-win64", "chrome.exe"));
+  return out;
+}
+
+function findChromeForTesting() {
+  const tried = [];
+  for (const candidate of cftCandidates()) {
+    if (tried.indexOf(candidate) !== -1) continue;
+    tried.push(candidate);
+    if (fs.existsSync(candidate)) return { path: candidate, tried };
+  }
+  return { path: null, tried };
+}
+
+// The detail a phase reports when CfT is missing: what was wrong, how many
+// places were probed, and the first few of them by name.
+function cftSkipDetail(found) {
+  const documented = path.join(ROOT, ".freebuff", "xt-cft", "chrome-win64", "chrome.exe");
+  const why = process.env.CFT_CHROME
+    ? "CFT_CHROME=" + process.env.CFT_CHROME + " does not exist"
+    : "CFT_CHROME unset and no CfT at the documented " + documented;
+  return "SKIPPED, tested NOTHING (" + why + ") — probed " + found.tried.length +
+    " chrome-win64/chrome.exe spots (.freebuff/xt-cft, a sweep of .freebuff/*/ and" +
+    " .freebuff/*/*/, and <repo>/chrome-win64); set CFT_CHROME or extract CfT there" +
+    " (--cft-probe lists every one)";
+}
+
+// Returns the CfT path, or reports the phase as a clean SKIP (what a CI checkout
+// needs: no CfT, no red run) and returns null so the phase bails out.
+function cftPathOrSkip(checkName) {
+  const found = findChromeForTesting();
+  if (found.path) return found.path;
+  pass(checkName, cftSkipDetail(found));
+  return null;
+}
+
+// --cft-probe: answer "why would G/H skip?" in a second instead of after a
+// ~6-minute drill. Exit 0 = a browser was found, 1 = the phases would skip.
+function probeChromeForTesting() {
+  const found = findChromeForTesting();
+  const env = process.env.CFT_CHROME ? "(CFT_CHROME=" + process.env.CFT_CHROME + ")" : "(CFT_CHROME unset)";
+  console.log("Chrome for Testing discovery " + env + " — " + found.tried.length + " candidate(s):");
+  for (let i = 0; i < found.tried.length; i++) {
+    console.log("  " + (found.path === found.tried[i] ? "FOUND " : "     ") + (i + 1) + ". " + found.tried[i]);
+  }
+  if (found.path) { console.log("\nPhases G + H will run with: " + found.path); return 0; }
+  console.log("\n" + cftSkipDetail(found));
+  return 1;
+}
 
 function startFixture() {
   return new Promise((resolve, reject) => {
@@ -125,6 +220,21 @@ function startFixture() {
         }
         res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": MP4.length, "Accept-Ranges": "bytes" });
         res.end(MP4);
+        return;
+      }
+      // Phase G's target page is deliberately fetch-only (NO <video> element).
+      // The extension's content script auto-sends any <video> it finds (its
+      // DEFAULT_CONFIG has autoGrab/bestOnly ON, independent of the app's
+      // autoGrab), so a <video> here races the drill's controlled harvest and
+      // ships the target with a pageUrl already set. The mp4 request is still
+      // captured by the SW's webRequest listener with the tab's id, so the
+      // entry lands in `found` and the drill can strip its pageUrl — the
+      // send-time-resolution shape under test.
+      if (p === "/movies/close-me/") {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end("<!doctype html><html><head><title>movies/close-me</title></head><body>" +
+          "<h1>movies/close-me</h1>" +
+          "<script>fetch('/v/mov-close-me.mp4',{mode:'no-cors'}).catch(function(){})</script></body></html>");
         return;
       }
       const cm = /^\/(actress|tag|movies)\/([^/]+)\//.exec(p);
@@ -608,20 +718,30 @@ async function phaseF() {
 // movies tab closes. Pre-fix this phase FAILS (referer "" -> relay skipped).
 let chromeG = null; // { pid, cdpPort, extId, sandboxDir }
 
+// Chrome can hand the real browser off to a NEW process: the chrome.exe we
+// spawn exits, so taskkill of that PID is a silent no-op and the browser — the
+// one holding scripts/bv-*/chrome-*-ud open — survives the run. That is exactly
+// how this drill left an orphan Chrome tree behind on every run here (its
+// profile locked, so the sandbox removal below quietly failed and the next
+// checkout carried the leftovers as untracked files). Kill by PID first (the
+// normal case) and then sweep every chrome.exe whose command line names THIS
+// run's sandbox directory, so nothing this drill launched can outlive it.
 function killChromeG() {
   if (chromeG && chromeG.pid != null) {
     try { execFileSync("taskkill", ["/PID", String(chromeG.pid), "/T", "/F"], { stdio: "ignore" }); } catch (e) { /* already gone */ }
     chromeG.pid = null;
   }
+  try {
+    execFileSync("powershell", ["-NoProfile", "-Command",
+      "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Where-Object { $_.CommandLine -like '*" + sandbox + "*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    ], { stdio: "ignore" });
+  } catch (e) { /* no powershell / no leftovers: nothing to sweep */ }
 }
 
 async function phaseG(port) {
   console.log("--- Phase G: auto-close movies tab across an MV3 SW death (extension drill) ---");
-  const chromePath = process.env.CFT_CHROME || path.join(ROOT, ".freebuff", "xt-cft", "chrome-win64", "chrome.exe");
-  if (!fs.existsSync(chromePath)) {
-    pass("G auto-close drill", "SKIPPED - Chrome for Testing not found (set CFT_CHROME or .freebuff/xt-cft)");
-    return;
-  }
+  const chromePath = cftPathOrSkip("G auto-close drill");
+  if (!chromePath) return;
 
   // Minimal CDP client (same wire shape as the thread xt-lib, inlined).
   class Gcdp {
@@ -752,8 +872,8 @@ async function phaseG(port) {
     let src = fs.readFileSync(bg, "utf8");
     if (!src.includes('"ws://127.0.0.1:8766"')) {
       src = src.replace('"ws://127.0.0.1:8765"', '"ws://127.0.0.1:8766"');
-      fs.writeFileSync(bg, src);
     }
+    fs.writeFileSync(bg, src);
     if (!fs.readFileSync(bg, "utf8").includes('"ws://127.0.0.1:8766"')) throw new Error("WS port override failed");
 
     const chromeUd = path.join(sandbox, "chrome-ud");
@@ -768,7 +888,7 @@ async function phaseG(port) {
       "--remote-debugging-port=0",
       "--enable-unsafe-extension-debugging",
       "--no-first-run", "--no-default-browser-check", "--disable-session-crashed-bubble",
-      "--disable-component-update", "--no-service-autorun",
+      "--disable-component-update",
       "about:blank"
     ], { detached: true, windowsHide: false, stdio: ["ignore", cOut, cErr] });
     cChild.unref();
@@ -790,10 +910,40 @@ async function phaseG(port) {
     const swEval = makeSwEval(b, wakeUrl).value;
     G("chrome up on " + cdpPort + ", close-me=" + closeTabUrl);
 
-    // Open the close-me tab FIRST: its video capture wakes the SW and lands
-    // the entry (autoGrab is still OFF, so nothing is harvested yet). A fresh
-    // Chrome profile defers the first navigation, so activate the tab and poll
-    // for the committed URL instead of trusting a blind sleep.
+    // ---- start the worker BEFORE the capture page loads ----
+    // An MV3 service worker that is not running does not receive a page's
+    // webRequest events, and this fixture fetches its mp4 within milliseconds
+    // of the commit. Waking the worker on the first swEval below (after the tab
+    // had already loaded) made the capture a pure startup race: `found` stayed
+    // empty, the harvest had nothing to send, no download completed and no
+    // dv-close-tab ever arrived — the phase failed as "movies tab still open"
+    // (diagnosed 2026-09-14: mem/stored/captured all empty pre-kill while the
+    // fixture logged 5 GETs of the mp4, and a probe request issued once the
+    // worker was up captured fine). Wake it here through the drill's own path:
+    // a fixture page's content script messages the worker, which starts it for
+    // good. The page's own capture is pruned by the remove-found step below.
+    const gObs = wsObserve(["http://127.0.0.1:" + port + "/v/mov-close-me.mp4"], 55000);
+
+    const wakeTabId = await gopen(b, wakeUrl);
+    if (wakeTabId) { try { await b.send("Target.activateTarget", { targetId: wakeTabId }); } catch (e) {} }
+    // Wait for PROOF the worker is running: the wake page's own video has to
+    // land in `found`, which can only happen through the content script's
+    // runtime message (that message is what starts the worker). Closing the
+    // wake tab right away was the trap — the page's content script had not run
+    // yet, so nothing ever messaged the worker.
+    let workerUp = false;
+    for (let i = 0; i < 30 && !workerUp; i++) {
+      try { workerUp = (await swEval(`found.length`)) > 0; } catch (e) { workerUp = false; }
+      if (!workerUp) await sleep(500);
+    }
+    if (wakeTabId) await gclose(b, wakeTabId);
+    if (!workerUp) throw new Error("extension worker never woke: no capture from the wake page (" + wakeUrl + ")");
+    G("worker running before the capture page loads");
+
+    // Open the close-me tab: its video capture lands the entry (autoGrab is
+    // still OFF, so nothing is harvested yet). A fresh Chrome profile defers
+    // the first navigation, so activate the tab and poll for the committed URL
+    // instead of trusting a blind sleep.
     const closeTabId2 = await gopen(b, closeTabUrl);
     if (closeTabId2) { try { await b.send("Target.activateTarget", { targetId: closeTabId2 }); } catch (e) {} }
     let closeTabId = -1;
@@ -830,8 +980,22 @@ async function phaseG(port) {
     G("popup open");
 
     // Prune everything except the close-me capture so the harvest is focused.
-    // (Runs now that the popup receiver is open; before the kill.)
-    await swEval(`chrome.runtime.sendMessage({ type: "remove-found", urls: found.filter(f => !f.url.includes("mov-close-me.mp4")).map(f => f.url) })`);
+    // This MUST be driven from the POPUP context (open above): a
+    // chrome.runtime.sendMessage from the SW does not deliver to the SW's own
+    // onMessage listener, so the old self-directed remove-found was a silent
+    // no-op. That mattered: the wake page's own capture then stayed in `found`,
+    // every later dv-monitor-grab re-sent it, and those extra `download`
+    // messages burned the app's global crawl throttle (cold burst 8s, then
+    // 4/min) — so the close-me enqueue came back PACE_LIMITED, no download ran,
+    // no dv-close-tab arrived and the tab stayed open (diagnosed 2026-09-14).
+    const pruned5 = await geval(popupWs, `new Promise((done) => {
+      chrome.runtime.sendMessage({ type: "get-found" }, (r) => {
+        const urls = ((r && r.found) || []).filter((f) => !f.url.includes("mov-close-me.mp4")).map((f) => f.url);
+        if (!urls.length) return done(0);
+        chrome.runtime.sendMessage({ type: "remove-found", urls }, () => done(urls.length));
+      });
+    })`);
+    G("pruned" + (pruned5 ? " " + pruned5 : " 0") + " non-target capture(s) via the popup receiver");
     await sleep(500);
 
     // ---- F5a: force the exact SW-death storage shape ----
@@ -853,37 +1017,50 @@ async function phaseG(port) {
     // swDead can legitimately be 0 (already gone in the first poll) — guard on
     // null, not falsiness, or a fast kill is misread as a failure.
     if (swDead == null) { fail("G SW death", "service worker target never disappeared after closeTarget"); return; }
+
+    // Let the app's crawl throttle forget the wake-page traffic before the
+    // harvest. The page that started the worker is an ordinary video page, so
+    // the extension's always-on auto-grab (content.js DEFAULT_CONFIG.autoGrab /
+    // bestOnly are both ON) sent its video to the app; every one of those
+    // `download` messages counts against the throttle — 8s burst, then 4/min
+    // per socket — and the real target's enqueue would come back PACE_LIMITED
+    // (diagnosed 2026-09-14). The throttle clears itself after a 10s idle
+    // window, so waiting past that resets it without touching the product or
+    // the drill's isolated 8766 pairing.
+    await sleep(13000);
     G("toggle autoGrab ON via popup");
 
-    // ---- harvest: toggle autoGrab ON via the popup (config-truth clicks) ----
-    // The ON edge pushes dv-monitor-grab; the first click wakes a FRESH worker
-    // (loadPersisted restores the pageUrl-less entry) and the retry loop covers
-    // the SW-wake + WS-reconnect window.
+    // ---- harvest: arm auto-grab via the popup, then RE-FIRE the edge ----
+    // The ON edge pushes dv-monitor-grab, but the fresh worker's loadPersisted
+    // restore is async: the first harvest can run against an empty `found`.
+    // Waiting for the restore and then toggling OFF->ON guarantees the harvest
+    // sees the restored pageUrl-less entry.
+    //
+    // No swEval runs after the kill on purpose. An swEval against a sleeping
+    // worker opens the wake page, and with autoGrab ON that page's own video is
+    // auto-downloaded by the content script — every such `download` message
+    // counts against the app's crawl throttle (8s burst, then 4/min), so the
+    // real target's enqueue came back PACE_LIMITED and the tab stayed open
+    // (diagnosed 2026-09-14: the drill-copy counters read grab=2, ok=0 with
+    // lasterr "Pace limit: too many downloads in the last minute."). The tab
+    // state is therefore checked over CDP, not through the worker.
     const popupClick = () => geval(popupWs, `document.getElementById('monitor').click()`);
     await clickUntilMonitor(true, popupClick);
-    await sleep(4000);
-    // Fresh-worker loadPersisted is async — if the enable-edge harvest fired
-    // before the restore, re-toggle OFF->ON to re-fire dv-monitor-grab.
-    const grabbed5 = await swEval(`(() => { const f = found.find(x => x.url.includes('mov-close-me')); return f ? { added: !!f.added } : null; })()`);
-    G("post-toggle entry=" + JSON.stringify(grabbed5));
-    if (grabbed5 && !grabbed5.added) {
-      G("first harvest missed the restored entry (loadPersisted race) — re-toggling OFF->ON");
-      await clickUntilMonitor(false, popupClick);
-      await clickUntilMonitor(true, popupClick);
-      await sleep(2000);
-    }
+    await sleep(4000); // let the fresh worker's loadPersisted() settle
+    await clickUntilMonitor(false, popupClick);
+    await clickUntilMonitor(true, popupClick);
 
     let closed = false;
     for (let i = 0; i < 45; i++) {
       await sleep(1000);
-      const stillThere = await swEval(`chrome.tabs.query({}).then(ts => ts.some(t => t.url && t.url === ${JSON.stringify(closeTabUrl)}))`);
+      const stillThere = (await glist(cdpPort).catch(() => [])).some((t) => t.type === "page" && t.url === closeTabUrl);
       if (!stillThere) { closed = true; break; }
     }
-    const diag5 = await swEval(`(() => { const f = found.find(x => x.url.includes('mov-close-me')); return f ? { pageUrl: f.pageUrl, added: f.added } : null; })()`);
+    const gSeen = await gObs;
     if (closed) {
       pass("G auto-close across SW death", "pageUrl-less entry restored after SW death -> send-time referer -> download done -> dv-close-tab closed the movies tab (SW dead in " + swDead + "s)");
     } else {
-      fail("G auto-close across SW death", "movies tab still open after grab+done; diag=" + JSON.stringify(diag5) + " config.autoGrab=" + readConfigGrab());
+      fail("G auto-close across SW death", "movies tab still open after grab+done; appSeen=" + JSON.stringify(gSeen.seen.slice(-6)) + " why=" + gSeen.why + " config.autoGrab=" + readConfigGrab());
     }
   } catch (e) {
     fail("G auto-close across SW death", "drill error: " + ((e && e.message) || e));
@@ -976,11 +1153,8 @@ async function hSwEval(browser, expr) {
 
 async function phaseH(port) {
   console.log("--- Phase H: always-on crawler auto-sends a JAV-host capture over the real WS relay ---");
-  const chromePath = process.env.CFT_CHROME || path.join(ROOT, ".freebuff", "xt-cft", "chrome-win64", "chrome.exe");
-  if (!fs.existsSync(chromePath)) {
-    pass("H crawler auto-send relay", "SKIPPED - Chrome for Testing not found (set CFT_CHROME or .freebuff/xt-cft)");
-    return;
-  }
+  const chromePath = cftPathOrSkip("H crawler auto-send relay");
+  if (!chromePath) return;
   const crawlList = "http://supjav.com:" + port + "/movies/crawl-me/";
   const crawlMovie = "http://supjav.com:" + port + "/movie-code-123.html";
   const plainList = "http://127.0.0.1:" + port + "/movies/no-crawl/";
@@ -1017,7 +1191,7 @@ async function phaseH(port) {
       "--remote-debugging-port=0",
       "--enable-unsafe-extension-debugging",
       "--no-first-run", "--no-default-browser-check", "--disable-session-crashed-bubble",
-      "--disable-component-update", "--no-service-autorun",
+      "--disable-component-update",
       // The fixture is served at the real supjav.com host: Chrome resolves it
       // to loopback so isCrawlHost sees a JAV host on the captured URL.
       "--host-resolver-rules=MAP supjav.com 127.0.0.1",
@@ -1119,7 +1293,121 @@ function describePortHolder(port) {
   return "port " + port + " is in use by an unidentified process; refusing to run.";
 }
 
+// ---- Phase I helpers: a live port change must move the listener with it ----
+function configPort() {
+  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")).port; } catch (e) { return 0; }
+}
+
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+  });
+}
+
+// Hold a port the way any other app on the machine would, so the app's bind of
+// it is a real EADDRINUSE (libuv uses SO_EXCLUSIVEADDRUSE on Windows).
+function holdPort(port) {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer((s) => s.destroy());
+    srv.once("error", reject);
+    srv.listen(port, "127.0.0.1", () => resolve(srv));
+  });
+}
+
+function portAnswers(port, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    const s = net.connect({ host: "127.0.0.1", port });
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; try { s.destroy(); } catch (e) {} resolve(v); };
+    s.on("connect", () => finish(true));
+    s.on("error", () => finish(false));
+    s.setTimeout(timeoutMs, () => finish(false));
+  });
+}
+
+// Read the app's hello off a port. The payload's `port` is what the app CLAIMS
+// to be serving on — the whole point of the phase is that it equals the port
+// that actually answered.
+function wsHello(port, timeoutMs = 10000) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    let done = false;
+    let ws = null;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      try { if (ws) ws.terminate(); } catch (e) { /* ignore */ }
+      resolve(v);
+    };
+    const tryOnce = () => {
+      if (done) return;
+      if (Date.now() - t0 > timeoutMs) { finish({ ok: false, why: "timed out after " + timeoutMs + "ms" }); return; }
+      ws = new WebSocket("ws://127.0.0.1:" + port);
+      ws.on("message", (d) => {
+        let m;
+        try { m = JSON.parse(d.toString()); } catch (e) { return; }
+        if (m && m.type === "hello") finish({ ok: true, hello: m });
+      });
+      ws.on("error", () => { try { ws.terminate(); } catch (e) {} setTimeout(tryOnce, 400); });
+      ws.on("close", () => { if (!done) setTimeout(tryOnce, 400); });
+    };
+    tryOnce();
+  });
+}
+
+async function waitPortClosed(port, timeoutMs = 8000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    if (!(await portAnswers(port))) return true;
+    await sleep(300);
+  }
+  return false;
+}
+
+async function phaseI() {
+  console.log("--- Phase I: a live port change moves the WS server with it ---");
+  // Baseline: the hello must name the port it is served from.
+  const base = await wsHello(WS_PORT, 8000);
+  if (!base.ok) return fail("I baseline hello", "nothing answered on " + WS_PORT);
+  if (Number(base.hello.port) !== WS_PORT) return fail("I baseline advertises its own port", "hello.port=" + base.hello.port + " expected " + WS_PORT);
+
+  // A live config edit (the file-watcher path a hand-edited config.json takes)
+  // must move the listener, not just the value the panel prints.
+  const target = await findFreePort();
+  if (target === WS_PORT) return fail("I pick a target port", "ephemeral port collided with " + WS_PORT);
+  writeConfig({ port: target });
+  const moved = await wsHello(target, 15000);
+  if (!moved.ok) return fail("I new port serves", "nothing answered on " + target + ": " + moved.why);
+  if (Number(moved.hello.port) !== target) return fail("I hello follows the listener", "hello.port=" + moved.hello.port + " expected " + target);
+  if (!(await waitPortClosed(WS_PORT))) return fail("I old port released", WS_PORT + " still accepting connections after the move");
+  if (configPort() !== target) return fail("I config matches the bound port", "config.json port=" + configPort() + " expected " + target);
+  pass("I live port change", WS_PORT + " -> " + target + " (hello.port=" + moved.hello.port + ", old port released, config in sync)");
+
+  // A port someone else holds: fall forward, and persist the port really bound
+  // so config.json can never point at an endpoint nothing listens on.
+  const taken = target + 1;
+  let holder = null;
+  try { holder = await holdPort(taken); } catch (e) { return fail("I hold a busy port", taken + ": " + e.message); }
+  try {
+    writeConfig({ port: taken });
+    const fell = await wsHello(taken + 1, 15000);
+    if (!fell.ok) return fail("I fall-forward serves", "nothing answered on " + (taken + 1) + ": " + fell.why);
+    if (Number(fell.hello.port) !== taken + 1) return fail("I fall-forward advertises the real port", "hello.port=" + fell.hello.port + " expected " + (taken + 1) + " (the busy " + taken + " must never be advertised)");
+    if (configPort() !== taken + 1) return fail("I fall-forward persisted", "config.json port=" + configPort() + " expected " + (taken + 1));
+    if (!(await waitPortClosed(target))) return fail("I previous port released", target + " still accepting connections after the fall-forward");
+    pass("I busy port falls forward", "requested " + taken + " (held by the drill) -> bound + advertised + persisted " + (taken + 1));
+  } finally {
+    try { if (holder) holder.close(); } catch (e) { /* ignore */ }
+  }
+}
+
 async function main() {
+  if (CFT_PROBE) process.exit(probeChromeForTesting());
   if (!fs.existsSync(ELECTRON)) { console.log("ABORT electron not found: " + ELECTRON); process.exit(1); }
   const busy = await new Promise((resolve) => {
     const s = net.connect({ host: "127.0.0.1", port: WS_PORT });
@@ -1162,6 +1450,9 @@ async function main() {
     await run("F", () => phaseF());
     await run("G", () => phaseG(port));
     await run("H", () => phaseH(port));
+    // Last: it deliberately moves the app off WS_PORT (and persists the move),
+    // so every phase that dials 8766 has to run before it.
+    await run("I", () => phaseI());
   } catch (e) {
     fail("uncaught", (e && e.stack) || String(e));
   }
@@ -1180,9 +1471,14 @@ main().then(async (code) => {
     // taskkill returns before the dying tree releases file handles (GPU cache,
     // DIPS wal); give it a beat, then retry the removal until it sticks.
     await sleep(1200);
+    let removed = false;
     for (let i = 0; i < 12; i++) {
-      try { fs.rmSync(sandbox, { recursive: true, force: true }); break; } catch (e) { await sleep(500); }
+      try { fs.rmSync(sandbox, { recursive: true, force: true }); removed = true; break; } catch (e) { await sleep(500); }
     }
+    // Never leave the mess quietly: a surviving sandbox means something this
+    // drill started is still running (a chrome.exe holding the profile), which
+    // is worth saying out loud rather than leaving for the next run to trip over.
+    if (!removed && fs.existsSync(sandbox)) console.log("WARN  sandbox not removed (a process still holds it): " + sandbox);
     try { fs.unlinkSync(CONFIG_PATH); } catch (e) { /* ignore */ }
   } else {
     console.log("kept sandbox at " + sandbox + " (config.json left in place)");
