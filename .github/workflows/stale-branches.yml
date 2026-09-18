@@ -1,0 +1,38 @@
+name: stale-branches (report)
+
+# Weekly tidy-up report: classifies every remote branch against master and
+# flags which ones are safe to delete (merged / tree-identical squash residue /
+# metadata drift) and which hold unique content (needs review). READ-ONLY —
+# it never deletes anything; deletion stays a human decision per
+# docs/branch-conventions.md.
+#
+# Runs on the self-hosted runner (buffy-runner). Deliberately uses NO
+# marketplace actions beyond actions/checkout (which lives in the runner's
+# local action cache): no setup-node — the runner machine has node on PATH —
+# so this workflow cannot be broken by codeload.github.com throttling.
+
+on:
+  schedule:
+    - cron: "23 2 * * 1" # Mondays 02:23 UTC (off the top-of-hour crunch)
+  workflow_dispatch:
+    inputs: {}
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: ancestor checks and tip dates need it
+
+      - name: Report stale branches (read-only)
+        shell: cmd
+        run: node scripts\stale-branches.js --json
+
+      - name: Human summary
+        shell: cmd
+        run: node scripts\stale-branches.js
