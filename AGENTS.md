@@ -168,6 +168,9 @@
 - Add code comments unless explicitly asked.
 - Revert the built-in browser to `<webview>` (the 1/5 sizing bug).
 
+## Branch & tag conventions — one permanent branch, immutable tags
+`master` is the only permanent branch; every change arrives via squash-merged PR and the branch is deleted the moment it merges (squash merges break git ancestry, so "fully absorbed" stale branches are diff-verified then deleted — see docs/branch-conventions.md). Tags (`vX.Y.Z`, annotated, on the version-bump squash) are immutable: the `tag-protection` ruleset covers `refs/tags/*` with deletion + non-fast-forward rules and no bypass actors — a delete/retag push is rejected even for admins. Fix a bad release by shipping `X.Y.(Z+1)`, never by moving a tag.
+
 ## Release checklist — confirm a green boot-verify drill before ANY 1.3.x dist build
 Before bumping the version or running `npm run dist`, a green real-app drill is MANDATORY — `npm test` and `npm run check` are static/offline gates and do not boot the app. A drill run is green when it is **8/8 checks, exit 0**. Two acceptable ways to get one (either counts):
 1. **Local (fastest):** `npm run boot-verify` from a clean tree (no `config.json`; the script aborts if port 8766 is busy or `config.json` exists without `--force`). Takes ~5–6 min: boot/WS hello on isolated port 8766, byte-exact download, schedule-window gating (runtime-derived closed window), site-rule bypass + folder override, auto-retry timing, cap exhaustion, CDP-driven budget reset, fair per-host pump. The prod app on 8765 is never touched; the sandbox is cleaned up on success.
