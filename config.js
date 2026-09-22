@@ -52,6 +52,12 @@ const DEFAULT_CONFIG = {
   // URL does not churn the queue forever (0 = unlimited).
   autoRetryMinutes: 0,
   autoRetryMax: 5,
+  // Automatic Cloudflare fallback: when a plain-HTTP page fetch comes back as
+  // a CF challenge interstitial, re-fetch it through the cf-browser bridge (a
+  // real headed Chrome). false disables the automatic handoff — challenged
+  // pages then surface "requires-browser" (manual browse) instead. Applied
+  // live: no restart needed when config.json changes.
+  cfBrowserFallback: true,
   // Per-site automation rules for NEW downloads, matched by host:
   // { host, folder, start } — folder overrides the destination (unless the
   // caller picked one), start lets the item begin even outside the window.
@@ -66,7 +72,7 @@ const NUMERIC_FIELDS = [
 ];
 // Boolean toggles.
 const BOOLEAN_FIELDS = [
-  "autoProxy", "saveHistory", "skipDuplicates", "autoCloseTab", "thumbnails", "autoGrab"
+  "autoProxy", "saveHistory", "skipDuplicates", "autoCloseTab", "thumbnails", "autoGrab", "cfBrowserFallback"
 ];
 // String path fields.
 const STRING_FIELDS = ["downloadDir", "downloadDir2", "downloadDir3", "ffmpegPath", "theme", "scheduleWindowStart", "scheduleWindowEnd"];

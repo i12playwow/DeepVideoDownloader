@@ -11,6 +11,7 @@ const os = require("os");
 const { execFile } = require("child_process");
 const { WebSocketServer } = require("ws");
 const { DownloadManager, requestWithRedirects } = require("./downloader");
+const { setFallbackEnabled } = require("./lib/http");
 const { ProxyManager } = require("./proxy");
 const browserOpen = require("./lib/browser-open");
 const wsBridge = require("./lib/ws-bridge");
@@ -18,6 +19,7 @@ const { statusPayload } = require("./lib/status");
 const { createSettings } = require("./lib/settings");
 const { createBuiltinBrowser } = require("./lib/browser");
 const { registerIpc } = require("./lib/ipc");
+const cfFallback = require("./lib/cf-fallback");
 
 // Dev builds read/write config.json next to main.js (gitignored). Packaged
 // apps must NOT write into the read-only app.asar — use the writable userData
@@ -67,12 +69,47 @@ const settings = createSettings({
     proxyManager = new ProxyManager(cfg);
     dm.config = cfg;
     dm.proxyManager = proxyManager; // drop stale bad/latency proxy state
+    setFallbackEnabled(cfg.cfBrowserFallback); // live CF-fallback kill switch
     pushAutoGrabState(); // keep the extension's auto-grab mirror in sync
     applyConfiguredPort(cfg.port); // a live port change moves the listener with it
   }
 });
 let proxyManager = new ProxyManager(settings.get());
 let dm = new DownloadManager({ config: settings.get(), proxyManager, onUpdate: pushUpdate, cookieProvider: (url) => cookieHeaderFor(url), onRequiresBrowser: (url) => browserOpen.queueBrowserOpen(url) });
+// Note: the cf-fallback UI hook is registered after the browser singletons
+// exist (pushCfFallbackToast below) — it must fire only into a live window.
+
+// CF fallback surfaces + kill switch: the engine hook fires when a page fetch
+// hands off to the cf-browser bridge (a real headed Chrome the user can SEE —
+// say why). Debounced per burst: one challenge solve serves every queued
+// fetch, and a cold solve takes ~8s (longer with a human click), so a burst
+// collapses to one toast naming the first host + how many pages are in it.
+let cfToastTimer = null;
+let cfToastCount = 0;
+let cfToastFirstUrl = null;
+function pushCfFallbackToast(url) {
+  if (!settings.get().cfBrowserFallback) return; // toggle off: no browser, no toast
+  cfToastCount++;
+  if (!cfToastFirstUrl) cfToastFirstUrl = url;
+  if (cfToastTimer) return;
+  cfToastTimer = setTimeout(() => {
+    cfToastTimer = null;
+    const n = cfToastCount;
+    cfToastCount = 0;
+    const first = cfToastFirstUrl;
+    cfToastFirstUrl = null;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    try {
+      let host = first;
+      try { host = new URL(first).hostname; } catch (e) { /* keep raw string */ }
+      mainWindow.webContents.send("cf-fallback", { host, count: n, first: n === 1 });
+    } catch (e) { /* window closing */ }
+  }, 2000);
+}
+cfFallback.setEventHook(pushCfFallbackToast);
+// Boot-time init (onApply only fires on a change): a cfBrowserFallback:false
+// config.json must take effect without waiting for a settings save.
+setFallbackEnabled(settings.get().cfBrowserFallback);
 
 // Auto-grab: push the current autoGrab state to every connected extension.
 // Sent on hello-time applies, on setting changes, and it also triggers an

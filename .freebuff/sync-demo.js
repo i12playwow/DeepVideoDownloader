@@ -457,7 +457,7 @@ const SELF_GOLDEN = {
   selHandlers: [{ id: "dlsBody", ref: "closest(input[data-sel])" }],
   selEmitters: [{ fn: "rowHtml", checkbox: true }],
   selPathVia: ["render"],
-  shimExposed: 36 // 34 + listClients/onClients (Extension bridge panel)
+  shimExposed: 37 // 36 + onCfFallback (Cloudflare fallback toast, mirrors preload.js)
 };
 
 const sorted = (xs) => [...xs].sort();

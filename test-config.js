@@ -53,6 +53,15 @@ assert("keeps true bool", cb.autoProxy === true);
 assert("keeps false bool", cb.thumbnails === false);
 assert("truthy number -> true", cb.saveHistory === true);
 
+// cfBrowserFallback: the automatic CF-browser-fallback kill switch.
+assert("cfBrowserFallback defaults ON", DEFAULT_CONFIG.cfBrowserFallback === true);
+const ccf = validateConfig({ cfBrowserFallback: 0 });
+assert("cfBrowserFallback 0 -> false (bool coerced)", ccf.cfBrowserFallback === false, ccf.cfBrowserFallback);
+const ccfStr = validateConfig({ cfBrowserFallback: "" });
+assert("cfBrowserFallback empty string -> false", ccfStr.cfBrowserFallback === false, ccfStr.cfBrowserFallback);
+const ccfOff = loadConfig((() => { const f = path.join(os.tmpdir(), "cfg-cfoff.json"); fs.writeFileSync(f, JSON.stringify({ cfBrowserFallback: false })); return f; })());
+assert("cfBrowserFallback:false survives loadConfig round-trip", ccfOff.cfBrowserFallback === false, ccfOff.cfBrowserFallback);
+
 const cd = validateConfig({ downloadDir: 0 });
 assert("bad downloadDir -> default", cd.downloadDir === DEFAULT_CONFIG.downloadDir);
 const cEmpty = validateConfig({ proxies: ["garbage://x", "ftp://y"] });

@@ -803,6 +803,17 @@ function showToast(title, actions) {
   }, 15000);
 }
 
+// ---------------- Cloudflare browser fallback ----------------
+// The engine's plain HTTP fetch hit a CF challenge and handed the page to the
+// cf-browser bridge: a real headed Chrome the user can SEE on screen. Say so,
+// and why, instead of a mystery browser window appearing.
+window.api.onCfFallback((info) => {
+  const n = info.count > 1 ? " (" + info.count + " pages)" : "";
+  showToast("🛡 Cloudflare challenge on " + info.host + " — fetching via the helper browser" + n, [
+    { label: "Dismiss", className: "btn ghost", onClick: () => {} }
+  ]);
+});
+
 // ---------------- clipboard monitoring ----------------
 window.api.onClipboardUrl((data) => {
   showToast("📋 Video URL detected in clipboard", [

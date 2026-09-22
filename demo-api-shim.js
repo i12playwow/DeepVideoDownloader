@@ -95,7 +95,7 @@
   }
 
   // ---- event fan-out ----------------------------------------------------
-  let updateCb = null, historyCb = null, clipboardCb = null, fileCb = null;
+  let updateCb = null, historyCb = null, clipboardCb = null, fileCb = null, cfCb = null;
   function emit(batch) { if (updateCb) updateCb(batch); }
   function emitHistory() { if (historyCb) historyCb(); }
   const clone = (x) => JSON.parse(JSON.stringify(x));
@@ -191,6 +191,7 @@
     onHistoryUpdated: (cb) => { historyCb = cb; },
     onClipboardUrl: (cb) => { clipboardCb = cb; },
     onFileOpened: (cb) => { fileCb = cb; },
+    onCfFallback: (cb) => { cfCb = cb; },
     onClients: (cb) => { clientsCb = cb; },
 
     getSettings: async () => clone(settings),
@@ -429,6 +430,7 @@
     fireClients: () => { if (clientsCb) clientsCb(bridgeSnapshot()); },
     fireClipboard: (url) => { if (clipboardCb) clipboardCb({ url }); },
     fireFileOpened: (path, name) => { if (fileCb) fileCb({ path, name }); },
+    fireCfFallback: (host, count) => { if (cfCb) cfCb({ host: host || "supjav.com", count: count || 1, first: (count || 1) === 1 }); },
     get state() { return { items: items.map((i) => ({ id: i.id, status: i.status, received: i.received })), history: history.length }; }
   };
 
