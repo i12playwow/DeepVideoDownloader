@@ -3,7 +3,9 @@
 // fetchHtml: challenge detection, the fallback router (page fetches fall
 // back, .m3u8 never does, cfFallback:false opts out), the cf-browser child
 // bridge protocol (--out - base64 block), failure semantics
-// (requires-browser + warmup cooldown), and regex parity with lib/errors.
+// (requires-browser + warmup cooldown), the UI engagement event hook
+// (setEventHook: one fire per engagement, observer failures swallowed), and
+// regex parity with lib/errors.
 // Run: node test-cf-fallback.js   (no Electron, no real browser required)
 const http = require("http");
 const fs = require("fs");
@@ -18,7 +20,8 @@ function assert(label, cond, detail) {
 
 const cf = require("./lib/cf-fallback");
 const { isCfChallengeHtml } = require("./lib/errors");
-const { fetchHtml } = require("./lib/http");
+const httpLib = require("./lib/http");
+const { fetchHtml } = httpLib;
 
 async function main() {
   console.log("\n=== 1: challenge detection ===\n");
@@ -100,6 +103,27 @@ async function main() {
     let threw = null;
     try { await fetchHtml(base + "/challenge-fail", null); } catch (e) { threw = e; }
     assert("bridge failure -> requires-browser category", threw && threw.category === "requires-browser", "cat=" + (threw && threw.category));
+
+    // ---- install-wide kill switch (cfBrowserFallback config toggle) ----
+    // Disabled: the router must return challenge bodies untouched and never
+    // reach the bridge (no browser window, no spawn — config off means off).
+    cf._state.lastWarmupFail = 0;
+    const hookCalls = [];
+    cf.setEventHook((u) => hookCalls.push(u));
+    httpLib.setFallbackEnabled(false);
+    calls.length = 0;
+    const disabledBody = await fetchHtml(base + "/challenge", null);
+    assert("disabled router returns challenge body untouched", disabledBody === CHALLENGE, "got=" + String(disabledBody).slice(0, 30));
+    assert("disabled router never reaches the bridge", calls.length === 0, "calls=" + JSON.stringify(calls));
+    assert("disabled router never fires the toast hook", hookCalls.length === 0, "fired=" + JSON.stringify(hookCalls));
+
+    // re-enabled: the exact same request routes to the bridge again
+    httpLib.setFallbackEnabled(true);
+    calls.length = 0;
+    const reEnabled = await fetchHtml(base + "/challenge", null);
+    assert("re-enabled router routes to the bridge again", calls.length === 1 && reEnabled === REAL, "calls=" + JSON.stringify(calls));
+    assert("re-enabled router fires the toast hook", hookCalls.length === 1, "fired=" + JSON.stringify(hookCalls));
+    cf.setEventHook(null);
 
     cf._state.fetchViaCfBrowser = origBridge;
     cf._state.lastWarmupFail = 0;
@@ -205,6 +229,47 @@ async function main() {
     const out2 = await cf.fetchPageWithFallback("https://x.test/b", "<title>Just a moment...</title>");
     assert("challenge body routes to bridge", out2 === "<html>ok</html>" && bridgeCalls === 1);
     cf._state.fetchViaCfBrowser = orig;
+  }
+
+  console.log("\n=== 5: engagement event hook (setEventHook -> renderer toast) ===\n");
+  {
+    const orig = cf._state.fetchViaCfBrowser;
+    cf._state.fetchViaCfBrowser = async () => "<html>ok</html>";
+    cf._state.lastWarmupFail = 0;
+
+    // exactly one fire per engagement, with the URL handed over
+    let fired = [];
+    cf.setEventHook((url) => fired.push(url));
+    await cf.fetchPageWithFallback("https://x.test/hook-a", "<title>Just a moment...</title>");
+    assert("hook fires once on engagement", fired.length === 1 && fired[0] === "https://x.test/hook-a", "fired=" + JSON.stringify(fired));
+
+    // pass-through (non-challenge) must stay silent
+    fired = [];
+    await cf.fetchPageWithFallback("https://x.test/hook-b", "<html>normal</html>");
+    assert("hook silent on non-challenge pass-through", fired.length === 0, "fired=" + JSON.stringify(fired));
+
+    // an engagement that then fails still fired (the user must be told why a
+    // browser window opened, even when the fallback cannot finish)
+    cf._state.fetchViaCfBrowser = async () => { throw new Error("stub boom"); };
+    fired = [];
+    let threw = null;
+    try { await cf.fetchPageWithFallback("https://x.test/hook-c", "<title>Just a moment...</title>"); } catch (e) { threw = e; }
+    assert("hook fired before bridge failure (user still informed)", fired.length === 1 && threw && threw.category === "requires-browser", "fired=" + JSON.stringify(fired));
+
+    // a throwing observer must never break or delay the fetch path
+    cf._state.fetchViaCfBrowser = async () => "<html>ok</html>";
+    cf.setEventHook(() => { throw new Error("observer exploded"); });
+    const out3 = await cf.fetchPageWithFallback("https://x.test/hook-d", "<title>Just a moment...</title>");
+    assert("throwing observer does not break the fetch", out3 === "<html>ok</html>");
+
+    // clearing the hook goes back to fully silent
+    cf.setEventHook(null);
+    fired = [];
+    await cf.fetchPageWithFallback("https://x.test/hook-e", "<title>Just a moment...</title>");
+    assert("cleared hook (null) is silent", fired.length === 0, "fired=" + JSON.stringify(fired));
+
+    cf._state.fetchViaCfBrowser = orig;
+    cf._state.lastWarmupFail = 0;
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
