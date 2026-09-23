@@ -112,6 +112,8 @@
   pushStatusLog("[cf-fallback] challenge on supjav.com skipped (browser fallback disabled: site rule)");
   pushStatusLog("[cf-fallback] challenge on slowcf.example.com skipped (browser fallback disabled: cfBrowserFallback: false)");
   pushStatusLog("[queue] sample video failed (network), auto-retry scheduled in 5 min");
+  pushStatusLog("[ws] Chrome extension connected on port 8766");
+  pushStatusLog("[grab] video URL picked up from the clipboard: https://missav.ws/w/DEMO123");
   pushStatusLog("[ws] listening on port 8766 (moved from 8765)");
 
   // ---- event fan-out ----------------------------------------------------
@@ -458,6 +460,8 @@
     fireClients: () => { if (clientsCb) clientsCb(bridgeSnapshot()); },
     fireStatusLog: (line) => pushStatusLog(line || "[demo] manual status event"),
     fireWsPort: () => pushStatusLog("[ws] listening on port " + (8800 + Math.floor(Math.random() * 100)) + " (moved from 8766)"),
+    fireWsClient: () => { const label = "Chrome extension"; pushStatusLog("[ws] " + label + " connected on port 8766"); setTimeout(() => pushStatusLog("[ws] " + label + " disconnected"), 1200); },
+    fireGrab: () => pushStatusLog("[grab] video URL picked up from the clipboard: https://missav.ws/w/SEED-DEMO"),
     get lastCopied() { return lastCopiedText; },
     fireClipboard: (url) => { if (clipboardCb) clipboardCb({ url }); },
     fireFileOpened: (path, name) => { if (fileCb) fileCb({ path, name }); },

@@ -316,14 +316,21 @@ async function startFairFixture(mp4) {
 }
 function stopFairFixture() { for (const x of [fixA, fixB]) { try { x && x.server.close(); } catch (e) {} } }
 
+let drillBooted = false;
 function writeConfig(patch) {
   // Preserve keys already in config.json (mid-run phase patches are applied
   // live by the app's file watcher). Without the merge, ANY phase write would
   // reset autoProxy/proxyRules to the base defaults and silently kill the
   // Phase H supjav.com routing — the resolver then fetches the REAL host and
   // hangs 30s. Explicit patch keys always win over preserved ones.
+  // The BOOT write must not inherit a pre-existing repo config (--force path):
+  // prev overriding base would leak the user's downloadDir/maxRetries into the
+  // sandbox — seen live with the restored real config, where Phase H's file
+  // landed in the user's real Downloads folder. Only writes after boot merge,
+  // which is the case the merge was written for.
   let prev = {};
-  try { prev = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")); } catch (e) { /* first write */ }
+  if (drillBooted) { try { prev = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")); } catch (e) { /* unparseable: start clean */ } }
+  drillBooted = true;
   const base = {
     port: WS_PORT,
     downloadDir: dlDir.split(path.sep).join("/"),
@@ -602,6 +609,37 @@ async function cdpRetry(itemId) {
       }
     });
     wd2.on("error", (e) => reject(e));
+  });
+}
+
+// Evaluate an arbitrary expression in the app's REAL renderer over CDP and
+// return its JSON value (Runtime.evaluate, returnByValue). Same transport as
+// cdpRetry: DevToolsActivePort -> /json -> the renderer.html page target.
+// Phase J uses this to read the window's Status log panel directly, proving
+// the status-log push channel delivered its line to the actual UI.
+async function cdpEvalExpr(expr, timeoutMs) {
+  const http = require("http");
+  const devtools = parseInt(String(fs.readFileSync(path.join(udDir, "DevToolsActivePort"), "utf8")).trim(), 10);
+  const getJson = (u) => new Promise((res, rej) => { const q = http.get(u, (r) => { let b = ""; r.on("data", (c) => (b += c)); r.on("end", () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } }); }); q.on("error", rej); q.setTimeout(5000, () => { q.destroy(new Error("timeout")); }); });
+  const targets = await getJson("http://127.0.0.1:" + devtools + "/json");
+  const page = targets.find((t) => t.type === "page" && /renderer.html$/.test(t.url));
+  if (!page) throw new Error("renderer page target not found");
+  return await new Promise((resolve, reject) => {
+    const watchdog = setTimeout(() => reject(new Error("cdp evaluate timeout")), timeoutMs || 15000);
+    const wd = new WebSocket(page.webSocketDebuggerUrl);
+    wd.on("open", () => { wd.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: expr, returnByValue: true } })); });
+    wd.on("message", (d) => {
+      const m = JSON.parse(d.toString());
+      if (m.id === 1) {
+        clearTimeout(watchdog);
+        try { wd.close(); } catch (e) {}
+        if (m.error) return reject(new Error(m.error.message));
+        if (m.result && m.result.exceptionDetails) return reject(new Error("renderer threw on the evaluated expression"));
+        const r = m.result && m.result.result;
+        resolve(r ? r.value : undefined);
+      }
+    });
+    wd.on("error", (e) => reject(e));
   });
 }
 
@@ -1439,7 +1477,10 @@ async function phaseI() {
 // (b) fail the item through to the resolver's requires-browser error, the
 // exact contract a user disabling the fallback per site expects; the ONE
 // concise "[cf-fallback] challenge on … skipped" line proves the skip was the
-// config's doing rather than a silent failure elsewhere. Runs before I.
+// config's doing rather than a silent failure elsewhere. The line must also
+// arrive on the live status-log PUSH (read back from the window's real Status
+// log panel over CDP), not only in the app log — that channel is what the
+// operator actually sees. Runs before I.
 async function phaseJ(port) {
   console.log("--- Phase J: cf:off site rule fails a CF challenge through to requires-browser (no bridge) ---");
   // autoRetryMinutes 0 keeps the terminal error deterministic (no requeue).
@@ -1467,6 +1508,11 @@ async function phaseJ(port) {
   }
   if (!applied) return fail("J rule applied live", "the app never consumed the cf:off siteRules edit (no normalized save echo in config.json)");
   await sleep(600); // onApply fires right after the echo save; give it a beat
+  // Baseline for the panel-push check below, taken BEFORE the item exists: the
+  // skip cannot have fired yet, so any J-supjav skipped line the panel shows
+  // afterwards arrived through this run's live push.
+  let beforeCount = -1;
+  try { beforeCount = await cdpEvalExpr("document.querySelectorAll('#statusLog li').length", 8000); } catch (e) { beforeCount = -1; }
   const urlCF = "http://supjav.com:" + port + "/movie-code-cf.html";
   const r = await wsDownload(urlCF, "bv-cf", "", 25000);
   const err = r.states.find((s) => s.status === "error");
@@ -1481,6 +1527,19 @@ async function phaseJ(port) {
   if (/cf-browser/i.test(both)) return fail("J bridge stayed cold", "cf-browser activity found in the app log (the fallback was NOT skipped)");
   const skipLine = both.split(/\r?\n/).find((l) => l.includes("[cf-fallback]") && l.includes("supjav.com") && l.includes("skipped"));
   if (!skipLine) return fail("J skip line logged", "no '[cf-fallback] challenge on supjav.com … skipped' line in the app log");
+  // The same line must reach the window's Status log panel through the live
+  // status-log push (baseline was captured before the item existed).
+  const deadlineP = Date.now() + 10000;
+  let panelHit = null;
+  while (Date.now() < deadlineP && !panelHit) {
+    await sleep(400);
+    try {
+      const lines = await cdpEvalExpr("Array.from(document.querySelectorAll('#statusLog li')).map(function(n){return n.textContent;})", 8000);
+      panelHit = (lines || []).map((s) => String(s)).find((l) => l.includes("[cf-fallback]") && l.includes("supjav.com") && l.includes("skipped"));
+    } catch (e) { /* transient CDP hiccup; keep polling */ }
+  }
+  if (!panelHit) return fail("J skip line pushed to panel", "no '[cf-fallback] … skipped' line in the window's Status log panel over CDP (before=" + beforeCount + " lines; the status-log push may be broken while the console line still fires)");
+  pass("J skip line pushed to panel", "live status-log push reached the window panel: " + panelHit.trim().slice(0, 110));
   pass("J cf:off gate live", "challenge -> requires-browser, bridge cold; " + skipLine.trim().slice(0, 110));
 }
 
@@ -1545,7 +1604,21 @@ main().then(async (code) => {
   stopFairFixture();
   try { if (fixture) fixture.close(); } catch (e) { /* ignore */ }
   if (configBackup) {
-    try { fs.copyFileSync(configBackup, CONFIG_PATH); fs.unlinkSync(configBackup); } catch (e) { /* ignore */ }
+    // The dying app can write config.json one last time AFTER taskkill returns
+    // (its handle-release lag is documented below). Restoring before that save
+    // lands means the save clobbers the restore — seen live: a --keep run left
+    // the drill's config in the repo, where test-config's real-config pins
+    // caught it. Settle first, restore, then verify it stuck and re-restore if
+    // the final save landed in between.
+    await sleep(1500);
+    try { fs.copyFileSync(configBackup, CONFIG_PATH); } catch (e) { /* ignore */ }
+    await sleep(700);
+    try {
+      if (fs.readFileSync(CONFIG_PATH).toString() !== fs.readFileSync(configBackup).toString()) {
+        fs.copyFileSync(configBackup, CONFIG_PATH);
+      }
+    } catch (e) { /* ignore */ }
+    try { fs.unlinkSync(configBackup); } catch (e) { /* ignore */ }
   }
   if (!KEEP) {
     // taskkill returns before the dying tree releases file handles (GPU cache,
@@ -1559,7 +1632,11 @@ main().then(async (code) => {
     // drill started is still running (a chrome.exe holding the profile), which
     // is worth saying out loud rather than leaving for the next run to trip over.
     if (!removed && fs.existsSync(sandbox)) console.log("WARN  sandbox not removed (a process still holds it): " + sandbox);
-    try { fs.unlinkSync(CONFIG_PATH); } catch (e) { /* ignore */ }
+    // Only a run that STARTED without a repo config leaves one behind (the
+    // drill's own write). With a backup, the restore above already put the
+    // real config back — unlinking here would delete it (seen live: --force
+    // over the dev config removed the restored file after a normal run).
+    if (!configBackup) { try { fs.unlinkSync(CONFIG_PATH); } catch (e) { /* ignore */ } }
   } else {
     console.log("kept sandbox at " + sandbox + " (config.json left in place)");
   }

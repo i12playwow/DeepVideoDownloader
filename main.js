@@ -325,6 +325,8 @@ function attachWsServer(server) {
     const origin = (req && req.headers && req.headers.origin) || "";
     if (!wsBridge.isAllowedWsOrigin(origin)) {
       console.warn("[ws] rejected connection from origin: " + (origin || "(none)"));
+      pushStatusLog("[ws] rejected a connection from origin: " + (origin || "(none)"));
+      ws._rejected = true; // its close event must not log a fake disconnect
       try { ws.close(1008, "origin not allowed"); } catch (e) { /* ignore */ }
       return;
     }
@@ -348,12 +350,22 @@ function attachWsServer(server) {
       protocolVersion: 0,
       clientVersion: ""
     };
+    console.log("[ws] " + ws.meta.label + " connected on port " + boundPort);
+    pushStatusLog("[ws] " + ws.meta.label + " connected on port " + boundPort);
     ws.isAlive = true;
     ws.on("pong", () => {
       ws.isAlive = true;
       if (ws.meta) ws.meta.lastSeenAt = Date.now();
     });
-    ws.on("close", () => { pushClients(); });
+    ws.on("close", () => {
+      // A socket closed by the port-move swap (applyWsPort) is not a real
+      // disconnect — the client just reconnects to the new port moments later.
+      if (!ws._closedForMove && !ws._rejected) {
+        console.log("[ws] " + (ws.meta ? ws.meta.label : "client") + " disconnected");
+        pushStatusLog("[ws] " + (ws.meta ? ws.meta.label : "client") + " disconnected");
+      }
+      pushClients();
+    });
     pushClients();
     ws.on("message", async (data) => {
       if (ws.meta) ws.meta.lastSeenAt = Date.now();
@@ -432,7 +444,12 @@ function bindWsServer(port) {
       // Keep a permanent error listener attached BEFORE the one-shot probe: a
       // later socket error must never surface as an unhandled 'error' event on
       // the server (that takes the whole app down).
-      server.on("error", (err) => console.error("[ws] " + err.message));
+      server.on("error", (err) => {
+        // no pushStatusLog here — the attempt() onError path already surfaces
+        // bind failures to the panel; this handler covers a LIVE server.
+        console.error("[ws] " + err.message);
+        pushStatusLog("[ws] server error: " + err.message);
+      });
       const onListening = () => {
         server.removeListener("error", onError);
         resolve({ ok: true, port: p, server });
@@ -485,7 +502,11 @@ async function applyWsPort(port) {
     // A dropped link is not a port change for the extension (it retries the
     // port that greeted it, then sweeps), so closing old clients is exactly the
     // signal it needs to find the new one.
-    for (const c of previous.clients) { try { c.close(1001, "server moved"); } catch (e) { /* ignore */ } }
+    for (const c of previous.clients) {
+      // Tag sockets closed by the move so their close handlers do not log a
+      // fake disconnect (the clients are expected back on the new port).
+      try { c._closedForMove = true; c.close(1001, "server moved"); } catch (e) { /* ignore */ }
+    }
     try { previous.close(); } catch (e) { /* ignore */ }
   }
   pushClients();
@@ -696,8 +717,11 @@ function startClipboardMonitor() {
       const content = clipboard.readText();
       if (content !== lastClipboardContent && isValidVideoUrl(content)) {
         lastClipboardContent = content;
+        const url = content.trim();
+        console.log("[grab] video URL picked up from the clipboard: " + url);
+        pushStatusLog("[grab] video URL picked up from the clipboard: " + url);
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("clipboard-url", { url: content.trim() });
+          mainWindow.webContents.send("clipboard-url", { url });
         }
       }
     } catch (e) {
