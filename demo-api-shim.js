@@ -111,6 +111,7 @@
   }
   pushStatusLog("[cf-fallback] challenge on supjav.com skipped (browser fallback disabled: site rule)");
   pushStatusLog("[cf-fallback] challenge on slowcf.example.com skipped (browser fallback disabled: cfBrowserFallback: false)");
+  pushStatusLog("[cf-fallback] launching cf-browser for missav.ws");
   pushStatusLog("[queue] sample video failed (network), auto-retry scheduled in 5 min");
   pushStatusLog("[ws] Chrome extension connected on port 8766");
   pushStatusLog("[grab] video URL picked up from the clipboard: https://missav.ws/w/DEMO123");

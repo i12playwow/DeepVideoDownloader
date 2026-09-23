@@ -28,6 +28,12 @@
 //                     fail through to requires-browser WITHOUT spawning the
 //                     cf-browser bridge, and the app log carries the ONE
 //                     concise "[cf-fallback] challenge on … skipped" line
+//   K clipboard grab — the auto-grab monitor (armed unconditionally at boot)
+//                     picks a fixture URL swapped onto the real clipboard
+//                     (previous content saved + restored) and fires the
+//                     [grab] line; boot additionally pins the [ws] Native
+//                     client connect/disconnect lines and Phase H the
+//                     extension connect line — the panel's live ws sources
 //                     (the seam the offline suites can only stub)
 //   I live port move — a live config port change (the file watcher path) moves
 //                     the listener: the new port serves a hello advertising
@@ -1282,6 +1288,12 @@ async function phaseH(port) {
       else await sleep(700);
     }
     H("chrome up on " + cdpPort + (crawlTab ? "; crawl tab committed + activated" : "; crawl tab NEVER committed") + "; waiting for the relay");
+    // The extension cannot push captures without a paired socket, so its
+    // connect line must be in the app log by the time the relay carries
+    // traffic — pinning the panel's extension-side ws source live.
+    const extConn = await waitAppLog(/\[ws\] Chrome extension connected on port 8766/, 20000);
+    if (!extConn) throw new Error("no '[ws] Chrome extension connected on port 8766' in the app log — the extension socket never logged its connect line (the panel's extension-side ws source is broken)");
+    H(extConn.trim());
     b0.close();
 
     const { seen, why } = await obs;
@@ -1394,6 +1406,23 @@ function portAnswers(port, timeoutMs = 1200) {
 // Read the app's hello off a port. The payload's `port` is what the app CLAIMS
 // to be serving on — the whole point of the phase is that it equals the port
 // that actually answered.
+// Poll the app log (stdout+stderr files) until a line matches re. Returns the
+// matched line or null on timeout. Pins the Status log panel's sources at
+// their console origin: the panel renders exactly these lines via the
+// status-log push, so a line missing here means the SOURCE is broken, not
+// just the push.
+async function waitAppLog(re, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let text = "";
+    for (const f of [appLog, appErr]) { try { text += fs.readFileSync(f, "utf8"); } catch (e) { /* mid-write; retry */ } }
+    const line = text.split(/\r?\n/).find((l) => re.test(l));
+    if (line) return line;
+    await sleep(300);
+  }
+  return null;
+}
+
 function wsHello(port, timeoutMs = 10000) {
   return new Promise((resolve) => {
     const t0 = Date.now();
@@ -1542,6 +1571,54 @@ async function phaseJ(port) {
   pass("J skip line pushed to panel", "live status-log push reached the window panel: " + panelHit.trim().slice(0, 110));
   pass("J cf:off gate live", "challenge -> requires-browser, bridge cold; " + skipLine.trim().slice(0, 110));
 }
+// ---- Phase K: the clipboard auto-grab fires the [grab] line, live ----
+// The monitor is armed unconditionally at boot (app.whenReady ->
+// startClipboardMonitor) and polls the REAL machine clipboard every 5s for a
+// video URL (allowlist + http check). This phase swaps the clipboard content
+// for a fixture URL, waits for the [grab] line (the same line the Status log
+// panel renders via the status-log push), then restores the previous content
+// — the user's clipboard leaves this phase exactly as it entered it. NEVER
+// touches a clipboard holding a file drop list or an image (SetText cannot
+// restore those faithfully); skipped gracefully when the clipboard API is
+// unavailable. The positive path runs whenever the clipboard is plain text.
+async function phaseK(port) {
+  console.log("--- Phase K: clipboard auto-grab fires the [grab] line ---");
+  const PS = ["-NoProfile", "-Command"];
+  const addType = "Add-Type -AssemblyName System.Windows.Forms; ";
+  // Read the current clipboard TEXT; a marker means the clipboard is NOT a
+  // pure-text state this phase may faithfully swap and restore: no text at
+  // all, a file drop list (SetText would downgrade the file reference to its
+  // name — seen live), or an image. Those are left untouched.
+  const MARK = "__BV_CLIPBOARD_NOT_SAFE__";
+  let prev = null;
+  try {
+    prev = execFileSync("powershell", PS.concat([addType + "if ([System.Windows.Forms.Clipboard]::ContainsText() -and -not [System.Windows.Forms.Clipboard]::ContainsFileDropList() -and -not [System.Windows.Forms.Clipboard]::ContainsImage()) { [System.Windows.Forms.Clipboard]::GetText() } else { '" + MARK + "' }"]), { encoding: "utf8", windowsHide: true });
+  } catch (e) {
+    pass("K clipboard grab", "skipped: clipboard API unavailable (" + String((e && e.message) || e).split("\n")[0].trim() + ")");
+    return;
+  }
+  if (String(prev).trim() === MARK) {
+    pass("K clipboard grab", "skipped: the real clipboard holds a file list or image (or is empty) that SetText cannot faithfully restore — left untouched");
+    return;
+  }
+  prev = String(prev).replace(/\r?\n$/, "");
+  const grabUrl = "http://supjav.com:" + port + "/v/mov-grab-me.mp4";
+  const esc = (s) => String(s).replace(/'/g, "''");
+  const setClip = (text) => execFileSync("powershell", PS.concat([addType + "[System.Windows.Forms.Clipboard]::SetText('" + esc(text) + "')"]), { windowsHide: true });
+  try { setClip(grabUrl); } catch (e) { return fail("K clipboard grab", "could not write the fixture URL to the clipboard: " + String((e && e.message) || e).split("\n")[0]); }
+  // The monitor polls every 5s; assert on the exact line (URL included, so a
+  // stray earlier grab of different content can never satisfy it).
+  const re = new RegExp("\\[grab\\] video URL picked up from the clipboard: " + grabUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const hit = await waitAppLog(re, 25000);
+  // Restore the user's clipboard BEFORE asserting, so even a failed check
+  // leaves it exactly as it was found.
+  try {
+    if (prev) setClip(prev);
+    else execFileSync("powershell", PS.concat([addType + "[System.Windows.Forms.Clipboard]::Clear()"]), { windowsHide: true });
+  } catch (e) { /* best effort */ }
+  if (!hit) return fail("K clipboard grab", "no '[grab] video URL picked up from the clipboard: " + grabUrl + "' in the app log within 25s (monitor armed at boot, 5s poll)");
+  pass("K clipboard grab", hit.trim() + " — previous clipboard restored (" + prev.length + " chars)");
+}
 
 async function main() {
   if (CFT_PROBE) process.exit(probeChromeForTesting());
@@ -1574,6 +1651,17 @@ async function main() {
   const ok = await waitForWsConnect(40000);
   if (!ok) { fail("app boot", "no WS hello on 8766 within 40s (see " + appLog + " / " + appErr + ")"); return 1; }
   pass("app boot", "WS hello on 8766");
+  // The probe above IS a native client (no Origin header), so its socket must
+  // have logged connect + disconnect — the same lines the Status log panel
+  // renders for ws clients. Asserting them here pins the panel's ws source at
+  // the console origin, before any phase churns the client list.
+  const connLine = await waitAppLog(/\[ws\] Native client connected on port 8766/, 15000);
+  if (!connLine) { fail("app boot ws connect line", "no '[ws] Native client connected on port 8766' in the app log"); return 1; }
+  pass("app boot ws connect line", connLine.trim());
+  await sleep(400); // the probe socket closed right after the hello
+  const discLine = await waitAppLog(/\[ws\] Native client disconnected/, 15000);
+  if (!discLine) { fail("app boot ws disconnect line", "no '[ws] Native client disconnected' in the app log (the probe socket closed above)"); return 1; }
+  pass("app boot ws disconnect line", discLine.trim());
 
   try {
     // --only=<NAME> skips every phase but the named one (drill iteration).
@@ -1589,6 +1677,9 @@ async function main() {
     await run("H", () => phaseH(port));
     // Before I: J dials WS_PORT, which I deliberately moves off 8766.
     await run("J", () => phaseJ(port));
+    // K uses the machine clipboard; it must run before I so its fixture URL
+    // still names a live fixture port for provenance in the log line.
+    await run("K", () => phaseK(port));
     // Last: it deliberately moves the app off WS_PORT (and persists the move),
     // so every phase that dials 8766 has to run before it.
     await run("I", () => phaseI());

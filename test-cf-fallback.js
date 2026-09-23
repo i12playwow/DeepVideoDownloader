@@ -418,6 +418,43 @@ async function main() {
     cf.setCfBrowserFallback(true, []);
   }
 
+  console.log("\n=== 8: bridge start line (launch notice pairs with the skip notices) ===\n");
+  {
+    // Real stub children (section-3 mechanics): the start line fires at the
+    // real spawn site in execCfBrowserFetch, so the fetchViaCfBrowser stub
+    // used elsewhere would bypass it entirely.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-test-"));
+    const stub = path.join(tmp, "stub-start.js");
+    fs.writeFileSync(stub, `process.stdout.write("---CFB64---" + Buffer.from("<html><body>OK-START</body></html>", "utf8").toString("base64") + "\\n"); process.exit(0);`);
+    const origLog = console.log;
+    const consoleLines = [];
+    const sinkLines = [];
+    console.log = (...a) => { const s = a.join(" "); if (s.startsWith("[cf-fallback]")) consoleLines.push(s); origLog(...a); }; // tee
+    cf.setCfFallbackLogSink((line) => sinkLines.push(line));
+    cf._state.scriptPath = stub;
+    cf._state.timeoutMs = 15000;
+    cf._state.lastWarmupFail = 0;
+
+    const html = await cf.fetchViaCfBrowser("https://start.test/page");
+    assert("successful launch logs the start line on console", html.includes("OK-START") && consoleLines.length === 1 && consoleLines[0] === "[cf-fallback] launching cf-browser for start.test", JSON.stringify(consoleLines));
+    assert("start line reaches the sink too (panel feed)", sinkLines.length === 1 && sinkLines[0] === consoleLines[0], JSON.stringify(sinkLines));
+
+    // a failed launch still announced itself (the spawn DID happen); the
+    // failure surfaces through its own error path, not the start line
+    const stubFail = path.join(tmp, "stub-start-fail.js");
+    fs.writeFileSync(stubFail, "process.exit(2);");
+    cf._state.scriptPath = stubFail;
+    consoleLines.length = 0; sinkLines.length = 0;
+    let threw = null;
+    try { await cf.fetchViaCfBrowser("https://start-fail.test/page"); } catch (e) { threw = e; }
+    assert("failed launch still logs the start line", threw && threw.category === "requires-browser" && consoleLines.length === 1 && consoleLines[0].includes("launching cf-browser for start-fail.test"), JSON.stringify(consoleLines));
+
+    console.log = origLog;
+    cf.setCfFallbackLogSink(null);
+    delete cf._state.scriptPath;
+    cf._state.lastWarmupFail = 0;
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 }
