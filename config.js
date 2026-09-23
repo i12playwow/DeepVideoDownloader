@@ -23,6 +23,12 @@ const DEFAULT_CONFIG = {
   idleTabMinutes: 0,
   autoProxy: true,
   autoGrab: false, // extension auto-monitor: app asks extension to send found videos + close their tabs
+  // Automatic browser fallback (lib/cf-fallback.js): when a plain-HTTP page
+  // fetch comes back as a CF challenge interstitial, re-fetch it through the
+  // headed cf-browser bridge. false opts the whole install out — challenge
+  // pages fail straight to requires-browser (manual browse). Per-call
+  // opts.cfFallback === false still wins in lib/http.js.
+  cfBrowserFallback: true,
   ffmpegPath: "ffmpeg",
   theme: "dark",
   saveHistory: true,
@@ -59,8 +65,10 @@ const DEFAULT_CONFIG = {
   // live: no restart needed when config.json changes.
   cfBrowserFallback: true,
   // Per-site automation rules for NEW downloads, matched by host:
-  // { host, folder, start } — folder overrides the destination (unless the
-  // caller picked one), start lets the item begin even outside the window.
+  // { host, folder, start, cf } — folder overrides the destination (unless the
+  // caller picked one), start lets the item begin even outside the window, and
+  // an optional cf (renderer token "cf:on"/"cf:off") overrides the CF browser
+  // fallback for that host; absent = follow the install-wide cfBrowserFallback.
   siteRules: []
 };
 
@@ -94,6 +102,15 @@ function parseConfig(rawText, defaults) {
     parsed = {};
   }
   return Object.assign({}, d, parsed);
+}
+
+// Coerce a siteRule's optional cf override: true/"true"/"on"/"cf:on" -> true,
+// false/"false"/"off"/"cf:off" -> false, anything else -> undefined (no
+// per-host override; the rule then follows the install-wide toggle).
+function normalizeCf(v) {
+  if (v === true || v === "true" || v === "on" || v === "cf:on") return true;
+  if (v === false || v === "false" || v === "off" || v === "cf:off") return false;
+  return undefined;
 }
 
 // Normalize/coerce a config: fix bad types, drop bogus proxy schemes (e.g. the
@@ -164,8 +181,10 @@ function validateConfig(config) {
     if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) c[edge] = "";
   }
 
-  // Per-site automation rules: array of { host, folder?, start? }. host is
-  // required; folder may be empty (rule then only controls the window bypass).
+  // Per-site automation rules: array of { host, folder?, start?, cf? }. host is
+  // required; folder may be empty (rule then only controls the window bypass);
+  // cf is the optional per-host CF-browser-fallback override (the renderer's
+  // "cf:off"/"cf:on" token — boolean after coercion; garbage drops it).
   if (Array.isArray(c.siteRules)) {
     const cleanedRules = [];
     for (const r of c.siteRules) {
@@ -173,7 +192,8 @@ function validateConfig(config) {
       const host = typeof r.host === "string" ? r.host.trim() : "";
       if (!host) continue;
       const folder = typeof r.folder === "string" ? r.folder.trim() : "";
-      cleanedRules.push({ host, folder, start: !!r.start });
+      const cf = normalizeCf(r.cf);
+      cleanedRules.push({ host, folder, start: !!r.start, ...(cf === undefined ? {} : { cf }) });
     }
     c.siteRules = cleanedRules;
   } else {
@@ -207,5 +227,6 @@ module.exports = {
   parseConfig,
   validateConfig,
   loadConfig,
-  saveConfig
+  saveConfig,
+  normalizeCf
 };

@@ -452,7 +452,7 @@ const SELF_GOLDEN = {
   batch: ["cancel", "pause", "remove", "resume"],
   apiRouted: ["cancel", "forceDownload", "pause", "remove", "resume", "retry"],
   browseTotal: 3,
-  idCount: 64, // 61 + the Extension bridge panel (wsEndpoint, bridgeSummary, bridgeClients)
+  idCount: 65, // 61 + the Extension bridge panel (wsEndpoint, bridgeSummary, bridgeClients) + the cfBrowserFallback checkbox
 
   selHandlers: [{ id: "dlsBody", ref: "closest(input[data-sel])" }],
   selEmitters: [{ fn: "rowHtml", checkbox: true }],

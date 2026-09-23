@@ -1,8 +1,9 @@
 "use strict";
 // Offline tests for lib/cf-fallback.js and its wiring into lib/http.js
 // fetchHtml: challenge detection, the fallback router (page fetches fall
-// back, .m3u8 never does, cfFallback:false opts out), the cf-browser child
-// bridge protocol (--out - base64 block), failure semantics
+// back, .m3u8 never does, cfFallback:false opts out, config.json
+// cfBrowserFallback + per-site siteRules cf overrides disable the gate), the
+// cf-browser child bridge protocol (--out - base64 block), failure semantics
 // (requires-browser + warmup cooldown), the UI engagement event hook
 // (setEventHook: one fire per engagement, observer failures swallowed), and
 // regex parity with lib/errors.
@@ -270,6 +271,108 @@ async function main() {
 
     cf._state.fetchViaCfBrowser = orig;
     cf._state.lastWarmupFail = 0;
+  }
+
+  console.log("\n=== 6: install-wide cfBrowserFallback toggle (config.json) ===\n");
+  {
+    const CHALLENGE = "<title>Just a moment...</title>";
+    const orig = cf._state.fetchViaCfBrowser;
+    let bridgeCalls = 0;
+    cf._state.fetchViaCfBrowser = async () => { bridgeCalls++; return "<html>ok</html>"; };
+
+    // disabled: the challenge body passes through untouched (the resolvers'
+    // own isCfChallengeHtml checks then fail it as requires-browser / cf-blocked)
+    cf.setCfBrowserFallback(false);
+    assert("setter reflects disabled state", cf.cfBrowserFallbackEnabled() === false);
+    const out1 = await cf.fetchPageWithFallback("https://x.test/off", CHALLENGE);
+    assert("disabled: challenge body returned as-is (no bridge)", out1 === CHALLENGE && bridgeCalls === 0);
+
+    // re-enabled restores the default routing
+    cf.setCfBrowserFallback(true);
+    assert("setter reflects enabled state", cf.cfBrowserFallbackEnabled() === true);
+    const out2 = await cf.fetchPageWithFallback("https://x.test/on", CHALLENGE);
+    assert("re-enabled: challenge routes to bridge again", out2 === "<html>ok</html>" && bridgeCalls === 1);
+
+    cf.setCfBrowserFallback(); // undefined arg -> enabled (the default)
+    assert("undefined arg -> enabled (default)", cf.cfBrowserFallbackEnabled() === true);
+    const out3 = await cf.fetchPageWithFallback("https://x.test/def", CHALLENGE);
+    assert("default state: bridge still engaged", out3 === "<html>ok</html>" && bridgeCalls === 2);
+
+    cf._state.fetchViaCfBrowser = orig;
+  }
+
+  console.log("\n=== 7: per-site siteRules cf overrides + skip log ===\n");
+  {
+    const CHALLENGE = "<title>Just a moment...</title>";
+    const orig = cf._state.fetchViaCfBrowser;
+    const origLog = console.log;
+    let bridgeCalls = 0;
+    let logLines = [];
+    console.log = (...a) => { const s = a.join(" "); if (s.startsWith("[cf-fallback]")) logLines.push(s); };
+    cf._state.fetchViaCfBrowser = async (url) => { bridgeCalls++; return "<html>ok:" + url; };
+    cf._internal.skipLogged.clear();
+
+    // baseline: no rules, install-wide enabled -> bridge, quiet
+    cf.setCfBrowserFallback(true, []);
+    await cf.fetchPageWithFallback("https://plain.test/a", CHALLENGE);
+    assert("baseline: no rules -> bridge engaged, nothing logged", bridgeCalls === 1 && logLines.length === 0);
+
+    // per-site cf:on overrides a disabled install-wide toggle
+    cf.setCfBrowserFallback(false, [{ host: "cfon.test", cf: true }]);
+    await cf.fetchPageWithFallback("https://cfon.test/b", CHALLENGE);
+    assert("cf:on rule overrides a disabled install-wide toggle", bridgeCalls === 2 && logLines.length === 0);
+
+    // install-wide off elsewhere -> passthrough + exactly ONE concise log line (host-deduped)
+    await cf.fetchPageWithFallback("https://off.test/c", CHALLENGE);
+    await cf.fetchPageWithFallback("https://off.test/d", CHALLENGE);
+    assert("install-wide off: challenge passes through (no bridge)", bridgeCalls === 2);
+    assert("skip logged exactly once (deduped per host)", logLines.length === 1, JSON.stringify(logLines));
+    assert("log names host + config reason", logLines[0] === "[cf-fallback] challenge on off.test skipped (browser fallback disabled: cfBrowserFallback: false)", logLines[0]);
+
+    // explicit cf:off site rule wins while install-wide is ON
+    cf.setCfBrowserFallback(true, [{ host: "siteoff.test", cf: false }]);
+    logLines.length = 0;
+    await cf.fetchPageWithFallback("https://siteoff.test/e", CHALLENGE);
+    assert("cf:off rule forces a skip even with the toggle on", bridgeCalls === 2 && logLines.length === 1);
+    assert("skip log names the site rule as the reason", /disabled: site rule/.test(logLines[0]), logLines[0]);
+
+    // wildcard rules cover the subdomain tree; other hosts still bridge
+    cf.setCfBrowserFallback(true, [{ host: "*.wild.test", cf: false }]);
+    await cf.fetchPageWithFallback("https://deep.wild.test/f", CHALLENGE);
+    assert("*.wild.test rule applies to subdomains", bridgeCalls === 2 && logLines.length === 2);
+    await cf.fetchPageWithFallback("https://other.test/g", CHALLENGE);
+    assert("unmatched host still routes to the bridge", bridgeCalls === 3);
+
+    // rules without a cf field are inert here (they still drive folder/start)
+    cf.setCfFallbackSiteRules([{ host: "folder-only.test", folder: "X" }]);
+    await cf.fetchPageWithFallback("https://folder-only.test/h", CHALLENGE);
+    assert("siteRule without cf is inert (bridge still used)", bridgeCalls === 4 && logLines.length === 2);
+
+    // the shared setter takes the rules alongside the toggle; stringy cf token honored
+    cf.setCfBrowserFallback(true, [{ host: "two.test", cf: "cf:off" }]);
+    await cf.fetchPageWithFallback("https://two.test/i", CHALLENGE);
+    assert("setCfBrowserFallback(on, rules) applies both", bridgeCalls === 4 && logLines.length === 3);
+
+    // re-enabling bridges the host again and clears its skip note...
+    cf.setCfBrowserFallback(true, []);
+    logLines.length = 0;
+    await cf.fetchPageWithFallback("https://off.test/re", CHALLENGE);
+    assert("re-enabled host routes to the bridge again", bridgeCalls === 5 && logLines.length === 0);
+    // ...so a later disable logs that host once more
+    cf.setCfBrowserFallback(false, []);
+    await cf.fetchPageWithFallback("https://off.test/again", CHALLENGE);
+    assert("a later disable logs the host again (note cleared by the live fallback)", logLines.length === 1, JSON.stringify(logLines));
+
+    // an unparseable URL cannot match a rule; it still fails through (no throw), logged under the raw url
+    cf.setCfBrowserFallback(false, [{ host: "nohost.test", cf: true }]);
+    logLines.length = 0;
+    const out = await cf.fetchPageWithFallback("not-a-url", CHALLENGE);
+    assert("unparseable URL: passes through, logged under the raw url", out === CHALLENGE && logLines.length === 1 && logLines[0].includes("not-a-url"), JSON.stringify(logLines));
+
+    console.log = origLog;
+    cf._state.fetchViaCfBrowser = orig;
+    cf._internal.skipLogged.clear();
+    cf.setCfBrowserFallback(true, []);
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

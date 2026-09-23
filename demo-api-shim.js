@@ -60,6 +60,7 @@
     maxRetries: 3,
     maxRefresh: 2,
     autoProxy: true,
+    cfBrowserFallback: true,
     saveHistory: true,
     skipDuplicates: true,
     autoCloseTab: false,

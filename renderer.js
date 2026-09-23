@@ -586,13 +586,14 @@ async function loadSettings() {
   $("skipDuplicates").checked = s.skipDuplicates !== false;
   $("autoCloseTab").checked = s.autoCloseTab !== false;
   $("autoGrab").checked = !!s.autoGrab;
+  $("cfBrowserFallback").checked = s.cfBrowserFallback !== false;
   $("thumbnails").checked = s.thumbnails !== false;
   $("idleTabMinutes").value = s.idleTabMinutes ?? 0;
   $("autoRetryMinutes").value = s.autoRetryMinutes ?? 0;
   $("autoRetryMax").value = s.autoRetryMax ?? 5;
   $("scheduleWindowStart").value = s.scheduleWindowStart || "";
   $("scheduleWindowEnd").value = s.scheduleWindowEnd || "";
-  $("siteRules").value = (s.siteRules || []).map((r) => [r.host, r.folder || "", r.start ? "start" : ""].filter(Boolean).join("\t")).join("\n");
+  $("siteRules").value = (s.siteRules || []).map((r) => [r.host, r.folder || "", r.start ? "start" : "", r.cf === true ? "cf:on" : r.cf === false ? "cf:off" : ""].filter(Boolean).join("\t")).join("\n");
   $("proxies").value = (s.proxies || []).join("\n");
   $("proxyRules").value = (s.proxyRules || []).map((r) => r.host + "\t" + r.proxy).join("\n");
   applyTheme(s.theme || "dark");
@@ -635,6 +636,7 @@ $("save").addEventListener("click", async () => {
     skipDuplicates: $("skipDuplicates").checked,
     autoCloseTab: $("autoCloseTab").checked,
     autoGrab: $("autoGrab").checked,
+    cfBrowserFallback: $("cfBrowserFallback").checked,
     thumbnails: $("thumbnails").checked,
     idleTabMinutes: Math.max(0, parseInt($("idleTabMinutes").value || "0", 10)),
     autoRetryMinutes: Math.max(0, parseInt($("autoRetryMinutes").value || "0", 10)),
@@ -643,7 +645,11 @@ $("save").addEventListener("click", async () => {
     scheduleWindowEnd: $("scheduleWindowEnd").value || "",
     siteRules: $("siteRules").value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
       const t = l.split(/\s+/);
-      return { host: t[0] || "", folder: t[1] || "", start: t.includes("start") };
+      const cfTok = t.find((tok) => /^cf:(on|off)$/i.test(tok));
+      const cf = cfTok ? cfTok.toLowerCase() === "cf:on" : undefined;
+      // The cf token is its own field: never let it land in the folder slot.
+      const folder = t.slice(1).find((tok) => !/^cf:(on|off)$/i.test(tok) && tok !== "start") || "";
+      return { host: t[0] || "", folder, start: t.includes("start"), ...(cf === undefined ? {} : { cf }) };
     }).filter((r) => r.host),
     proxies: $("proxies").value.split("\n").map((p) => p.trim()).filter(Boolean),
     proxyRules: $("proxyRules").value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {

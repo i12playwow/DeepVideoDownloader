@@ -7,6 +7,10 @@ const path = require("path");
 const { DEFAULT_CONFIG, parseConfig, validateConfig, loadConfig } = require("./config");
 
 let passed = 0, failed = 0;
+// Tiny scratch dir for the file round-trips (the loadConfig section below has
+// its own tmp; this one lives beside the sections that need it earlier).
+const tmp0 = fs.mkdtempSync(path.join(os.tmpdir(), "cfg0-"));
+const p0 = (n) => path.join(tmp0, n);
 function assert(label, cond, detail) {
   if (cond) { passed++; console.log("  PASS  " + label); }
   else { failed++; console.log("  FAIL  " + label + (detail ? " -> " + detail : "")); }
@@ -67,6 +71,14 @@ assert("bad downloadDir -> default", cd.downloadDir === DEFAULT_CONFIG.downloadD
 const cEmpty = validateConfig({ proxies: ["garbage://x", "ftp://y"] });
 assert("all-bad proxies -> default list", JSON.stringify(cEmpty.proxies) === JSON.stringify(DEFAULT_CONFIG.proxies), cEmpty.proxies.join(","));
 
+console.log("\n=== validateConfig: cfBrowserFallback ===\n");
+assert("defaults to true (fallback on)", DEFAULT_CONFIG.cfBrowserFallback === true);
+const cfbOff = validateConfig({ cfBrowserFallback: false });
+assert("keeps explicit false", cfbOff.cfBrowserFallback === false);
+assert("0 -> false", validateConfig({ cfBrowserFallback: 0 }).cfBrowserFallback === false);
+assert("stringy truthy -> true", validateConfig({ cfBrowserFallback: "yes" }).cfBrowserFallback === true);
+assert("null passes through unconsumed (consumer gates on !== false)", validateConfig({ cfBrowserFallback: null }).cfBrowserFallback !== false);
+
 console.log("\n=== validateConfig: proxyRules ===\n");
 const warnsR = withWarnCapture(() => {
   const cr = validateConfig({
@@ -90,6 +102,28 @@ assert("warned for invalid proxyRules entries", warnsR.length >= 1, "got " + war
 const crNon = validateConfig({ proxyRules: "nope" });
 assert("non-array proxyRules -> []", Array.isArray(crNon.proxyRules) && crNon.proxyRules.length === 0);
 
+console.log("\n=== siteRules cf overrides ===\n");
+const cs = validateConfig({ siteRules: [
+  { host: "supjav.com", folder: "D:/Jav", start: true }, // no cf: rule shape unchanged
+  { host: "slowcf.example.com", cf: "cf:off" },          // renderer token string coerces
+  { host: "*.always-cf.com", cf: true },
+  { host: "junk.example.com", cf: "maybe" },              // garbage token -> dropped
+  { host: "num.example.com", cf: 0 },                     // outside the grammar -> dropped (no silent 0->false)
+  { host: "", folder: "X" },                              // hostless rule dropped as before
+  "garbage"
+] });
+assert("valid rule keeps host/folder/start", cs.siteRules.some((r) => r.host === "supjav.com" && r.folder === "D:/Jav" && r.start === true));
+assert("rule without cf stays cf-less (no key)", cs.siteRules.every((r) => r.host !== "supjav.com" || !("cf" in r)), JSON.stringify(cs.siteRules[0]));
+assert("cf:'cf:off' -> false", cs.siteRules.some((r) => r.host === "slowcf.example.com" && r.cf === false));
+assert("cf:'cf:on'/true -> true", cs.siteRules.some((r) => r.host === "*.always-cf.com" && r.cf === true));
+assert("garbage cf token dropped", cs.siteRules.every((r) => r.host !== "junk.example.com" || !("cf" in r)));
+assert("cf:0 dropped (strict grammar, no silent coercion)", cs.siteRules.every((r) => r.host !== "num.example.com" || !("cf" in r)));
+assert("hostless + non-object rules dropped", cs.siteRules.length === 5, "len=" + cs.siteRules.length);
+const csNon = validateConfig({ siteRules: "nope" });
+assert("non-array siteRules -> []", Array.isArray(csNon.siteRules) && csNon.siteRules.length === 0);
+fs.writeFileSync(p0("siterule.json"), JSON.stringify({ siteRules: [{ host: "off.example.com", cf: "cf:off" }] }));
+assert("siteRules cf token round-trips a file", loadConfig(p0("siterule.json")).siteRules[0].cf === false);
+
 console.log("\n=== loadConfig (real repo config.json) ===\n");
 const real = loadConfig(path.join(__dirname, "config.json"));
 assert("real config has no ws:// proxy", !real.proxies.includes("ws://127.0.0.1:8765"), JSON.stringify(real.proxies));
@@ -110,7 +144,10 @@ assert("partial file merges defaults", partial.concurrency === 5 && partial.port
 fs.writeFileSync(p("ws.json"), JSON.stringify({ proxies: ["ws://127.0.0.1:8765", "http://h:1"] }));
 const fromFile = loadConfig(p("ws.json"));
 assert("ws:// dropped from file config", fromFile.proxies.length === 1 && fromFile.proxies[0] === "http://h:1", JSON.stringify(fromFile.proxies));
+fs.writeFileSync(p("cf.json"), JSON.stringify({ cfBrowserFallback: false }));
+assert("cfBrowserFallback:false persists through a file round-trip", loadConfig(p("cf.json")).cfBrowserFallback === false);
 fs.rmSync(tmp, { recursive: true, force: true });
+fs.rmSync(tmp0, { recursive: true, force: true });
 
 console.log("\n=== " + passed + " passed, " + failed + " failed ===\n");
 process.exit(failed ? 1 : 0);

@@ -11,12 +11,12 @@ const os = require("os");
 const { execFile } = require("child_process");
 const { WebSocketServer } = require("ws");
 const { DownloadManager, requestWithRedirects } = require("./downloader");
-const { setFallbackEnabled } = require("./lib/http");
 const { ProxyManager } = require("./proxy");
 const browserOpen = require("./lib/browser-open");
 const wsBridge = require("./lib/ws-bridge");
 const { statusPayload } = require("./lib/status");
 const { createSettings } = require("./lib/settings");
+const { setCfBrowserFallback } = require("./lib/cf-fallback");
 const { createBuiltinBrowser } = require("./lib/browser");
 const { registerIpc } = require("./lib/ipc");
 const cfFallback = require("./lib/cf-fallback");
@@ -66,20 +66,21 @@ const settings = createSettings({
   watch: true, // external config.json edits apply live (lib/settings.js)
   configPath: CONFIG_PATH,
   onApply: (cfg) => {
+    setCfBrowserFallback(cfg.cfBrowserFallback, cfg.siteRules); // config gate + per-site siteRules overrides for the CF browser fallback (lib/cf-fallback.js)
     proxyManager = new ProxyManager(cfg);
     dm.config = cfg;
     dm.proxyManager = proxyManager; // drop stale bad/latency proxy state
-    setFallbackEnabled(cfg.cfBrowserFallback); // live CF-fallback kill switch
+    setCfBrowserFallback(cfg.cfBrowserFallback, cfg.siteRules); // live CF-fallback gate (install toggle + per-site cf overrides)
     pushAutoGrabState(); // keep the extension's auto-grab mirror in sync
     applyConfiguredPort(cfg.port); // a live port change moves the listener with it
   }
 });
 let proxyManager = new ProxyManager(settings.get());
-let dm = new DownloadManager({ config: settings.get(), proxyManager, onUpdate: pushUpdate, cookieProvider: (url) => cookieHeaderFor(url), onRequiresBrowser: (url) => browserOpen.queueBrowserOpen(url) });
+let dm = new DownloadManager({ config: settings.get(), proxyManager, onUpdate: pushUpdate, cookieProvider: (url) => cookieHeaderFor(url), onRequiresBrowser: (url) => browserOpen.queueBrowserOpen(url), onAutoRetry: (item, cat, mins) => { try { pushStatusLog("[queue] " + (item.title || item.url) + " failed (" + cat + "), auto-retry scheduled in " + mins + " min"); } catch (e) { /* ignore */ } } });
 // Note: the cf-fallback UI hook is registered after the browser singletons
 // exist (pushCfFallbackToast below) — it must fire only into a live window.
 
-// CF fallback surfaces + kill switch: the engine hook fires when a page fetch
+// CF fallback surfaces + gate: the engine hook fires when a page fetch
 // hands off to the cf-browser bridge (a real headed Chrome the user can SEE —
 // say why). Debounced per burst: one challenge solve serves every queued
 // fetch, and a cold solve takes ~8s (longer with a human click), so a burst
@@ -107,9 +108,9 @@ function pushCfFallbackToast(url) {
   }, 2000);
 }
 cfFallback.setEventHook(pushCfFallbackToast);
-// Boot-time init (onApply only fires on a change): a cfBrowserFallback:false
-// config.json must take effect without waiting for a settings save.
-setFallbackEnabled(settings.get().cfBrowserFallback);
+// Boot-time init (onApply only fires on a change): the cfBrowserFallback
+// toggle + siteRules cf overrides must apply without waiting for a save.
+setCfBrowserFallback(settings.get().cfBrowserFallback, settings.get().siteRules);
 
 // Auto-grab: push the current autoGrab state to every connected extension.
 // Sent on hello-time applies, on setting changes, and it also triggers an

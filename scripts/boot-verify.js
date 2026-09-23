@@ -23,6 +23,12 @@
 //                     movie-page link over the real WS relay, the resolver
 //                     resolves it, and the mp4 lands byte-exact; a same
 //                     page on plain 127.0.0.1 must NOT auto-send (scope gate)
+//   J cf gate live   — a supjav.com fixture page answers a CF challenge body
+//                     while a cf:off site rule pins the host: the item must
+//                     fail through to requires-browser WITHOUT spawning the
+//                     cf-browser bridge, and the app log carries the ONE
+//                     concise "[cf-fallback] challenge on … skipped" line
+//                     (the seam the offline suites can only stub)
 //   I live port move — a live config port change (the file watcher path) moves
 //                     the listener: the new port serves a hello advertising
 //                     ITSELF, the old port is released, config stays in sync;
@@ -159,6 +165,14 @@ function probeChromeForTesting() {
   return 1;
 }
 
+// Phase J (CF gate drill): a supjav.com movie page that answers a fetch with
+// a Cloudflare challenge body — every marker below is one isCfChallengeHtml
+// checks. The app fetches this through the Phase H proxy rule; no real
+// browser ever loads it, and the cf:off site rule must keep the bridge cold.
+const CF_CHALLENGE_HTML =
+  "<!doctype html><html><head><title>Just a moment...</title></head><body>" +
+  "<div id='challenge-stage'>Verifying you are human. This may take a few seconds.</div></body></html>";
+
 function startFixture() {
   return new Promise((resolve, reject) => {
     fixture = http.createServer((req, res) => {
@@ -191,6 +205,15 @@ function startFixture() {
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end("<!doctype html><html><head><title>movie-code-456</title></head><body>" +
           "<h1>movie-code-456</h1><a href='/movie-code-456.html' title='movie-code-456'>movie-code-456</a></body></html>");
+        return;
+      }
+      // Phase J: the challenge page (served before the numeric movie route —
+      // its "/movie-code-cf.html" path deliberately does NOT match
+      // isCfwalledSupjavMovie's /<digits>.html shape, so the WS add filter
+      // stays out of the way and the challenge really reaches the gate).
+      if (p === "/movie-code-cf.html") {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(CF_CHALLENGE_HTML);
         return;
       }
       if (/^\/movie-code-\d+\.html$/.test(p)) {
@@ -1406,6 +1429,61 @@ async function phaseI() {
   }
 }
 
+// ---- Phase J: the CF browser-fallback gate, live in the real app ----
+// The offline suites stub the bridge seam; only the real app proves the whole
+// chain: wsDownload -> enqueue -> resolveJavAggregator -> fetchHtml -> the
+// gate in fetchPageWithFallback. The fixture serves a Cloudflare challenge
+// body for a supjav.com page (the boot config's supjav.com proxy rule routes
+// the app's fetch here), and a cf:off site rule pins the host, so the gate
+// must (a) SKIP the fallback — zero cf-browser spawns in the app log — and
+// (b) fail the item through to the resolver's requires-browser error, the
+// exact contract a user disabling the fallback per site expects; the ONE
+// concise "[cf-fallback] challenge on … skipped" line proves the skip was the
+// config's doing rather than a silent failure elsewhere. Runs before I.
+async function phaseJ(port) {
+  console.log("--- Phase J: cf:off site rule fails a CF challenge through to requires-browser (no bridge) ---");
+  // autoRetryMinutes 0 keeps the terminal error deterministic (no requeue).
+  const jPatch = { scheduleWindowStart: "", scheduleWindowEnd: "", autoRetryMinutes: 0, siteRules: [{ host: "supjav.com", cf: false }] };
+  // Confirm the rule went LIVE before downloading: the app's config watcher
+  // consumes the external edit through settings.update(), which SAVES the
+  // normalized config back (the rule gains folder:""/start:false and the
+  // proxies default gets promoted) in the same call that fires onApply — so
+  // the echo in the file IS the proof the gate is armed. The watcher has a
+  // documented event-losing window (the close/re-arm gap around every
+  // update(); Phase B flaked on exactly this once), so a missed echo is
+  // retried with a fresh write rather than trusted to a fixed sleep.
+  let applied = false;
+  for (let attempt = 1; attempt <= 3 && !applied; attempt++) {
+    writeConfig(jPatch);
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      await sleep(300);
+      try {
+        const cur = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+        const rule = (cur.siteRules || []).find((x) => x.host === "supjav.com");
+        if (rule && rule.cf === false && rule.folder === "" && rule.start === false) { applied = true; break; }
+      } catch (e) { /* mid-write; keep polling */ }
+    }
+  }
+  if (!applied) return fail("J rule applied live", "the app never consumed the cf:off siteRules edit (no normalized save echo in config.json)");
+  await sleep(600); // onApply fires right after the echo save; give it a beat
+  const urlCF = "http://supjav.com:" + port + "/movie-code-cf.html";
+  const r = await wsDownload(urlCF, "bv-cf", "", 25000);
+  const err = r.states.find((s) => s.status === "error");
+  if (!err) return fail("J challenge failed through", "no error state: " + r.states.map((s) => s.status + "@" + s.t).join(","));
+  if (err.cat !== "requires-browser") {
+    return fail("J requires-browser category", "errorCategory=" + JSON.stringify(err.cat) + " error=" + err.error);
+  }
+  // The gate kept the bridge cold: no cf-browser spawn anywhere in the app log.
+  const appLogText = (() => { try { return fs.readFileSync(appLog, "utf8"); } catch (e) { return ""; } })();
+  const appErrText = (() => { try { return fs.readFileSync(appErr, "utf8"); } catch (e) { return ""; } })();
+  const both = appLogText + appErrText;
+  if (/cf-browser/i.test(both)) return fail("J bridge stayed cold", "cf-browser activity found in the app log (the fallback was NOT skipped)");
+  const skipLine = both.split(/\r?\n/).find((l) => l.includes("[cf-fallback]") && l.includes("supjav.com") && l.includes("skipped"));
+  if (!skipLine) return fail("J skip line logged", "no '[cf-fallback] challenge on supjav.com … skipped' line in the app log");
+  pass("J cf:off gate live", "challenge -> requires-browser, bridge cold; " + skipLine.trim().slice(0, 110));
+}
+
 async function main() {
   if (CFT_PROBE) process.exit(probeChromeForTesting());
   if (!fs.existsSync(ELECTRON)) { console.log("ABORT electron not found: " + ELECTRON); process.exit(1); }
@@ -1450,6 +1528,8 @@ async function main() {
     await run("F", () => phaseF());
     await run("G", () => phaseG(port));
     await run("H", () => phaseH(port));
+    // Before I: J dials WS_PORT, which I deliberately moves off 8766.
+    await run("J", () => phaseJ(port));
     // Last: it deliberately moves the app off WS_PORT (and persists the move),
     // so every phase that dials 8766 has to run before it.
     await run("I", () => phaseI());

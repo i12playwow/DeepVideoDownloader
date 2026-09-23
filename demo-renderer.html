@@ -190,6 +190,7 @@
           <label><input type="checkbox" id="skipDuplicates"> Skip already-downloaded URLs (duplicate handling)</label>
           <label><input type="checkbox" id="autoCloseTab"> Auto-close the browser tab + go to the next after a download</label>
           <label><input type="checkbox" id="autoGrab"> Auto-grab: send found videos automatically and close their movie tabs when done</label>
+          <label><input type="checkbox" id="cfBrowserFallback" title="When a Cloudflare challenge page is hit, re-fetch it through the headed cf-browser bridge. Off = challenge pages fail straight to the manual-browse flow."> Cloudflare browser fallback — auto re-fetch challenge pages via the cf-browser bridge</label>
           <label><input type="checkbox" id="thumbnails"> Show video thumbnails in the list (requires ffmpeg)</label>
         </div>
           <label>Auto-retry failed downloads after <input type="number" id="autoRetryMinutes" min="0" value="0" style="width:70px;margin:0 6px;"> minutes (0 = off; requeues failures automatically)</label>
@@ -228,8 +229,8 @@
         <h2>Automation rules</h2>
       </div>
       <div class="group">
-        <label class="rules">Per-site rules for new downloads (one per line: <code>&lt;host&gt;</code> <code>&lt;folder&gt;</code> [<code>start</code>]) — folder sets the destination, <code>start</code> begins the download even outside the schedule window
-          <textarea id="siteRules" rows="4" placeholder="supjav.com D:\Downloads\Supjav&#10;*.mayzaent.com D:\Downloads\Mayzaent start&#10;go.mnaspm.com start"></textarea>
+        <label class="rules">Per-site rules for new downloads (one per line: <code>&lt;host&gt;</code> <code>&lt;folder&gt;</code> [<code>start</code>] [<code>cf:on</code>|<code>cf:off</code>]) — folder sets the destination, <code>start</code> begins the download even outside the schedule window, <code>cf:on</code>/<code>cf:off</code> forces the CF browser fallback for that host (default: the install-wide toggle)
+          <textarea id="siteRules" rows="4" placeholder="supjav.com D:\Downloads\Supjav&#10;*.mayzaent.com D:\Downloads\Mayzaent start&#10;go.mnaspm.com start&#10;slowcf.example.com cf:off"></textarea>
         </label>
       </div>
     </section>
