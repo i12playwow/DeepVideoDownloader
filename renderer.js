@@ -569,6 +569,38 @@ async function loadClients() {
 
 window.api.onClients((snap) => renderBridge(snap));
 
+// ---------------- status log ----------------
+// Main-process event lines (the cf-fallback skip notices today) land here the
+// moment they fire; recentStatusLog replays the ring so a freshly opened
+// window still shows what already happened. Newest first, like history.
+let statusLogList = [];
+
+function fmtClock(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, "0");
+  return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
+
+function renderStatusLog() {
+  const el = $("statusLog");
+  if (!el) return;
+  el.innerHTML = statusLogList.length
+    ? statusLogList.map((entry) => `<li><span class="log-time">${fmtClock(entry.ts)}</span>${esc(entry.line)}</li>`).join("")
+    : `<li class="client-empty">No status events yet.</li>`;
+}
+
+async function loadStatusLog() {
+  try { statusLogList = await window.api.recentStatusLog(); } catch (e) { statusLogList = []; }
+  renderStatusLog();
+}
+
+window.api.onStatusLog((entry) => {
+  if (!entry) return;
+  statusLogList.unshift(entry);
+  if (statusLogList.length > 50) statusLogList.length = 50;
+  renderStatusLog();
+});
+
 // ---------------- settings ----------------
 async function loadSettings() {
   const s = await window.api.getSettings();
@@ -912,6 +944,7 @@ loadAll();
 loadHistory();
 updateBandwidth();
 loadClients();
+loadStatusLog();
 setInterval(loadAll, 5000);
 setInterval(updateBandwidth, 5000);
 setInterval(loadClients, 5000);

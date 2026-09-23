@@ -51,6 +51,15 @@
 .client-warn { color: var(--amber); font-size: 11px; margin-top: 2px; }
 .client-empty { color: var(--muted); font-size: 12px; padding: 2px 0; }
 
+/* Status log: main-process event lines (cf-fallback skip notices today) pushed
+   to the window live; a pull-on-load replays what an earlier window saw. */
+.status-log { list-style: none; margin: 0; padding: 0; max-height: 150px; overflow-y: auto; }
+.status-log li { padding: 5px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2); margin-bottom: 6px; font-family: Consolas, Menlo, monospace;
+  font-size: 11.5px; overflow-wrap: anywhere; }
+.status-log li:last-child { margin-bottom: 0; }
+.status-log .log-time { color: var(--muted); margin-right: 8px; }
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {

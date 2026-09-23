@@ -16,7 +16,7 @@ const browserOpen = require("./lib/browser-open");
 const wsBridge = require("./lib/ws-bridge");
 const { statusPayload } = require("./lib/status");
 const { createSettings } = require("./lib/settings");
-const { setCfBrowserFallback } = require("./lib/cf-fallback");
+const { setCfBrowserFallback, setCfFallbackLogSink } = require("./lib/cf-fallback");
 const { createBuiltinBrowser } = require("./lib/browser");
 const { registerIpc } = require("./lib/ipc");
 const cfFallback = require("./lib/cf-fallback");
@@ -111,6 +111,20 @@ cfFallback.setEventHook(pushCfFallbackToast);
 // Boot-time init (onApply only fires on a change): the cfBrowserFallback
 // toggle + siteRules cf overrides must apply without waiting for a save.
 setCfBrowserFallback(settings.get().cfBrowserFallback, settings.get().siteRules);
+
+// Status log: a small main-process ring of operator-facing events (the
+// cf-fallback skip notices today) pushed to the window the moment they fire;
+// late-arriving windows replay recentStatusLog so the panel is never blank
+// after a restart. Mirror of pushUpdate's push discipline for one-off lines.
+const STATUS_LOG_MAX = 50;
+const statusLogEntries = [];
+let statusLogSeq = 0;
+function pushStatusLog(line) {
+  statusLogEntries.push({ id: ++statusLogSeq, ts: Date.now(), line: String(line) });
+  if (statusLogEntries.length > STATUS_LOG_MAX) statusLogEntries.splice(0, statusLogEntries.length - STATUS_LOG_MAX);
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("status-log", statusLogEntries[statusLogEntries.length - 1]); } catch (e) { /* window closing */ }
+}
+setCfFallbackLogSink(pushStatusLog);
 
 // Auto-grab: push the current autoGrab state to every connected extension.
 // Sent on hello-time applies, on setting changes, and it also triggers an
@@ -790,7 +804,8 @@ if (gotLock) {
       install: (b) => launchExtensionInBrowser(b)
     },
     bv: browser.bv,
-    bridge: { snapshot: clientSnapshot, push: pushClients }
+    bridge: { snapshot: clientSnapshot, push: pushClients },
+    statusLog: { recent: () => statusLogEntries.slice().reverse() } // newest-first, matching the live push order the renderer prepends
   });
 
 

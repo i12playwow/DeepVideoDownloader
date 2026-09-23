@@ -95,6 +95,22 @@
     return { current, avg, peak, samples: bwSamples.slice() };
   }
 
+  // ---- status log (demo) -------------------------------------------------
+  // Mirrors main.js's ring: operator-facing event lines (the cf-fallback skip
+  // notices today). Two seeded entries so the panel shows the feature; the
+  // live demo can fire more via window.__demo.fireStatusLog.
+  let statusLogCb = null;
+  let statusLogId = 0;
+  const statusLogEntries = [];
+  function pushStatusLog(line) {
+    const entry = { id: ++statusLogId, ts: Date.now(), line: String(line) };
+    statusLogEntries.push(entry);
+    if (statusLogEntries.length > 50) statusLogEntries.splice(0, statusLogEntries.length - 50);
+    if (statusLogCb) statusLogCb(entry);
+  }
+  pushStatusLog("[cf-fallback] challenge on supjav.com skipped (browser fallback disabled: site rule)");
+  pushStatusLog("[cf-fallback] challenge on slowcf.example.com skipped (browser fallback disabled: cfBrowserFallback: false)");
+
   // ---- event fan-out ----------------------------------------------------
   let updateCb = null, historyCb = null, clipboardCb = null, fileCb = null, cfCb = null;
   function emit(batch) { if (updateCb) updateCb(batch); }
@@ -194,8 +210,10 @@
     onFileOpened: (cb) => { fileCb = cb; },
     onCfFallback: (cb) => { cfCb = cb; },
     onClients: (cb) => { clientsCb = cb; },
+    onStatusLog: (cb) => { statusLogCb = cb; },
 
     getSettings: async () => clone(settings),
+    recentStatusLog: async () => statusLogEntries.slice().reverse(),
     saveSettings: async (s) => { Object.assign(settings, s); return { ok: true }; },
     list: async () => clone(items),
     history: async () => clone(history),
@@ -429,6 +447,7 @@
   window.__demo = {
     api,
     fireClients: () => { if (clientsCb) clientsCb(bridgeSnapshot()); },
+    fireStatusLog: (line) => pushStatusLog(line || "[demo] manual status event"),
     fireClipboard: (url) => { if (clipboardCb) clipboardCb({ url }); },
     fireFileOpened: (path, name) => { if (fileCb) fileCb({ path, name }); },
     fireCfFallback: (host, count) => { if (cfCb) cfCb({ host: host || "supjav.com", count: count || 1, first: (count || 1) === 1 }); },

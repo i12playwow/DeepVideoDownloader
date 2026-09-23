@@ -452,12 +452,12 @@ const SELF_GOLDEN = {
   batch: ["cancel", "pause", "remove", "resume"],
   apiRouted: ["cancel", "forceDownload", "pause", "remove", "resume", "retry"],
   browseTotal: 3,
-  idCount: 65, // 61 + the Extension bridge panel (wsEndpoint, bridgeSummary, bridgeClients) + the cfBrowserFallback checkbox
+  idCount: 66, // 61 + the Extension bridge panel (wsEndpoint, bridgeSummary, bridgeClients) + the cfBrowserFallback checkbox + the Status log panel (statusLog)
 
   selHandlers: [{ id: "dlsBody", ref: "closest(input[data-sel])" }],
   selEmitters: [{ fn: "rowHtml", checkbox: true }],
   selPathVia: ["render"],
-  shimExposed: 37 // 36 + onCfFallback (Cloudflare fallback toast, mirrors preload.js)
+  shimExposed: 38 // 37 + onCfFallback (Cloudflare fallback toast, mirrors preload.js); 34 base + bridge panel pair + recentStatusLog/onStatusLog (Status log panel)
 };
 
 const sorted = (xs) => [...xs].sort();

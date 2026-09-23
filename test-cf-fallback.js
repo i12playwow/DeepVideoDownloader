@@ -375,6 +375,49 @@ async function main() {
     cf.setCfBrowserFallback(true, []);
   }
 
+  console.log("\n=== 7: log sink (Status log panel feed) ===\n");
+  {
+    const CHALLENGE = "<title>Just a moment...</title>";
+    const orig = cf._state.fetchViaCfBrowser;
+    const origLog = console.log;
+    let bridgeCalls = 0;
+    let consoleLines = [];
+    let sinkLines = [];
+    let sinkThrows = 0;
+    console.log = (...a) => { const s = a.join(" "); if (s.startsWith("[cf-fallback]")) consoleLines.push(s); origLog(...a); }; // tee: keep assert output visible
+    cf._state.fetchViaCfBrowser = async (url) => { bridgeCalls++; return "<html>ok"; };
+    cf._internal.skipLogged.clear();
+    cf.setCfBrowserFallback(false, []);
+
+    // without a sink: console only
+    await cf.fetchPageWithFallback("https://sinkless.test/a", CHALLENGE);
+    assert("no sink installed: console line still fires", consoleLines.length === 1);
+
+    // with a sink: the same line reaches both consumers
+    cf.setCfFallbackLogSink((line) => sinkLines.push(line));
+    await cf.fetchPageWithFallback("https://sink.test/b", CHALLENGE);
+    assert("sink receives the skip line alongside console", consoleLines.length === 2 && sinkLines.length === 1);
+    assert("sink line text matches the console line", sinkLines[0] === consoleLines[1], JSON.stringify(sinkLines));
+
+    // a throwing sink must never break the gate (challenge still passes through)
+    cf.setCfFallbackLogSink(() => { sinkThrows++; throw new Error("sink exploded"); });
+    const out = await cf.fetchPageWithFallback("https://boom.test/c", CHALLENGE);
+    assert("throwing sink does not break the skip path", out === CHALLENGE && sinkThrows === 1);
+
+    // detach restores sinkless behavior; live fallback stays silent on both
+    cf.setCfFallbackLogSink(null);
+    sinkLines.length = 0;
+    cf.setCfBrowserFallback(true, []);
+    await cf.fetchPageWithFallback("https://quiet.test/d", CHALLENGE);
+    assert("enabled gate: neither console nor (detached) sink fire", consoleLines.length === 3 && sinkLines.length === 0, "console=" + consoleLines.length); // 3rd console line = the throwing-sink skip (console fires before the sink)
+    assert("setCfFallbackLogSink(non-function) detaches", cf.setCfFallbackLogSink(undefined) === undefined);
+
+    console.log = origLog;
+    cf._state.fetchViaCfBrowser = orig;
+    cf._internal.skipLogged.clear();
+    cf.setCfBrowserFallback(true, []);
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 }
