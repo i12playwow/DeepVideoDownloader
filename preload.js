@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld("api", {
   getActiveDir: () => ipcRenderer.invoke("get-active-dir"),
   listClients: () => ipcRenderer.invoke("clients-list"),
   recentStatusLog: () => ipcRenderer.invoke("status-log-recent"),
+  clearStatusLog: () => ipcRenderer.invoke("status-log-clear"),
+  copyText: (text) => ipcRenderer.invoke("copy-text", text),
   onStatusLog: (cb) => ipcRenderer.on("status-log", (e, entry) => cb(entry)),
   onClients: (cb) => ipcRenderer.on("ws-clients", (e, snapshot) => cb(snapshot)),
   showInFolder: (p) => ipcRenderer.invoke("open-path", p),

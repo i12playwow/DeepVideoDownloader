@@ -231,6 +231,48 @@ const netErr = () => { const e = new Error("network down"); e.category = "networ
   })();
 
   await (async () => {
+    // The Status log panel surfaces auto-requeues through the onAutoRetry
+    // notice hook: it fires exactly when the requeue is decided and carries
+    // the facts a panel line needs (category, delay, count, scheduledStart).
+    const { dm, dir } = makeDm({ concurrency: 1, maxRetries: 0, autoRetryMinutes: 7 });
+    let calls = 0;
+    dm.run = async (item) => { calls++; if (calls < 2) throw netErr(); item.status = "done"; };
+    const notices = [];
+    dm.onAutoRetry = (item, cat, mins) => notices.push({ id: item.id, cat, mins, count: item._autoRetries, at: item.scheduledStart });
+    const id = await dm.enqueue({ url: "https://example.com/notice.mp4", title: "notice" });
+    await waitFor(dm, id, ["scheduled"], 3000);
+    t("auto-retry fires the onAutoRetry notice with requeue facts", () => {
+      assert.strictEqual(notices.length, 1);
+      assert.strictEqual(notices[0].id, id);
+      assert.strictEqual(notices[0].cat, "network");
+      assert.strictEqual(notices[0].mins, 7);
+      assert.strictEqual(notices[0].count, 1);
+      assert.ok(notices[0].at > Date.now() - 60000, "scheduledStart set before the notice");
+    });
+    cleanup(dir);
+  })();
+
+  await (async () => {
+    // A throwing notice hook (a broken UI push) must never derail the engine.
+    // autoRetryMax: 1 so the second failure exhausts into terminal error.
+    const { dm, dir } = makeDm({ concurrency: 1, maxRetries: 0, autoRetryMinutes: 1, autoRetryMax: 1 });
+    dm.run = async (item) => { throw netErr(); };
+    dm.onAutoRetry = () => { throw new Error("notice boom"); };
+    const id = await dm.enqueue({ url: "https://example.com/boom-notice.mp4", title: "boom-notice" });
+    const sched = await waitFor(dm, id, ["scheduled"], 3000);
+    t("throwing onAutoRetry hook does not derail the requeue", () => {
+      assert.strictEqual(sched.status, "scheduled");
+    });
+    dm.items.get(id).scheduledStart = Date.now() - 1;
+    dm.checkScheduled();
+    const done = await waitFor(dm, id, ["error"], 3000);
+    t("throwing onAutoRetry hook does not derail the retried run", () => {
+      assert.strictEqual(done.status, "error");
+    });
+    cleanup(dir);
+  })();
+
+  await (async () => {
     const { dm, dir } = makeDm({ concurrency: 1, maxRetries: 0, autoRetryMinutes: 5 });
     dm.run = async () => { const e = new Error("cloudflare wall"); e.category = "requires-browser"; throw e; };
     const id = await dm.enqueue({ url: "https://example.com/cf.mp4", title: "cf" });

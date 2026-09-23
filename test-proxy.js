@@ -1,7 +1,7 @@
 "use strict";
 // Offline tests for proxy.js: matchHost patterns + ProxyManager.pickBest rules.
 // Run: node test-proxy.js   (no Electron, no network — testLatency is mocked)
-const { ProxyManager, matchHost, parseProxyUrl } = require("./proxy");
+const { ProxyManager, matchHost, parseProxyUrl, setProxyLogSink } = require("./proxy");
 
 let passed = 0, failed = 0;
 function assert(label, cond, detail) {
@@ -66,6 +66,22 @@ console.log("\n=== pickBest: per-host rules ===\n");
   pm = makePM([{ host: "*.mayzaent.com", proxy: "socks5://b:2" }], ["http://a:1", "socks5://b:2"]);
   r = await pm.pickBest("https://go.mayzaent.com/file");
   assert("*.suffix rule matches subdomain", r && r.url === urlOf("socks5://b:2"), r && r.url);
+
+  console.log("\n=== operator log sink ===\n");
+  // The Status-log sink (same contract as cf-fallback's): operator lines for
+  // failover events, selection never affected, throwing sinks swallowed.
+  const lines = [];
+  pm = makePM([{ host: "supjav.com", proxy: "http://a:1" }], ["http://a:1", "socks5://b:2"], new Set([urlOf("http://a:1")]));
+  setProxyLogSink((l) => lines.push(l));
+  await pm.pickBest("https://supjav.com/x");
+  assert("dead rule proxy emits a failover line", lines.length === 1 && lines[0].includes("supjav.com") && lines[0].includes("falling back to the auto pool") && lines[0].includes("http://a:1"), lines.join(" | "));
+  setProxyLogSink(() => { throw new Error("sink boom"); });
+  r = await pm.pickBest("https://supjav.com/x");
+  assert("throwing sink does not break selection", r && r.url === urlOf("socks5://b:2"), r && r.url);
+  setProxyLogSink(null);
+  lines.length = 0;
+  await pm.pickBest("https://supjav.com/x");
+  assert("detached sink is silent", lines.length === 0, String(lines.length));
 
   console.log("\n=== " + passed + " passed, " + failed + " failed ===\n");
   process.exit(failed ? 1 : 0);

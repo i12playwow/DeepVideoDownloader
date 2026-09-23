@@ -101,6 +101,7 @@
   // live demo can fire more via window.__demo.fireStatusLog.
   let statusLogCb = null;
   let statusLogId = 0;
+  let lastCopiedText = null;
   const statusLogEntries = [];
   function pushStatusLog(line) {
     const entry = { id: ++statusLogId, ts: Date.now(), line: String(line) };
@@ -110,6 +111,8 @@
   }
   pushStatusLog("[cf-fallback] challenge on supjav.com skipped (browser fallback disabled: site rule)");
   pushStatusLog("[cf-fallback] challenge on slowcf.example.com skipped (browser fallback disabled: cfBrowserFallback: false)");
+  pushStatusLog("[queue] sample video failed (network), auto-retry scheduled in 5 min");
+  pushStatusLog("[ws] listening on port 8766 (moved from 8765)");
 
   // ---- event fan-out ----------------------------------------------------
   let updateCb = null, historyCb = null, clipboardCb = null, fileCb = null, cfCb = null;
@@ -214,6 +217,12 @@
 
     getSettings: async () => clone(settings),
     recentStatusLog: async () => statusLogEntries.slice().reverse(),
+    clearStatusLog: async () => { statusLogEntries.length = 0; return { ok: true }; },
+    copyText: async (text) => { // demo: file:// may deny the real clipboard — the tracker still records it for the live demo
+      lastCopiedText = String(text);
+      try { if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(lastCopiedText); } catch (e) { /* denied — tracked anyway */ }
+      return { ok: true };
+    },
     saveSettings: async (s) => { Object.assign(settings, s); return { ok: true }; },
     list: async () => clone(items),
     history: async () => clone(history),
@@ -448,6 +457,8 @@
     api,
     fireClients: () => { if (clientsCb) clientsCb(bridgeSnapshot()); },
     fireStatusLog: (line) => pushStatusLog(line || "[demo] manual status event"),
+    fireWsPort: () => pushStatusLog("[ws] listening on port " + (8800 + Math.floor(Math.random() * 100)) + " (moved from 8766)"),
+    get lastCopied() { return lastCopiedText; },
     fireClipboard: (url) => { if (clipboardCb) clipboardCb({ url }); },
     fireFileOpened: (path, name) => { if (fileCb) fileCb({ path, name }); },
     fireCfFallback: (host, count) => { if (cfCb) cfCb({ host: host || "supjav.com", count: count || 1, first: (count || 1) === 1 }); },

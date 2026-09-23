@@ -601,6 +601,41 @@ window.api.onStatusLog((entry) => {
   renderStatusLog();
 });
 
+// ---------------- status log header actions ----------------
+// Copy serializes the visible lines (newest-first on screen, so the clipboard
+// reads newest-first too) through the main process; Clear wipes the renderer
+// list AND the main-process ring so a reload cannot resurrect cleared entries.
+// The hint span doubles as transient, non-blocking feedback for both.
+let statusLogHintTimer = null;
+function hintStatusLog(msg) {
+  const el = $("statusLogHint");
+  if (!el) return;
+  el.textContent = msg;
+  if (statusLogHintTimer) clearTimeout(statusLogHintTimer);
+  statusLogHintTimer = setTimeout(() => { el.textContent = ""; statusLogHintTimer = null; }, 2500);
+}
+
+async function copyStatusLog() {
+  if (!statusLogList.length) return hintStatusLog("Nothing to copy yet.");
+  const text = statusLogList.map((entry) => fmtClock(entry.ts) + "  " + entry.line).join("\n");
+  try {
+    await window.api.copyText(text);
+    hintStatusLog("Copied " + statusLogList.length + " line" + (statusLogList.length === 1 ? "" : "s") + " to the clipboard.");
+  } catch (e) {
+    hintStatusLog("Copy failed: " + (e && e.message ? e.message : e));
+  }
+}
+
+async function clearStatusLogPanel() {
+  statusLogList = [];
+  renderStatusLog();
+  try { await window.api.clearStatusLog(); } catch (e) { hintStatusLog("Clear failed: " + (e && e.message ? e.message : e)); return; }
+  hintStatusLog("Status log cleared.");
+}
+
+$("statusLogCopy").addEventListener("click", copyStatusLog);
+$("statusLogClear").addEventListener("click", clearStatusLogPanel);
+
 // ---------------- settings ----------------
 async function loadSettings() {
   const s = await window.api.getSettings();

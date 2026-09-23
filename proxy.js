@@ -7,6 +7,17 @@ const http = require("http");
 const https = require("https");
 const { URL } = require("url");
 
+// Optional operator-visible log sink (the app's Status log panel). Strictly
+// additive: the console line always stays and is the source of truth; a
+// throwing sink is swallowed and can never break proxy selection (same
+// contract as lib/cf-fallback.js's setCfFallbackLogSink).
+let logSink = null;
+function setProxyLogSink(fn) { logSink = typeof fn === "function" ? fn : null; }
+function proxyLog(line) {
+  if (!logSink) return;
+  try { logSink(line); } catch (e) { /* logging must not affect selection */ }
+}
+
 const PROXY_SCHEMES = ["http", "https", "socks", "socks4", "socks5", "socks5h"];
 
 function parseProxyUrl(p) {
@@ -175,6 +186,7 @@ class ProxyManager {
         const p = parseProxyUrl(rule.proxy);
         if (!p) {
           console.warn("[proxy] dropping invalid rule proxy: " + rule.proxy);
+          proxyLog("[proxy] " + host + ": dropping invalid rule proxy " + rule.proxy + " — using the auto pool");
         } else {
           const lat = await this.testLatency(p, targetUrl, timeout);
           if (lat && lat.ms != null) {
@@ -183,6 +195,7 @@ class ProxyManager {
           }
           // dead rule proxy -> fall back to the auto pool
           console.warn("[proxy] rule proxy dead, falling back to auto pool: " + rule.proxy);
+          proxyLog("[proxy] " + host + ": configured proxy is unreachable, falling back to the auto pool (" + rule.proxy + ")");
         }
       }
     }
@@ -207,4 +220,4 @@ class ProxyManager {
   }
 }
 
-module.exports = { ProxyManager, parseProxyUrl, agentFor, transport, matchHost };
+module.exports = { ProxyManager, parseProxyUrl, agentFor, transport, matchHost, setProxyLogSink };

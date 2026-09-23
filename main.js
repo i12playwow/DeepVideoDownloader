@@ -11,7 +11,7 @@ const os = require("os");
 const { execFile } = require("child_process");
 const { WebSocketServer } = require("ws");
 const { DownloadManager, requestWithRedirects } = require("./downloader");
-const { ProxyManager } = require("./proxy");
+const { ProxyManager, setProxyLogSink } = require("./proxy");
 const browserOpen = require("./lib/browser-open");
 const wsBridge = require("./lib/ws-bridge");
 const { statusPayload } = require("./lib/status");
@@ -124,7 +124,11 @@ function pushStatusLog(line) {
   if (statusLogEntries.length > STATUS_LOG_MAX) statusLogEntries.splice(0, statusLogEntries.length - STATUS_LOG_MAX);
   try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("status-log", statusLogEntries[statusLogEntries.length - 1]); } catch (e) { /* window closing */ }
 }
+function clearStatusLog() { // the panel's Clear button: wipe the ring so a reloaded window cannot resurrect cleared entries
+  statusLogEntries.length = 0;
+}
 setCfFallbackLogSink(pushStatusLog);
+setProxyLogSink(pushStatusLog);
 
 // Auto-grab: push the current autoGrab state to every connected extension.
 // Sent on hello-time applies, on setting changes, and it also triggers an
@@ -459,6 +463,8 @@ async function applyWsPort(port) {
     wsBindError = "could not bind " + port + "-" + (port + WS_PORT_SCAN - 1) + " (" + bound.error.message + ")" +
       (previous ? " — still listening on " + previousPort : " — no WS server is running");
     console.error("[ws] " + wsBindError);
+    pushStatusLog("[ws] could not bind port " + port +
+      (previous ? " — still listening on " + previousPort : " — no WS server is running"));
     // Put the config back to the port that is really held, so config.json never
     // names an endpoint nothing listens on either (nothing to revert to at boot,
     // where no server has ever bound).
@@ -472,6 +478,8 @@ async function applyWsPort(port) {
   const moved = previous ? " (moved from " + previousPort + ")" : "";
   console.log("[ws] listening on ws://127.0.0.1:" + bound.port + moved +
     (bound.port !== port ? " — port " + port + " was taken" : ""));
+  pushStatusLog("[ws] listening on port " + bound.port + moved +
+    (bound.port !== port ? " — port " + port + " was taken, fell forward to " + bound.port : ""));
   startWsKeepalive();
   if (previous) {
     // A dropped link is not a port change for the extension (it retries the
@@ -794,6 +802,7 @@ if (gotLock) {
     ipcMain,
     shell,
     dialog,
+    clipboard, // copy-text (the Status log panel's Copy action)
     dm,
     settings,
     getProxyManager: () => proxyManager,
@@ -805,7 +814,7 @@ if (gotLock) {
     },
     bv: browser.bv,
     bridge: { snapshot: clientSnapshot, push: pushClients },
-    statusLog: { recent: () => statusLogEntries.slice().reverse() } // newest-first, matching the live push order the renderer prepends
+    statusLog: { recent: () => statusLogEntries.slice().reverse(), clear: clearStatusLog } // newest-first, matching the live push order the renderer prepends; clear backs the panel's Clear button (empties the ring, so a reload cannot resurrect cleared entries)
   });
 
 

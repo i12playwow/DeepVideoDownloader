@@ -187,7 +187,7 @@ function isSignedGetVideoExpired(item, err) {
 }
 
 class DownloadManager {
-  constructor({ config, proxyManager, onUpdate, cookieProvider, onRequiresBrowser }) {
+  constructor({ config, proxyManager, onUpdate, cookieProvider, onRequiresBrowser, onAutoRetry }) {
     this.config = config;
     this.proxyManager = proxyManager;
     this.onUpdate = onUpdate || (() => {});
@@ -196,6 +196,9 @@ class DownloadManager {
     // browser (Cloudflare/anti-bot). The app opens it in the built-in browser
     // so the Deep Grab extension can capture the stream via webRequest.
     this.onRequiresBrowser = onRequiresBrowser || (() => {});
+    // Operator-notice hook: fired when a failed item is auto-requeued (the
+    // Status log panel surfaces it). Must never affect the engine.
+    this.onAutoRetry = onAutoRetry || (() => {});
     this.items = new Map();
     this.active = 0;
     this._id = 0;
@@ -806,6 +809,7 @@ class DownloadManager {
               next.status = "scheduled";
               this.emit(next);
               this.checkScheduled();
+              try { this.onAutoRetry(next, cat, autoMin); } catch (e) { /* notice must not affect the engine */ }
               await this._dropEmptyTempDir(next);
               return;
             }
