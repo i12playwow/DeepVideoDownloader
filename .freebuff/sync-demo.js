@@ -457,7 +457,7 @@ const SELF_GOLDEN = {
   selHandlers: [{ id: "dlsBody", ref: "closest(input[data-sel])" }],
   selEmitters: [{ fn: "rowHtml", checkbox: true }],
   selPathVia: ["render"],
-  shimExposed: 39 // 34 base + listClients/onClients (Extension bridge panel) + recentStatusLog/onStatusLog (Status log panel) + clearStatusLog/copyText (Copy/Clear header buttons) + onCfFallback (Cloudflare fallback toast, mirrors preload.js)
+  shimExposed: 41 // 34 base + listClients/onClients (Extension bridge panel) + recentStatusLog/onStatusLog (Status log panel) + clearStatusLog/copyText (Copy/Clear header buttons) + onCfFallback (Cloudflare fallback toast, mirrors preload.js)
 };
 
 const sorted = (xs) => [...xs].sort();
