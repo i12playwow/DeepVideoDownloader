@@ -39,7 +39,10 @@ const { isHlsUrl, parseHlsPlaylist, HLS_MASTER_RE } = require("../lib/hls");
 const { isCfChallengeBody } = require("../lib/cf-fallback");
 const REPO = path.join(__dirname, "..");
 
-const SITE = "https://missav.ws";
+// Base site override: the boot-verify drill points this at a local mock MissAV
+// (JAVDL_SITE=http://127.0.0.1:<port>) so Phase L resolves a fixture code with
+// zero network egress. Fetches/referers all flow from this base.
+const SITE = process.env.JAVDL_SITE || "https://missav.ws";
 const SLUG_SUFFIXES = ["", "-uncensored-leak", "-uncensored-leak-sub", "-chinese-sub",
   "-english-sub", "-cm", "-ub", "-uc"];
 const MIRROR_DOMAINS = ["javhd.today", "javdock.com", "bestjavporn.com", "javhdporn.net"];
@@ -411,9 +414,9 @@ async function processCode(code, args, dm, outDir) {
         process.stdout.write("\r  " + Math.floor((it.received / it.total) * 100) + "% of " +
           Math.round(it.total / 1e6) + " MB   ");
       } else if (it.status === "error") {
-        const note = "surrit window hot — auto-retry cycle " +
+        const note = "engine error — auto-retry cycle " +
           ((it._autoRetries || 0) + 1) + "/" + engineOpts.autoRetryMax +
-          " (next attempt in " + autoRetryMinutes + " min)";
+          " (next attempt in " + autoRetryMinutes + " min): " + (it.error || "unknown");
         if (note !== lastNote) { process.stdout.write("\n  " + note + "\n"); lastNote = note; }
       } else if (it.status === "scheduled" && lastNote) {
         process.stdout.write("\r  retrying in " + autoRetryMinutes + " min...                     ");
@@ -456,8 +459,10 @@ async function main() {
   })();
   if (!args.url && !allCodes.length) throw new Error("give a JAV code, several codes, or --from-file LIST");
 
+  // JAVDL_OUT_DIR (drill seam) overrides the default download dir without
+  // needing an explicit -o on every invocation.
   const outDir = args.out ? path.dirname(path.resolve(args.out))
-    : (DEFAULT_CONFIG.downloadDir || process.cwd());
+    : (process.env.JAVDL_OUT_DIR || DEFAULT_CONFIG.downloadDir || process.cwd());
   const config = { ...DEFAULT_CONFIG, autoProxy: false, skipDuplicates: false };
   const dm = new DownloadManager({ config, proxyManager: new ProxyManager(config), onUpdate: () => {} });
 
@@ -492,7 +497,13 @@ async function main() {
   if (failed.length) process.exitCode = 1;
 }
 
-main().then(() => process.exit(process.exitCode || 0)).catch((err) => {
-  console.error("jav-dl: " + (err && err.message || err));
-  process.exit(1);
-});
+if (require.main === module) {
+  main().then(() => process.exit(process.exitCode || 0)).catch((err) => {
+    console.error("jav-dl: " + (err && err.message || err));
+    process.exit(1);
+  });
+}
+
+// Test seams: the boot-verify drill drives processCode programmatically against
+// a mock MissAV (JAVDL_SITE) instead of spawning the CLI as a child.
+module.exports = { normalizeCode, processCode, buildQueue, _internals: { SITE, SLUG_SUFFIXES, resolveBySlug } };

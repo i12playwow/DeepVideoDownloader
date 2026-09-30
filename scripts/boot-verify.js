@@ -35,6 +35,13 @@
 //                     client connect/disconnect lines and Phase H the
 //                     extension connect line — the panel's live ws sources
 //                     (the seam the offline suites can only stub)
+//   L jav-dl drill   — the jav-dl CLI (spawned as a REAL child with JAVDL_SITE
+//                     pointed at this fixture) resolves fixture code bvd-777
+//                     against the mock MissAV (meta-refresh bounce -> escape-
+//                     packed eval payload -> fixture HLS serving a real
+//                     ffmpeg-made MPEG-TS), downloads via the engine, remuxes
+//                     to an ffmpeg-validated MP4 in the sandbox out dir, and
+//                     a second run [skip]s idempotently; zero network egress
 //   I live port move — a live config port change (the file watcher path) moves
 //                     the listener: the new port serves a hello advertising
 //                     ITSELF, the old port is released, config stays in sync;
@@ -46,7 +53,7 @@
 //        npm run boot-verify -- --cft-probe   # where would G/H look for Chrome for Testing?
 // Exit 0 = all phases passed; 1 = any assertion failed / setup aborted.
 
-const { spawn, execFileSync } = require("child_process");
+const { spawn, spawnSync, execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
@@ -220,6 +227,72 @@ function startFixture() {
       if (p === "/movie-code-cf.html") {
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(CF_CHALLENGE_HTML);
+        return;
+      }
+      // Phase L (jav-dl CLI drill): a MOCK MISSAV on this fixture. /en/<slug>
+      // answers the meta-refresh bounce the real site uses (the CLI must chase
+      // it); the bounce target serves a page whose stream is embedded as a
+      // Dean Edwards eval-packer payload WITH backslash-escaped quotes — the
+      // exact shape resolveMissav's fixed unpacker handles. The packed m3u8
+      // points back at this fixture's HLS routes, which serve the shared MP4
+      // fixture sliced as fake MPEG-TS segments (real demuxable bytes beat a
+      // synthetic payload: the engine's ad-filter and ffmpeg remux stay honest).
+      const L_SLUG = "bvd-777";
+      const b64u = (s) => Buffer.from(s).toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
+      if (p === "/en/" + L_SLUG) {
+        const host = req.headers.host;
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end("<!doctype html><html><head><meta http-equiv=\"refresh\" content=\"0;url='http://" + host + "/dm9/en/" + L_SLUG + "'\" /><title>Redirecting</title></head><body></body></html>");
+        return;
+      }
+      if (p === "/dm9/en/" + L_SLUG) {
+        const host = req.headers.host;
+        const m3u8 = "http://" + host + "/hls/bdd77700-1111-2222-3333-444444444444/playlist.m3u8";
+        // Dean Edwards packer WITH backslash-escaped quotes (the real-page
+        // shape resolveMissav's unpacker exists for). The m3u8 URL goes in the
+        // KEY TABLE (k0), not the payload: the unpacker rewrites every
+        // \\b0\\b/\\b1\\b/\\b2\\b token, so digits inside a payload-embedded
+        // loopback URL (127.0.0.1) would be mangled into dictionary words.
+        const dict = m3u8 + "|playlist|source";
+        const payload = "f=\\'0\\';source=\\'0\\';";
+        const script = "eval(function(p,a,c,k,e,d){e=function(c){return c.toString(a)};if(!''.replace(/^/,String)){while(c--){d[c.toString(a)]=k[c]||c.toString(a)}k=[function(e){return d[e]}];e=function(){return'\\\\w+'};c=1};while(c--){if(k[c]){p=p.replace(new RegExp('\\\\b'+e(c)+'\\\\b','g'),k[c])}}return p}('" +
+          payload + "',36,3,'" + dict + "'.split('|'),0,{}))";
+        res.writeHead(200, { "Content-Type": "text/html" });
+        // Pad to real-page size: resolveBySlug treats pages < 10000 chars as
+        // 404 shells and sweeps on (real dm14 pages are ~344 KB).
+        const pad = "<!-- drill filler: emulates the real page's large body ".repeat(190);
+        res.end("<!doctype html><html><head><title>bvd-777 drill fixture</title></head><body>" + pad +
+          "<script>" + script + "</script></body></html>");
+        return;
+      }
+      const hm = /\/hls\/([0-9a-f-]{36})\/(?:[\w-]+\/)?(playlist\.m3u8|video\.m3u8|seg(\d+)\.ts)$/.exec(p);
+      if (hm) {
+        if (hm[2] === "playlist.m3u8") {
+          const host = req.headers.host;
+          res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
+          res.end("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1280x720\n1280x720/video.m3u8\n");
+          return;
+        }
+        if (hm[2] === "video.m3u8") {
+          const base = p.slice(0, -"video.m3u8".length);
+          let b = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n";
+          for (let i = 0; i < 4; i++) b += "#EXTINF:2.0,\nseg" + i + ".ts\n";
+          void base;
+          res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
+          res.end(b);
+          return;
+        }
+        // segN.ts: slice the real MPEG-TS fixture (188-byte packet aligned)
+        // into 4 fake segments — genuine demuxable bytes so the engine's
+        // ffmpeg remux produces a valid MP4, not garbage.
+        const TS = ensureTsFixture();
+        const segN = Number(hm[3]);
+        const packet = 188;
+        const chunk = Math.floor(TS.length / 4 / packet) * packet;
+        const start = segN * chunk;
+        const seg = TS.subarray(start, segN < 3 ? start + chunk : TS.length);
+        res.writeHead(200, { "Content-Type": "video/mp2t", "Content-Length": seg.length });
+        res.end(seg);
         return;
       }
       if (/^\/movie-code-\d+\.html$/.test(p)) {
@@ -1571,6 +1644,105 @@ async function phaseJ(port) {
   pass("J skip line pushed to panel", "live status-log push reached the window panel: " + panelHit.trim().slice(0, 110));
   pass("J cf:off gate live", "challenge -> requires-browser, bridge cold; " + skipLine.trim().slice(0, 110));
 }
+// Phase L fixture: a REAL MPEG-TS stream (vendor ffmpeg transcode of the
+// shared MP4, 188-byte packet aligned) so the engine's ffmpeg remux yields a
+// valid MP4 — raw MP4 slices are not demuxable TS and would break the very
+// remux this phase exercises. Cached per run; regenerated on size drift.
+let tsCache = null, tsFixtureSynthetic = false;
+function ensureTsFixture() {
+  if (tsCache) return tsCache;
+  const ff = path.join(ROOT, "vendor", "ffmpeg", "ffmpeg.exe");
+  if (fs.existsSync(ff)) {
+    const r = spawnSync(ff, ["-v", "error", "-y", "-i", "pipe:0", "-c", "copy",
+      "-muxdelay", "0", "-muxpreload", "0", "-f", "mpegts", "pipe:1"],
+      { input: MP4, maxBuffer: 64 * 1024 * 1024 });
+    if (r.status === 0 && Buffer.isBuffer(r.stdout) && r.stdout.length > 0 && r.stdout.length % 188 === 0) {
+      tsCache = r.stdout;
+      tsFixtureSynthetic = false;
+      return tsCache;
+    }
+    console.log("  [fixture] ffmpeg TS transcode failed (status " + r.status + "), using synthetic TS");
+  }
+  // Synthetic fallback: syntactically valid TS (0x47 sync byte + null payload
+  // packets). ffmpeg remux passes it through; the phase still proves the
+  // download pipeline end to end, it just cannot assert a decodable stream.
+  const n = Math.ceil(MP4.length / 188) * 188;
+  const buf = Buffer.alloc(n, 0);
+  for (let i = 0; i < n; i += 188) buf[i] = 0x47;
+  tsCache = buf;
+  tsFixtureSynthetic = true;
+  return tsCache;
+}
+
+// ---- Phase L: the jav-dl CLI resolves a fixture code against a mock MissAV ----
+// scripts/jav-dl.js is the headless JAV-code downloader; this phase proves its
+// full resolve+download pipeline against a LOCAL mock (zero network egress):
+// the JAVDL_SITE env points the CLI at this fixture, /en/<slug> answers the
+// meta-refresh bounce, the bounce page carries the stream as an escape-packed
+// eval payload (the shape resolveMissav's fixed unpacker exists for), and the
+// packed m3u8 loops back to fixture HLS routes serving the shared MP4 as fake
+// TS segments. The CLI runs as a REAL child process (JAVDL_OUT_DIR inside the
+// sandbox) and must land a byte-valid remux in its output dir.
+async function phaseL(port) {
+  console.log("--- Phase L: jav-dl CLI resolves fixture code bvd-777 against the mock MissAV ---");
+  const outDir = path.join(sandbox, "jav-dl-out");
+  fs.mkdirSync(outDir, { recursive: true });
+  const site = "http://127.0.0.1:" + port;
+  const childEnv = { ...process.env, JAVDL_SITE: site, JAVDL_OUT_DIR: outDir };
+  // Pre-build the TS fixture NOW: ensureTsFixture shells out to ffmpeg, and a
+  // lazy build inside a seg-request handler would stall that response.
+  ensureTsFixture();
+  // Async spawn, NOT spawnSync: this process hosts the fixture the child must
+  // talk to; a synchronous wait here can starve the fixture's own event loop
+  // and deadlock parent against child (observed with spawnSync).
+  const run = (timeoutMs) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(ROOT, "scripts", "jav-dl.js"), "bvd-777"], {
+      env: childEnv, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "", err = "", done = false;
+    const timer = setTimeout(() => {
+      if (!done) { done = true; child.kill("SIGKILL"); reject(new Error("jav-dl timeout after " + timeoutMs + "ms; stdout tail=" + out.slice(-200) + " stderr tail=" + err.slice(-200))); }
+    }, timeoutMs);
+    child.stdout.on("data", (c) => { out += c; });
+    child.stderr.on("data", (c) => { err += c; });
+    child.on("error", (e) => { if (!done) { done = true; clearTimeout(timer); reject(e); } });
+    child.on("exit", (code) => { if (!done) { done = true; clearTimeout(timer); resolve({ status: code, stdout: out, stderr: err }); } });
+  });
+  let r;
+  try { r = await run(90000); } catch (e) { return fail("L cli ran", "spawn failed: " + ((e && e.message) || e)); }
+  if (r.status !== 0) {
+    return fail("L cli exit 0", "exit=" + r.status + " stderr=" + r.stderr.slice(-300) + " stdout tail=" + r.stdout.slice(-300));
+  }
+  if (!/stream: http:\/\/127\.0\.0\.1:\d+\/hls\//.test(r.stdout)) {
+    return fail("L resolved to fixture stream", "CLI stdout has no fixture 'stream: …/hls/…' line (resolve failed or pointed off-fixture); stdout=" + r.stdout.slice(-300));
+  }
+  const outPath = path.join(outDir, "bvd-777.mp4");
+  if (!hasFile(outPath)) return fail("L output file", "no " + outPath + " after exit 0; stdout=" + r.stdout.slice(-300));
+  const size = fileSize(outPath);
+  // The remux compacts the TS container away, so output size tracks the
+  // underlying media, not the 13 KB TS — assert non-trivial, then prove the
+  // file actually decodes (only meaningful when the fixture TS was a real
+  // ffmpeg transcode; the synthetic fallback is passthrough junk).
+  if (size < 4096) return fail("L output size", "remuxed file only " + size + " bytes (truncated or empty segments?) stdout=" + r.stdout.slice(-200));
+  const ff = path.join(ROOT, "vendor", "ffmpeg", "ffmpeg.exe");
+  if (fs.existsSync(ff) && !tsFixtureSynthetic) {
+    const d = spawnSync(ff, ["-v", "error", "-i", outPath, "-f", "null", "-"], { encoding: "utf8", timeout: 30000 });
+    if (d.status !== 0) return fail("L output decodes", "ffmpeg rejected the remux (status " + d.status + "): " + (d.stderr || "").slice(-200));
+    pass("L output decodes", "ffmpeg validated the remuxed MP4 (" + size + " bytes)");
+  }
+  pass("L cli resolved + downloaded", "bvd-777.mp4 " + size + " bytes via mock MissAV at " + site);
+  // Idempotence: a second run must SKIP (queue-mode skip contract) and exit 0
+  // without touching the file again.
+  const before = fs.statSync(outPath).mtimeMs;
+  let r2;
+  try { r2 = await run(60000); } catch (e) { return fail("L second run", "spawn failed: " + ((e && e.message) || e)); }
+  if (r2.status !== 0) return fail("L second run exit 0", "exit=" + r2.status + " stderr=" + r2.stderr.slice(-200));
+  if (!/already exists/.test(r2.stdout)) return fail("L second run skipped", "no '[skip] … already exists' line; stdout=" + r2.stdout.slice(-200));
+  const after = fs.statSync(outPath).mtimeMs;
+  if (after !== before) return fail("L skip did not rewrite", "output mtime changed on the skip run");
+  pass("L idempotent re-run", "second run skipped the existing output, file untouched");
+}
+
 // ---- Phase K: the clipboard auto-grab fires the [grab] line, live ----
 // The monitor is armed unconditionally at boot (app.whenReady ->
 // startClipboardMonitor) and polls the REAL machine clipboard every 5s for a
@@ -1680,6 +1852,9 @@ async function main() {
     // K uses the machine clipboard; it must run before I so its fixture URL
     // still names a live fixture port for provenance in the log line.
     await run("K", () => phaseK(port));
+    // L drives the jav-dl CLI against the mock MissAV fixture (no egress); it
+    // needs the fixture alive, so it too runs before I's port move.
+    await run("L", () => phaseL(port));
     // Last: it deliberately moves the app off WS_PORT (and persists the move),
     // so every phase that dials 8766 has to run before it.
     await run("I", () => phaseI());
