@@ -211,6 +211,28 @@ console.log("\n=== enqueue chain dedupe (capture storm -> duplicate, not re-down
   assert("tiny stub (< threshold) does NOT block re-download",
     (dm.items.get(d2) || {}).status !== "duplicate", JSON.stringify({ status: (dm.items.get(d2) || {}).status }));
   fsMod.rmSync(tmp, { recursive: true, force: true });
+
+  // --- MissAV eval-packer extraction (unpackJsEvalAll, validated 2026-09-30) ---
+  // The packed payload carries BACKSLASH-ESCAPED quotes (source1280=\'https://…\')
+  // and sits mid-script BEHIND an earlier eval(…('…')-shaped bootstrap spot whose
+  // plain .match() hit is degenerate (undefined groups). The old single-match
+  // regex truncated m[1] to "f=\" / matched garbage and resolveMissav returned
+  // "could not extract m3u8" for every current page.
+  const { unpackJsEvalAll } = require("./lib/resolvers");
+  const PACKED_PAGE = "<html><script>\n window.isPublished = true;\n const bad = eval(function(p,a,c,k,e,d){return p}('degenerate',1,1,''.split('|'),0,{}));\n</script><script>\n" +
+    "eval(function(p,a,c,k,e,d){e=function(c){return c.toString(36)};if(!''.replace(/^/,String)){while(c--){d[c.toString(a)]=k[c]||c.toString(a)}k=[function(e){return d[e]}];e=function(){return'\\\\w+'};c=1};while(c--){if(k[c]){p=p.replace(new RegExp('\\\\b'+e(c)+'\\\\b','g'),k[c])}}return p}" +
+    "('f=\\'8://7.6/5-4-3-2-1/e.0\\';d=\\'8://7.6/5-4-3-2-1/c/9.0\\';b=\\'8://7.6/5-4-3-2-1/a/9.0\\';',16,16,'m3u8|718b625dc361|813e|4d6e|ef72|4c43c048|com|surrit|https|video|1280x720|source1280|842x480|source842|playlist|source'.split('|'),0,{}));\n</script></html>";
+  const unpacked = unpackJsEvalAll(PACKED_PAGE);
+  assert("packer behind a degenerate eval( still unpacks", unpacked.length === 1,
+    JSON.stringify(unpacked));
+  assert("unpacked payload carries the escaped-quote source lines",
+    unpacked[0] && unpacked[0].includes("source=\\'https://surrit.com/4c43c048-ef72-4d6e-813e-718b625dc361/playlist.m3u8\\'"),
+    JSON.stringify((unpacked[0] || "").slice(0, 120)));
+  assert("source= extraction regex matches the unpacked text",
+    unpacked[0] && /source\s*=\s*[\\']*(https?:\/\/[^\s'";\\]+\.m3u8)/i.test(unpacked[0]));
+  assert("all-degenerate input yields [] (not a crash)",
+    JSON.stringify(unpackJsEvalAll("eval(function(p,a,c,k,e,d){return p}('x',1,1,''.split('|'),0,{}))")) === "[]");
+
   console.log("\n=== " + passed + " passed, " + failed + " failed ===\n");
   process.exit(failed ? 1 : 0);
 })();
