@@ -406,7 +406,7 @@ async function processCode(code, args, dm, outDir) {
   // followed by the engine requeueing (status -> queued), so only a terminal
   // state after the LAST cycle (or 'done') settles the promise.
   await new Promise((resolve, reject) => {
-    let lastNote = "";
+    let lastNote = "", lastSig = "", lastChange = Date.now();
     const poll = setInterval(() => {
       const it = engine.items.get(id);
       if (!it) return;
@@ -414,17 +414,37 @@ async function processCode(code, args, dm, outDir) {
         process.stdout.write("\r  " + Math.floor((it.received / it.total) * 100) + "% of " +
           Math.round(it.total / 1e6) + " MB   ");
       } else if (it.status === "error") {
+        // Terminal only when the retry budget is spent — the engine keeps
+        // status "error" after its final failed cycle (there is no separate
+        // "terminal" state), so an unconditional reject here would kill a
+        // run that still has cycles coming, and waiting forever would wedge.
+        const exhausted = /Auto-retry exhausted/.test(it.error || "") ||
+          (it._autoRetries || 0) >= engineOpts.autoRetryMax;
+        if (exhausted) {
+          clearInterval(poll);
+          process.stdout.write("\n");
+          reject(new Error("engine: " + it.status + (it.error ? " — " + it.error : "")));
+          return;
+        }
         const note = "engine error — auto-retry cycle " +
           ((it._autoRetries || 0) + 1) + "/" + engineOpts.autoRetryMax +
           " (next attempt in " + autoRetryMinutes + " min): " + (it.error || "unknown");
         if (note !== lastNote) { process.stdout.write("\n  " + note + "\n"); lastNote = note; }
       } else if (it.status === "scheduled" && lastNote) {
         process.stdout.write("\r  retrying in " + autoRetryMinutes + " min...                     ");
-      } else if (it.status === "done" || it.status === "terminal") {
+      } else if (it.status === "done") {
         clearInterval(poll);
         process.stdout.write("\n");
-        if (it.status === "done") resolve();
-        else reject(new Error("engine: " + it.status + (it.error ? " — " + it.error : "")));
+        resolve();
+      }
+      // Stall watchdog: this poll once wedged for an hour when auto-retry was
+      // accidentally disabled (status never changed again) — any state with no
+      // progress for 20 minutes is treated as a hang worth reporting.
+      const sig = it.status + ":" + it.received;
+      if (sig !== lastSig) { lastSig = sig; lastChange = Date.now(); }
+      else if (Date.now() - lastChange > 20 * 60000) {
+        clearInterval(poll);
+        reject(new Error("engine stalled: status=" + it.status + " received=" + it.received + " for 20min (error: " + (it.error || "none") + ")"));
       }
     }, 1500);
   });
@@ -463,7 +483,14 @@ async function main() {
   // needing an explicit -o on every invocation.
   const outDir = args.out ? path.dirname(path.resolve(args.out))
     : (process.env.JAVDL_OUT_DIR || DEFAULT_CONFIG.downloadDir || process.cwd());
-  const config = { ...DEFAULT_CONFIG, autoProxy: false, skipDuplicates: false };
+  const config = { ...DEFAULT_CONFIG, autoProxy: false, skipDuplicates: false,
+    // Auto-retry is the mechanism that rides out surrit's rolling CF window.
+    // DEFAULT_CONFIG has autoRetryMinutes: 0 (= OFF) and these used to be
+    // threaded only into the --limit branch's engine — so on the normal path
+    // the FIRST 403 went terminal, no cycle 2 ever ran, and the CLI's wait
+    // loop wedged. Wired on the shared dm so every code in a queue retries.
+    autoRetryMinutes: args.retryWaitMin !== undefined ? args.retryWaitMin : 2,
+    autoRetryMax: 15 };
   const dm = new DownloadManager({ config, proxyManager: new ProxyManager(config), onUpdate: () => {} });
 
   const ok = [], skipped = [], failed = [];
