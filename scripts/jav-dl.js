@@ -33,13 +33,6 @@
 // runs as a subprocess on the SAME output path. JAVDL_PY overrides the engine
 // path (the boot-verify drill points it at a stub); JAVDL_PY=0/JAVDL_PY=false
 // or --no-fallback disables the stage entirely.
-// surrit's Cloudflare ALSO scores the client TLS fingerprint: Node's stack can
-// be challenged while python-urllib passes from the same IP in the same second
-// (header-identical head-to-head validated 2026-09-30; no TLS option — ALPN,
-// cipher list, min/maxVersion — changes the verdict). When a direct master
-// probe draws a challenge, this CLI reoriginates surrit fetches through a
-// local python relay (scripts/surrit-relay.py, stdlib-only): plain loopback
-// HTTP in, python TLS out.
 
 const fs = require("fs");
 const path = require("path");
@@ -54,15 +47,21 @@ const { isCfChallengeBody } = require("../lib/cf-fallback");
 const REPO = path.join(__dirname, "..");
 
 // ------------------------------------------------------ TLS-fingerprint relay
-// One relay serves the whole queue — the URL is the engine's dedupe/history
-// key, so per-code ports would break re-run skips. Reused if a relay already
-// listens on the port; only a relay THIS process spawned is killed at exit.
-// Strictly optional: --no-relay / JAVDL_RELAY=0 disables, JAVDL_RELAY=force
-// skips the probe and always relays (live debugging).
+// surrit's Cloudflare ALSO scores the client TLS fingerprint: Node's stack can
+// be challenged while python-urllib passes from the same IP in the same second
+// (header-identical head-to-head validated 2026-09-30; no TLS option — ALPN,
+// cipher list, min/maxVersion — changes the verdict). When a direct master
+// probe draws a challenge, the CLI reoriginates surrit fetches through a local
+// python relay (scripts/surrit-relay.py, stdlib-only): plain loopback HTTP in,
+// python TLS out. One relay serves the whole queue — the URL is the engine's
+// dedupe/history key, so per-code ports would break re-run skips. Reused if a
+// relay already listens on the port; only a relay THIS process spawned is
+// killed at exit. Strictly optional: --no-relay / JAVDL_RELAY=0 disables,
+// JAVDL_RELAY=force skips the probe and always relays (live debugging).
 function relayPort() { return Number(process.env.JAVDL_RELAY_PORT) || 8931; } // read per-call: testable
 const RELAY_HOSTS = (process.env.JAVDL_RELAY_HOSTS || "surrit.com")
   .split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
-const RELAY_HOST_RE = new RegExp("^https?://(" + RELAY_HOSTS.map(escapeRe).join("|") + ")(\:\\d+)?/", "i");
+const RELAY_HOST_RE = new RegExp("^https?://(" + RELAY_HOSTS.map(escapeRe).join("|") + ")(:\\d+)?/", "i");
 function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 let relayProc = null, relaySpawnedByUs = false, relayPortLive = null;
 function relayEnabled(args) {
@@ -231,21 +230,6 @@ function normalizeCode(code) {
 }
 
 function log(msg) { console.log(msg); }
-
-function findFfmpeg() {
-  // Same probe shape as downloader.js findFfmpeg, minus the app-specific slots:
-  // the vendor copy, then PATH. Enough for the variant listing; the engine has
-  // its own resolver for the actual remux.
-  const candidates = [
-    path.join(REPO, "vendor", "ffmpeg", "ffmpeg.exe"),
-    "ffmpeg",
-  ];
-  for (const c of candidates) {
-    try { if (fs.existsSync(c) || spawnSync(c, ["-version"], { stdio: "ignore" }).status === 0) return c; } catch { /* next */ }
-  }
-  return null;
-}
-const { spawnSync } = require("child_process");
 
 // ------------------------------------------------------------- page fetching
 // Plain fetch first (lib/http.js — CF challenge bodies are auto-routed through
@@ -805,4 +789,4 @@ if (require.main === module) {
 module.exports = { normalizeCode, processCode, buildQueue, parseArgs,
   _internals: { SITE, SLUG_SUFFIXES, resolveBySlug, relayUrl, ensureRelay, stopRelay,
     pyEnginePath, pyFallbackEnabled, pyEngineAvailable, unrelayUrl, pyEngineArgs,
-    runPyEngine, pyFallback, urlSlug } };
+    runPyEngine, pyFallback, urlSlug, relayEnabled } };

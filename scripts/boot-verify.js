@@ -42,12 +42,6 @@
 //                     ffmpeg-made MPEG-TS), downloads via the engine, remuxes
 //                     to an ffmpeg-validated MP4 in the sandbox out dir, and
 //                     a second run [skip]s idempotently; zero network egress
-//   M relay download — the same CLI download forced through the local python
-//                     TLS relay (JAVDL_RELAY=force on a free loopback port):
-//                     the routing line proves the engine's fetch chain was
-//                     reorigined, the remux stays byte-valid, and the CLI must
-//                     ADOPT the drill's already-listening relay (no second
-//                     spawn on the default port).
 //   N py fallback    — the CLI's LAST RESORT: when Node's whole chain fails,
 //                     jav-dl.js hands the code to the standalone python
 //                     engine (K:\jav-dl.py) as a subprocess on the same output
