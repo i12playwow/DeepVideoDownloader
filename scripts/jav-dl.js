@@ -26,6 +26,14 @@
 // for plain fetches on this line), then the mirror page's Filemoon embed — its
 // SPA page is fetched via the cf-browser bridge and scanned for an m3u8.
 // --no-fallback turns the search stages off.
+//
+// surrit's Cloudflare ALSO scores the client TLS fingerprint: Node's stack can
+// be challenged while python-urllib passes from the same IP in the same second
+// (header-identical head-to-head validated 2026-09-30; no TLS option — ALPN,
+// cipher list, min/maxVersion — changes the verdict). When a direct master
+// probe draws a challenge, this CLI reoriginates surrit fetches through a
+// local python relay (scripts/surrit-relay.py, stdlib-only): plain loopback
+// HTTP in, python TLS out.
 
 const fs = require("fs");
 const path = require("path");
@@ -38,6 +46,70 @@ const { resolveMissav, isCfwalledSupjavMovie } = require("../lib/resolvers");
 const { isHlsUrl, parseHlsPlaylist, HLS_MASTER_RE } = require("../lib/hls");
 const { isCfChallengeBody } = require("../lib/cf-fallback");
 const REPO = path.join(__dirname, "..");
+
+// ------------------------------------------------------ TLS-fingerprint relay
+// One relay serves the whole queue — the URL is the engine's dedupe/history
+// key, so per-code ports would break re-run skips. Reused if a relay already
+// listens on the port; only a relay THIS process spawned is killed at exit.
+// Strictly optional: --no-relay / JAVDL_RELAY=0 disables, JAVDL_RELAY=force
+// skips the probe and always relays (live debugging).
+function relayPort() { return Number(process.env.JAVDL_RELAY_PORT) || 8931; } // read per-call: testable
+const RELAY_HOSTS = (process.env.JAVDL_RELAY_HOSTS || "surrit.com")
+  .split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
+const RELAY_HOST_RE = new RegExp("^https?://(" + RELAY_HOSTS.map(escapeRe).join("|") + ")(\:\\d+)?/", "i");
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+let relayProc = null, relaySpawnedByUs = false, relayPortLive = null;
+function relayEnabled(args) {
+  if (args && args.noRelay) return false; // the documented --no-relay CLI flag
+  return process.env.JAVDL_RELAY !== "0" && process.env.JAVDL_RELAY !== "false";
+}
+function relayForced() { return process.env.JAVDL_RELAY === "force"; }
+// Rewrite into the relay's path-embedded form: the ORIGINAL scheme+authority
+// must ride INSIDE the path (/http/<host>[:<port>]/<rest>) — swapping only the
+// origin prefix would lose the upstream host entirely (the relay would read
+// "hls" as the scheme and 400). The port is the live relay's; passing one
+// explicitly keeps the rewriter testable without a spawned relay.
+function relayUrl(url, port) {
+  const p = port || relayPortLive;
+  if (!p) return url;
+  const m = /^(https?:)\/\/([^/]+)((?:\/.*)?)$/i.exec(url);
+  if (!m) return url;
+  return "http://127.0.0.1:" + p + "/" + m[1].toLowerCase().replace(":", "") + "/" + m[2] + (m[3] || "/");
+}
+
+// Any HTTP answer (even the relay's 400 usage reply) proves something is
+// listening; fetchHtml would throw on 4xx, so this is a raw probe.
+function relayAlive(port) {
+  const http = require("http");
+  return new Promise((resolve) => {
+    const req = http.get({ host: "127.0.0.1", port, path: "/", timeout: 1500 }, (res) => { res.resume(); resolve(true); });
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+    req.on("error", () => resolve(false));
+  });
+}
+
+async function ensureRelay(timeoutMs = 10000) {
+  if (relayPortLive) return relayPortLive;
+  if (await relayAlive(relayPort())) { relayPortLive = relayPort(); return relayPortLive; }
+  const py = process.platform === "win32" ? "python" : "python3";
+  const allowFlags = [];
+  for (const h of RELAY_HOSTS) allowFlags.push("--allow", h);
+  relayProc = spawn(py, [path.join(__dirname, "surrit-relay.py"), "--port", String(relayPort())].concat(allowFlags),
+    { stdio: ["ignore", "pipe", "pipe"] });
+  relaySpawnedByUs = true;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (relayProc.exitCode !== null) throw new Error("relay exited early (code " + relayProc.exitCode + ")");
+    if (await relayAlive(relayPort())) { relayPortLive = relayPort(); return relayPortLive; }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error("relay did not start listening within " + timeoutMs + "ms");
+}
+
+function stopRelay() {
+  if (relayProc && relaySpawnedByUs) { try { relayProc.kill(); } catch (e) { /* best effort */ } }
+  relayProc = null; relaySpawnedByUs = false; relayPortLive = null;
+}
 
 // Base site override: the boot-verify drill points this at a local mock MissAV
 // (JAVDL_SITE=http://127.0.0.1:<port>) so Phase L resolves a fixture code with
@@ -314,7 +386,7 @@ function buildQueue(argv) {
 
 function parseArgs(argv) {
   const args = { codes: [], quality: "best", url: null, out: null, listOnly: false,
-    force: false, noFallback: false, fromFile: null, limit: null };
+    force: false, noFallback: false, noRelay: false, fromFile: null, limit: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--url") args.url = argv[++i];
@@ -324,6 +396,7 @@ function parseArgs(argv) {
     else if (a === "--list-only") args.listOnly = true;
     else if (a === "--force") args.force = true;
     else if (a === "--no-fallback") args.noFallback = true;
+    else if (a === "--no-relay") args.noRelay = true;
     else if (a === "--retry-wait-min") args.retryWaitMin = Number(argv[++i]);
     else if (a === "--limit") args.limit = Number(argv[++i]);
     else if (a === "-h" || a === "--help") args.help = true;
@@ -357,7 +430,18 @@ async function processCode(code, args, dm, outDir) {
 
   let cookieHeader = null;
   if (args.listOnly) {
-    const master = await fetchMasterForListing(m3u8);
+    let master;
+    try {
+      master = await fetchMasterForListing(m3u8);
+    } catch (err) {
+      // A challenge on the listing path gets the relay retry too.
+      if (!/Cloudflare/.test(err.message || "") || !relayEnabled(args)) throw err;
+      log("  listing challenged — retrying through the TLS relay ...");
+      await ensureRelay();
+      const body = await fetchHtml(relayUrl(m3u8), null, { Referer: SITE + "/" });
+      if (!body.includes("#EXTM3U")) throw err;
+      master = body;
+    }
     const variants = listVariants(master, m3u8);
     log("stream: " + m3u8);
     for (const v of variants.sort((a, b) => a.bandwidth - b.bandwidth)) {
@@ -366,6 +450,33 @@ async function processCode(code, args, dm, outDir) {
     return true;
   }
   log("stream: " + m3u8);
+
+  // Gate probe: one cheap direct master fetch. A Cloudflare challenge here is
+  // the TLS-fingerprint verdict, not a dead stream (python passes in the same
+  // second) — so rather than burn 30 min of blind auto-retry on a gate that
+  // never opens for Node, reorigin surrit fetches through the local python
+  // relay. Anything else (timeout, 404, network) leaves the URL untouched.
+  if (relayEnabled(args) && RELAY_HOST_RE.test(m3u8)) {
+    const gated = await (async () => {
+      if (relayForced()) return true;
+      try {
+        const body = await fetchHtml(m3u8, null, { Referer: SITE + "/" });
+        return isCfChallengeBody(body);
+      } catch (e) {
+        return /Cloudflare|challenge/i.test(e.message || "");
+      }
+    })();
+    if (gated) {
+      try {
+        log("  surrit challenged Node's TLS fingerprint — routing fetches through the local python relay ...");
+        await ensureRelay();
+        m3u8 = relayUrl(m3u8);
+      } catch (e) {
+        log("  relay unavailable (" + (e.message || e) + ") — falling back to direct fetch + auto-retry");
+      }
+      if (!relayPortLive && relayForced()) throw new Error("--JAVDL_RELAY=force but the relay could not start");
+    }
+  }
 
   const outPath = args.out || path.join(outDir, slug + ".mp4");
   if (fs.existsSync(outPath) && !args.force && !args.limit) {
@@ -457,7 +568,7 @@ async function main() {
   if (args.help || (!args.codes.length && !args.url && !args.fromFile)) {
     console.log("usage: node scripts/jav-dl.js <code...> | --from-file LIST | --url <m3u8>");
     console.log("       [--quality best|720|480|360] [-o OUT] [--list-only] [--limit N]");
-    console.log("       [--force] [--no-fallback] [--retry-wait-min N]");
+    console.log("       [--force] [--no-fallback] [--no-relay] [--retry-wait-min N]");
     console.log("JAV code -> MissAV stream (search/mirror fallback) -> engine HLS download.");
     process.exit(args.help ? 0 : 1);
   }
@@ -495,6 +606,26 @@ async function main() {
 
   const ok = [], skipped = [], failed = [];
   if (args.url) {
+    if (args.listOnly) {
+      let master = null, gated = false;
+      try { master = await fetchMasterForListing(args.url); }
+      catch (err) { gated = /Cloudflare/.test(err.message || ""); }
+      if (master) log("stream: " + args.url);
+      else if (gated && relayEnabled(args)) {
+        log("  listing challenged — retrying through the TLS relay ...");
+        try {
+          await ensureRelay();
+          master = await fetchHtml(relayUrl(args.url), null, { Referer: SITE + "/" });
+        } catch (e) { log("  relay listing failed: " + ((e && e.message) || e)); }
+      }
+      if (master && master.includes("#EXTM3U")) {
+        log("stream: " + args.url);
+        for (const v of listVariants(master, args.url).sort((a, b) => a.bandwidth - b.bandwidth)) {
+          log("  variant: " + v.resolution + " @ " + v.bandwidth + " kb/s");
+        }
+      } else log("stream: " + args.url + " (listing gated)");
+      return true;
+    }
     await processCode(null, args, dm, outDir);
   } else {
     const multi = allCodes.length > 1;
@@ -525,7 +656,8 @@ async function main() {
 }
 
 if (require.main === module) {
-  main().then(() => process.exit(process.exitCode || 0)).catch((err) => {
+  main().then(() => { stopRelay(); process.exit(process.exitCode || 0); }).catch((err) => {
+    stopRelay();
     console.error("jav-dl: " + (err && err.message || err));
     process.exit(1);
   });
@@ -533,4 +665,5 @@ if (require.main === module) {
 
 // Test seams: the boot-verify drill drives processCode programmatically against
 // a mock MissAV (JAVDL_SITE) instead of spawning the CLI as a child.
-module.exports = { normalizeCode, processCode, buildQueue, _internals: { SITE, SLUG_SUFFIXES, resolveBySlug } };
+module.exports = { normalizeCode, processCode, buildQueue,
+  _internals: { SITE, SLUG_SUFFIXES, resolveBySlug, relayUrl, ensureRelay, stopRelay } };

@@ -42,6 +42,12 @@
 //                     ffmpeg-made MPEG-TS), downloads via the engine, remuxes
 //                     to an ffmpeg-validated MP4 in the sandbox out dir, and
 //                     a second run [skip]s idempotently; zero network egress
+//   M relay download — the same CLI download forced through the local python
+//                     TLS relay (JAVDL_RELAY=force on a free loopback port):
+//                     the routing line proves the engine's fetch chain was
+//                     reorigined, the remux stays byte-valid, and the CLI must
+//                     ADOPT the drill's already-listening relay (no second
+//                     spawn on the default port).
 //   I live port move — a live config port change (the file watcher path) moves
 //                     the listener: the new port serves a hello advertising
 //                     ITSELF, the old port is released, config stays in sync;
@@ -1743,6 +1749,82 @@ async function phaseL(port) {
   pass("L idempotent re-run", "second run skipped the existing output, file untouched");
 }
 
+// ---- Phase M: the jav-dl CLI downloads THROUGH the TLS-fingerprint relay ----
+// surrit's Cloudflare challenges Node's TLS fingerprint even when python passes
+// from the same IP in the same second, so the CLI can reorigin its surrit
+// fetches through scripts/surrit-relay.py (plain loopback HTTP in, python TLS
+// out). Hermetic drill: the relay runs on a free loopback port allowing only
+// 127.0.0.1, JAVDL_RELAY=force routes the engine's master->variant->segment
+// chain through it (playlists are relative, so every derived URL stays in-
+// relay), the mock MissAV resolve stays direct, and the remux must still be
+// byte-valid. Also proves the reuse contract: the CLI must USE the drill's
+// already-listening relay, not spawn a second one on the default port.
+async function phaseM(port) {
+  console.log("--- Phase M: jav-dl downloads bvd-777 through the local TLS relay ---");
+  // Free port for the relay (bind-and-release; the relay binds right after).
+  const relayPort = await new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => resolve(p)); });
+    s.on("error", reject);
+  });
+  const relay = spawn(sysPython(), [path.join(ROOT, "scripts", "surrit-relay.py"),
+    "--port", String(relayPort), "--allow", "127.0.0.1"], { stdio: ["ignore", "pipe", "pipe"] });
+  let relayOut = "";
+  relay.stdout.on("data", (c) => { relayOut += c; });
+  try {
+    // Wait for the relay's listening banner (its own readiness signal).
+    const up = await new Promise((resolve) => {
+      const t0 = Date.now();
+      const iv = setInterval(() => {
+        if (/listening on/.test(relayOut)) { clearInterval(iv); resolve(true); return; }
+        if (Date.now() - t0 > 8000) { clearInterval(iv); resolve(false); }
+      }, 200);
+    });
+    if (!up) return fail("M relay started", "no listening banner in 8s; stdout=" + relayOut.slice(-200));
+    const outDir = path.join(sandbox, "jav-dl-relay-out");
+    fs.mkdirSync(outDir, { recursive: true });
+    const childEnv = { ...process.env, JAVDL_SITE: "http://127.0.0.1:" + port, JAVDL_OUT_DIR: outDir,
+      JAVDL_RELAY: "force", JAVDL_RELAY_PORT: String(relayPort), JAVDL_RELAY_HOSTS: "127.0.0.1" };
+    const run = (timeoutMs) => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [path.join(ROOT, "scripts", "jav-dl.js"), "bvd-777"],
+        { env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
+      let out = "", err = "", done = false;
+      const timer = setTimeout(() => { if (!done) { done = true; child.kill("SIGKILL"); reject(new Error("jav-dl timeout; stdout tail=" + out.slice(-200))); } }, timeoutMs);
+      child.stdout.on("data", (c) => { out += c; });
+      child.stderr.on("data", (c) => { err += c; });
+      child.on("error", (e) => { if (!done) { done = true; clearTimeout(timer); reject(e); } });
+      child.on("exit", (code) => { if (!done) { done = true; clearTimeout(timer); resolve({ status: code, stdout: out, stderr: err }); } });
+    });
+    let r;
+    try { r = await run(90000); } catch (e) { return fail("M cli ran", (e && e.message) || String(e)); }
+    if (r.status !== 0) return fail("M cli exit 0", "exit=" + r.status + " stderr=" + r.stderr.slice(-300) + " stdout tail=" + r.stdout.slice(-300));
+    // The stream: line prints the PRE-rewrite URL (the rewrite happens at the
+    // routing step below it), so the relay path is asserted via the routing
+    // line the CLI emits when it reorigins, not via the stream URL.
+    if (!/routing fetches through the local python relay/.test(r.stdout)) {
+      return fail("M stream went through the relay", "no relay-routing line; stdout=" + r.stdout.slice(-300));
+    }
+    const outPath = path.join(outDir, "bvd-777.mp4");
+    if (!hasFile(outPath)) return fail("M output file", "no " + outPath + "; stdout=" + r.stdout.slice(-300));
+    const size = fileSize(outPath);
+    if (size < 4096) return fail("M output size", "remuxed file only " + size + " bytes");
+    const ff = path.join(ROOT, "vendor", "ffmpeg", "ffmpeg.exe");
+    if (fs.existsSync(ff) && !tsFixtureSynthetic) {
+      const d = spawnSync(ff, ["-v", "error", "-i", outPath, "-f", "null", "-"], { encoding: "utf8", timeout: 30000 });
+      if (d.status !== 0) return fail("M output decodes", "ffmpeg rejected the remux: " + (d.stderr || "").slice(-200));
+    }
+    pass("M download through TLS relay", "bvd-777.mp4 " + size + " bytes via relay 127.0.0.1:" + relayPort + " -> fixture " + port);
+    // The reuse contract: the CLI must NOT have spawned a second relay on the
+    // default port (8931) — it must have adopted the drill's relay.
+    if (relay.exitCode !== null) return fail("M relay survived the run", "relay exited during the run (code " + relay.exitCode + ")");
+  } finally {
+    try { relay.kill(); } catch (e) { /* best effort */ }
+  }
+}
+
+// sysPython: same probe shape the CLI's ensureRelay uses.
+function sysPython() { return process.platform === "win32" ? "python" : "python3"; }
+
 // ---- Phase K: the clipboard auto-grab fires the [grab] line, live ----
 // The monitor is armed unconditionally at boot (app.whenReady ->
 // startClipboardMonitor) and polls the REAL machine clipboard every 5s for a
@@ -1855,6 +1937,8 @@ async function main() {
     // L drives the jav-dl CLI against the mock MissAV fixture (no egress); it
     // needs the fixture alive, so it too runs before I's port move.
     await run("L", () => phaseL(port));
+    // M routes the same CLI download through the local TLS relay.
+    await run("M", () => phaseM(port));
     // Last: it deliberately moves the app off WS_PORT (and persists the move),
     // so every phase that dials 8766 has to run before it.
     await run("I", () => phaseI());
