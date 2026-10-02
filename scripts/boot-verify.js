@@ -48,6 +48,19 @@
 //                     reorigined, the remux stays byte-valid, and the CLI must
 //                     ADOPT the drill's already-listening relay (no second
 //                     spawn on the default port).
+//   N py fallback    — the CLI's LAST RESORT: when Node's whole chain fails,
+//                     jav-dl.js hands the code to the standalone python
+//                     engine (K:\jav-dl.py) as a subprocess on the same output
+//                     path. Proved against a JAVDL_PY STUB that records its
+//                     argv to a probe file: the stub is spawned with exactly
+//                     <code> -o <sandbox>\pyv-999.mp4 --force (the engine's
+//                     --force lets it overwrite the engine-error litter the
+//                     Node path leaves), its output lands and the run exits 0;
+//                     a stub that exits 3 (the real engine's not-found code)
+//                     re-arms the per-code fallback for a later code and
+//                     surfaces a clear failure; a --no-fallback run never
+//                     spawns it. JAVDL_CDX_BASE points the Wayback CDX lookup
+//                     at the fixture so mirror exhaustion costs no egress.
 //   I live port move — a live config port change (the file watcher path) moves
 //                     the listener: the new port serves a hello advertising
 //                     ITSELF, the old port is released, config stays in sync;
@@ -299,6 +312,13 @@ function startFixture() {
         const seg = TS.subarray(start, segN < 3 ? start + chunk : TS.length);
         res.writeHead(200, { "Content-Type": "video/mp2t", "Content-Length": seg.length });
         res.end(seg);
+        return;
+      }
+      // Phase N: JAVDL_CDX_BASE points jav-dl.js's Wayback CDX mirror
+      // discovery HERE (no rows -> the fallback chain exhausts with zero egress).
+      if (p === "/cdx/search/cdx") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("[]");
         return;
       }
       if (/^\/movie-code-\d+\.html$/.test(p)) {
@@ -1825,6 +1845,93 @@ async function phaseM(port) {
 // sysPython: same probe shape the CLI's ensureRelay uses.
 function sysPython() { return process.platform === "win32" ? "python" : "python3"; }
 
+// ---- Phase N: jav-dl.py runs as the CLI's last-resort engine ----
+// The python-engine fallback (JAVDL_PY, default K:\jav-dl.py) fires only when
+// Node's whole chain fails — every MissAV slug + the search/mirror fallback.
+// The REAL engine hardcodes missav.ws and launches headless Chrome, so this
+// phase proves the WIRING with a stub: a python script that records its argv
+// to a probe file and (per env) writes a fake payload or exits 3. Asserted:
+// spawn with exactly <code> -o <sandbox>\pyv-999.mp4 --force, stub output
+// file lands, run exits 0; a not-found stub re-arms the per-code fallback
+// (per-process tried-set) and the failure message stays honest; a
+// --no-fallback run never spawns the engine. JAVDL_CDX_BASE keeps the mirror
+// sweep on the fixture; JAVDL_RELAY=0 keeps the direct master fetch offline.
+function pyStubScript(makeFile) {
+  return "import sys, os\r\n" +
+    "code = sys.argv[1]\r\n" +
+    "out = sys.argv[sys.argv.index('-o') + 1]\r\n" +
+    "probe = os.environ['BV_PY_PROBE']\r\n" +
+    "open(probe, 'a', encoding='utf-8').write(code + '|' + out + '|' + ' '.join(sys.argv[2:]) + '\\n')\r\n" +
+    (makeFile
+      ? "print('resolving ' + code)\r\nprint('download complete')\r\nopen(out, 'wb').write(b'PYENGINE-STUB-MP4' * 100)\r\n"
+      : "print('resolution failed: not found anywhere', file=sys.stderr)\r\nsys.exit(3)\r\n");
+}
+
+async function phaseN(port) {
+  console.log("--- Phase N: the python-engine fallback runs when Node's chain fails ---");
+  const outDir = path.join(sandbox, "jav-dl-py-out");
+  fs.mkdirSync(outDir, { recursive: true });
+  const probe = path.join(sandbox, "py-probe.log");
+  const run = (args, timeoutMs) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(ROOT, "scripts", "jav-dl.js")].concat(args), {
+      env: { ...process.env, JAVDL_SITE: "http://127.0.0.1:" + port, JAVDL_CDX_BASE: "http://127.0.0.1:" + port,
+        JAVDL_OUT_DIR: outDir, JAVDL_RELAY: "0", JAVDL_PY: process.env.BV_PY_ENGINE,
+        BV_PY_PROBE: probe },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "", err = "", done = false;
+    const timer = setTimeout(() => { if (!done) { done = true; child.kill("SIGKILL"); reject(new Error("jav-dl timeout; stdout tail=" + out.slice(-200))); } }, timeoutMs);
+    child.stdout.on("data", (c) => { out += c; });
+    child.stderr.on("data", (c) => { err += c; });
+    child.on("error", (e) => { if (!done) { done = true; clearTimeout(timer); reject(e); } });
+    child.on("exit", (code) => { if (!done) { done = true; clearTimeout(timer); resolve({ status: code, stdout: out, stderr: err }); } });
+  });
+  // Child #1: stub SUCCEEDS. Node's slug sweep 404s (pyv-999 is not a fixture
+  // code), the CDX mirror lookup finds nothing, and the fallback must hand
+  // the code to the stub engine on the queue-default output path.
+  const goodStub = path.join(sandbox, "py-stub-good.py");
+  fs.writeFileSync(goodStub, pyStubScript(true));
+  process.env.BV_PY_ENGINE = goodStub;
+  try { fs.rmSync(probe, { force: true }); } catch (e) { /* fresh probe */ }
+  let r;
+  try { r = await run(["pyv-999"], 90000); } catch (e) { return fail("N fallback spawned", (e && e.message) || String(e)); }
+  if (r.status !== 0) return fail("N fallback exit 0", "exit=" + r.status + " stderr=" + r.stderr.slice(-300) + " stdout tail=" + r.stdout.slice(-300));
+  const inv = (fs.existsSync(probe) ? fs.readFileSync(probe, "utf8").trim().split(/\r?\n/) : []).filter(Boolean);
+  if (inv.length !== 1) return fail("N stub spawned once", "probe lines: " + JSON.stringify(inv));
+  const parts = inv[0].split("|");
+  if (parts[0] !== "pyv-999") return fail("N stub got the code", "stub argv: " + inv[0]);
+  if (parts[1] !== path.join(outDir, "pyv-999.mp4")) return fail("N stub got the output path", "stub argv: " + inv[0]);
+  if (!/ \-\-force$/.test(inv[0])) return fail("N stub got --force", "stub argv: " + inv[0]);
+  if (!/\[py-fallback\] running python engine/.test(r.stdout)) return fail("N fallback announced", "stdout has no '[py-fallback]' line");
+  const outPath = path.join(outDir, "pyv-999.mp4");
+  if (!hasFile(outPath) || fileSize(outPath) <= 0) return fail("N fallback output", "stub output missing/empty: " + outPath + "; stdout=" + r.stdout.slice(-200));
+  if (!/\(python engine\)/.test(r.stdout)) return fail("N fallback credited", "stdout does not credit the python engine for " + outPath);
+  pass("N python fallback downloads", "stub engine spawned as 'pyv-999 -o " + outPath + " --force' and its output file landed");
+  // Child #2: stub FAILS (exit 3 = the real engine's not-found code). The
+  // failure must surface honestly, and the per-code tried-set must RE-ARM the
+  // fallback for the next code (a process-lifetime 'already tried' latch would
+  // silently skip every later code in a queue).
+  process.env.BV_PY_ENGINE = path.join(sandbox, "py-stub-fail.py");
+  fs.writeFileSync(process.env.BV_PY_ENGINE, pyStubScript(false));
+  try { r = await run(["pyv-998", "pyv-997"], 120000); } catch (e) { return fail("N failed-fallback run", (e && e.message) || String(e)); }
+  if (r.status !== 1) return fail("N failed-fallback exit 1", "exit=" + r.status + " stdout tail=" + r.stdout.slice(-200));
+  const inv2 = (fs.existsSync(probe) ? fs.readFileSync(probe, "utf8").trim().split(/\r?\n/) : []).filter(Boolean);
+  const codes2 = inv2.map((l) => l.split("|")[0]);
+  if (!codes2.includes("pyv-998")) return fail("N failing engine ran", "probe lines: " + JSON.stringify(inv2));
+  if (!codes2.includes("pyv-997")) return fail("N fallback re-arms per code", "engine ran for pyv-998 but never for pyv-997 (per-code latch not re-armed); probe: " + JSON.stringify(inv2));
+  if (!/python engine failed \(exit 3[:)]/.test(r.stdout)) return fail("N engine failure surfaced", "stdout has no 'python engine failed (exit 3…)' line; stdout tail=" + r.stdout.slice(-200));
+  if (!/not found on MissAV or in mirror search/.test(r.stdout)) return fail("N not-found summary", "queue summary missing the not-found line");
+  pass("N failed fallback is honest + re-arms", "exit-3 stub surfaced, per-code re-arm proven across pyv-998/pyv-997");
+  // Child #3: --no-fallback must kill the stage entirely (the user asked for
+  // the MissAV slug probe ONLY, in any engine).
+  try { r = await run(["pyv-996", "--no-fallback"], 90000); } catch (e) { return fail("N no-fallback run", (e && e.message) || String(e)); }
+  if (r.status !== 1) return fail("N no-fallback exit 1", "exit=" + r.status + " stdout tail=" + r.stdout.slice(-200));
+  const inv3 = (fs.existsSync(probe) ? fs.readFileSync(probe, "utf8").trim().split(/\r?\n/) : []).filter(Boolean);
+  if (inv3.some((l) => l.startsWith("pyv-996|"))) return fail("N no-fallback never spawns", "stub spawned under --no-fallback: " + inv3[inv3.length - 1]);
+  if (!/\[fail\] pyv-996: not found/.test(r.stdout)) return fail("N no-fallback fail line", "no '[fail] … not found' line (single-code mode logs the short form); stdout tail=" + r.stdout.slice(-200));
+  pass("N --no-fallback kills the stage", "no engine spawn under --no-fallback, clean not-found failure");
+}
+
 // ---- Phase K: the clipboard auto-grab fires the [grab] line, live ----
 // The monitor is armed unconditionally at boot (app.whenReady ->
 // startClipboardMonitor) and polls the REAL machine clipboard every 5s for a
@@ -1939,6 +2046,9 @@ async function main() {
     await run("L", () => phaseL(port));
     // M routes the same CLI download through the local TLS relay.
     await run("M", () => phaseM(port));
+    // N proves the python-engine last resort (a JAVDL_PY stub) fires when
+    // Node's chain fails.
+    await run("N", () => phaseN(port));
     // Last: it deliberately moves the app off WS_PORT (and persists the move),
     // so every phase that dials 8766 has to run before it.
     await run("I", () => phaseI());

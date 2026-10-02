@@ -25,8 +25,14 @@
 // through the Wayback CDX index (search engines proved region-walled/bot-walled
 // for plain fetches on this line), then the mirror page's Filemoon embed — its
 // SPA page is fetched via the cf-browser bridge and scanned for an m3u8.
-// --no-fallback turns the search stages off.
-//
+// --no-fallback turns the search stages off AND the python-engine last resort
+// below. Last resort: when Node's whole chain fails — every slug + the
+// search/mirror fallback, or the engine's auto-retry budget exhausted under a
+// surrit challenge — the standalone python engine (K:\jav-dl.py, whose
+// python-urllib fetches pass surrit's TLS-fingerprint gate where Node's fail)
+// runs as a subprocess on the SAME output path. JAVDL_PY overrides the engine
+// path (the boot-verify drill points it at a stub); JAVDL_PY=0/JAVDL_PY=false
+// or --no-fallback disables the stage entirely.
 // surrit's Cloudflare ALSO scores the client TLS fingerprint: Node's stack can
 // be challenged while python-urllib passes from the same IP in the same second
 // (header-identical head-to-head validated 2026-09-30; no TLS option — ALPN,
@@ -111,6 +117,101 @@ function stopRelay() {
   relayProc = null; relaySpawnedByUs = false; relayPortLive = null;
 }
 
+// ------------------------------------------------ python-engine last resort
+// Final fallback when Node's own chain fails (slugs + search/mirror resolve,
+// or the engine's auto-retry exhausted under a surrit challenge): the
+// standalone python engine (K:\jav-dl.py — headless-Chrome resolve + python-
+// urllib segment fetches, proven end-to-end with a 1.42 GiB download) runs as
+// a subprocess on the SAME output path. Python's TLS fingerprint passes
+// surrit's gate where Node's fails, and the engine carries its own
+// search/mirror discovery. Strictly optional: JAVDL_PY overrides the engine
+// path (the boot-verify drill points it at a stub), JAVDL_PY=0/JAVDL_PY=false
+// or --no-fallback disables the stage. A missing python interpreter surfaces
+// as a logged spawn failure, never a crash.
+const PY_ENGINE_DEFAULT = path.join("K:", "jav-dl.py");
+function pyEnginePath() { return process.env.JAVDL_PY || PY_ENGINE_DEFAULT; }
+function pyFallbackEnabled() {
+  const v = process.env.JAVDL_PY;
+  return v !== "0" && v !== "false";
+}
+function pyEngineAvailable() {
+  if (!pyFallbackEnabled()) return false;
+  try { return fs.existsSync(pyEnginePath()); } catch (e) { return false; }
+}
+// Inverse of relayUrl: recover the true upstream URL from a relay-rewritten
+// one, so a python-engine --url run never depends on this process's relay
+// (which dies with us) — the engine fetches upstream directly.
+function unrelayUrl(url) {
+  const m = /^http:\/\/127\.0\.0\.1:\d+\/(https?)\/([^/]+)((?:\/.*)?)$/i.exec(url);
+  return m ? (m[1].toLowerCase() + "://" + m[2] + (m[3] || "")) : url;
+}
+function pyEngineArgs(target, outPath) {
+  const engine = pyEnginePath();
+  if (target && target.url) return [engine, "--url", unrelayUrl(target.url), "-o", outPath, "--force"];
+  return [engine, target.code, "-o", outPath, "--force"];
+}
+// Output basename for a bare m3u8 target: surrit URLs carry a hex-36 uuid as
+// their first path segment; anything else collapses to "stream".
+function urlSlug(u) {
+  try {
+    const seg = new URL(u).pathname.split("/").filter(Boolean)[0];
+    return seg ? decodeURIComponent(seg) : "stream";
+  } catch (e) { return "stream"; }
+}
+// Run the python engine to completion, streaming its stdout/stderr through
+// our log with a [py] prefix so a mixed Node/python run stays readable. Only
+// invoked after a real Node failure, so the engine's headless-Chrome cost is
+// bounded behind that failure. The timeout is a hang guard, not a download
+// budget: a multi-GB segment fetch runs well inside 45 minutes.
+function runPyEngine(target, outPath, timeoutMs = 45 * 60000) {
+  const py = process.platform === "win32" ? "python" : "python3";
+  const args = pyEngineArgs(target, outPath);
+  log("[py-fallback] running python engine: " + py + " " +
+    args.map((a) => /[\s"]/.test(a) ? JSON.stringify(a) : a).join(" "));
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    let out = "", err = "";
+    const finish = (r) => { if (!settled) { settled = true; if (timer) clearTimeout(timer); resolve(r); } };
+    const child = spawn(py, args, { stdio: ["ignore", "pipe", "pipe"] });
+    timer = setTimeout(() => {
+      try { child.kill(); } catch (e) { /* best effort */ }
+      finish({ ok: false, code: -1, out, err: "python engine timed out after " + timeoutMs + "ms" });
+    }, timeoutMs);
+    child.stdout.on("data", (c) => {
+      out += c;
+      for (const line of c.toString().split(/\r?\n/)) if (line.trim()) log("  [py] " + line.trim());
+    });
+    child.stderr.on("data", (c) => {
+      err += c;
+      for (const line of c.toString().split(/\r?\n/)) if (line.trim()) log("  [py] " + line.trim());
+    });
+    child.on("error", (e) => finish({ ok: false, code: -1, out, err: String((e && e.message) || e) }));
+    child.on("exit", (c) => finish({ ok: c === 0, code: c, out, err }));
+  });
+}
+// The fallback stage itself: same output path the Node path would have
+// written, success = engine exit 0 + non-trivial file on disk. The tried-set
+// makes the stage idempotent per process: processCode's resolve-miss hook AND
+// the main loop's not-found branch both call this, and the engine must never
+// run twice for one code.
+const pyFallbackTried = new Set();
+async function pyFallback(target, args, outDir) {
+  const slug = target && target.code ? normalizeCode(target.code)
+    : (target && target.url ? urlSlug(unrelayUrl(target.url))
+    : (args.out ? path.basename(args.out).replace(/\.mp4$/i, "") : "stream"));
+  if (pyFallbackTried.has(slug)) return false;
+  pyFallbackTried.add(slug);
+  const outPath = args.out || path.join(outDir, slug + ".mp4");
+  const r = await runPyEngine({ code: target.code || "stream" }, outPath);
+  if (r.ok && fs.existsSync(outPath) && fs.statSync(outPath).size > 0) {
+    log("wrote " + outPath + " (python engine)");
+    return true;
+  }
+  log("  python engine failed (exit " + r.code + (r.err ? ": " + String(r.err).split("\n")[0] : "") + ")");
+  return false;
+}
+
 // Base site override: the boot-verify drill points this at a local mock MissAV
 // (JAVDL_SITE=http://127.0.0.1:<port>) so Phase L resolves a fixture code with
 // zero network egress. Fetches/referers all flow from this base.
@@ -118,6 +219,9 @@ const SITE = process.env.JAVDL_SITE || "https://missav.ws";
 const SLUG_SUFFIXES = ["", "-uncensored-leak", "-uncensored-leak-sub", "-chinese-sub",
   "-english-sub", "-cm", "-ub", "-uc"];
 const MIRROR_DOMAINS = ["javhd.today", "javdock.com", "bestjavporn.com", "javhdporn.net"];
+// JAVDL_CDX_BASE: drill seam — Phase N points the Wayback CDX index at the
+// local fixture (no rows) so mirror exhaustion costs zero network egress.
+const CDX_BASE = process.env.JAVDL_CDX_BASE || "https://web.archive.org";
 
 // --------------------------------------------------------------------- utils
 function normalizeCode(code) {
@@ -227,7 +331,7 @@ async function resolveBySearchPage(code, ctx) {
 async function mirrorPageUrls(code, limit = 10) {
   const out = [];
   for (const domain of MIRROR_DOMAINS) {
-    const cdx = "https://web.archive.org/cdx/search/cdx?url=" + domain +
+    const cdx = CDX_BASE + "/cdx/search/cdx?url=" + domain +
       "&matchType=domain&filter=original:.*" + code + ".*" +
       "&collapse=urlkey&limit=20&fl=original&output=json";
     let rows;
@@ -291,8 +395,8 @@ async function renderEmbedForStream(page) {
 
 // Full fallback chain. Returns {m3u8, label, referer} or null.
 async function fallbackResolve(code, slug) {
-  log("  MissAV slugs exhausted; trying search fallback ...");
   const ctx = { proxyManager: null, config: { maxRetries: 2 }, paceHost: null };
+  log("  MissAV slugs exhausted; trying search fallback ...");
   const hit = await resolveBySearchPage(code, ctx);
   if (hit) {
     log("  missav search: " + code + " -> /en/" + hit);
@@ -407,11 +511,17 @@ function parseArgs(argv) {
 
 // ----------------------------------------------------------------- main flow
 async function processCode(code, args, dm, outDir) {
-  const slug = normalizeCode(code);
+  // args.url mode passes code=null — the slug is only used for the default
+  // output basename (and only when -o is absent).
+  const slug = code ? normalizeCode(code) : (args.out ? path.basename(args.out).replace(/\.mp4$/i, "") : "stream");
   let m3u8 = null, referer = SITE + "/", label = slug;
 
   if (args.url) {
-    m3u8 = args.url;
+    // --url may arrive relay-rewritten (a caller pastes a `stream:` line from
+    // a JAVDL_RELAY=force session); recover the true upstream so the engine's
+    // master→variant→segment chain and any python fallback target surrit
+    // directly. No-op for a plain URL.
+    m3u8 = unrelayUrl(args.url);
   } else {
     log("resolving " + slug + " ...");
     const ctx = { proxyManager: null, config: { maxRetries: 2 }, paceHost: null };
@@ -421,9 +531,16 @@ async function processCode(code, args, dm, outDir) {
       label = bySlug.slug;
     } else if (!args.noFallback) {
       const fb = await fallbackResolve(code, slug);
-      if (!fb) return false;
+      if (!fb) {
+        // --list-only has no download to delegate; the python-engine stage is
+        // download-only by design (its own discovery runs at download time).
+        if (pyEngineAvailable() && !args.listOnly) return await pyFallback({ code }, args, outDir);
+        return false;
+      }
       m3u8 = fb.m3u8; label = fb.label; referer = fb.referer || referer;
     } else {
+      // --no-fallback also kills the python-engine stage: the user asked for
+      // "MissAV slug probe only", in any engine.
       return false;
     }
   }
@@ -534,7 +651,20 @@ async function processCode(code, args, dm, outDir) {
         if (exhausted) {
           clearInterval(poll);
           process.stdout.write("\n");
-          reject(new Error("engine: " + it.status + (it.error ? " — " + it.error : "")));
+          // LAST RESORT: the engine's budget spent under a surrit challenge —
+          // hand the target to the standalone python engine, whose urllib TLS
+          // fingerprint passes the gate, on the SAME output path. --url mode
+          // delegates the m3u8 itself (pyFallback un-relays it — this
+          // process's relay dies with us); code mode re-resolves from scratch.
+          const engineErr = "engine: " + it.status + (it.error ? " — " + it.error : "");
+          if (pyEngineAvailable()) {
+            pyFallback(code ? { code } : { url: m3u8 }, args, outDir).then((pyOk) => {
+              if (pyOk) resolve();
+              else reject(new Error(engineErr + " (python fallback also failed)"));
+            }).catch((e) => reject(new Error(engineErr + " (python fallback crashed: " + ((e && e.message) || e) + ")")));
+          } else {
+            reject(new Error(engineErr));
+          }
           return;
         }
         const note = "engine error — auto-retry cycle " +
@@ -570,11 +700,10 @@ async function main() {
     console.log("       [--quality best|720|480|360] [-o OUT] [--list-only] [--limit N]");
     console.log("       [--force] [--no-fallback] [--no-relay] [--retry-wait-min N]");
     console.log("JAV code -> MissAV stream (search/mirror fallback) -> engine HLS download.");
+    console.log("Last resort on failure: the standalone python engine (JAVDL_PY, default K:\\jav-dl.py) re-runs the code.");
     process.exit(args.help ? 0 : 1);
   }
-  if (args.url && args.codes.length) throw new Error("--url cannot be combined with codes");
   if (args.codes.length > 1 && args.out) throw new Error("-o applies to a single code only");
-  const queue = args.url ? [] : buildQueue(args.codes.concat(args.fromFile ? ["--from-file", args.fromFile] : []));
   const fromFileArg = args.fromFile;
   const allCodes = args.url ? [] : (() => {
     const codes = [...args.codes];
@@ -606,6 +735,7 @@ async function main() {
 
   const ok = [], skipped = [], failed = [];
   if (args.url) {
+    if (args.codes.length) throw new Error("--url cannot be combined with codes");
     if (args.listOnly) {
       let master = null, gated = false;
       try { master = await fetchMasterForListing(args.url); }
@@ -623,7 +753,7 @@ async function main() {
         for (const v of listVariants(master, args.url).sort((a, b) => a.bandwidth - b.bandwidth)) {
           log("  variant: " + v.resolution + " @ " + v.bandwidth + " kb/s");
         }
-      } else log("stream: " + args.url + " (listing gated)");
+      } else log("stream: " + args.url + " (listing gated" + (pyEngineAvailable() ? " — the python engine can list it: JAVDL_PY engine --url mode" : "") + ")");
       return true;
     }
     await processCode(null, args, dm, outDir);
@@ -640,7 +770,14 @@ async function main() {
         }
         log("\n=== " + slug + " ===");
         if (await processCode(code, args, dm, outDir)) ok.push(slug);
-        else { failed.push([slug, "not found on MissAV or in mirror search"]); log("[fail] " + slug + ": not found"); }
+        else {
+          // Resolution failed everywhere in Node — the python engine carries
+          // its own (headless-Chrome) discovery, so it still gets one shot.
+          if (pyEngineAvailable() && !args.noFallback) {
+            if (await pyFallback({ code }, args, outDir)) { ok.push(slug); continue; }
+          }
+          failed.push([slug, "not found on MissAV or in mirror search"]); log("[fail] " + slug + ": not found");
+        }
       } catch (err) {
         failed.push([slug, err.message]);
         log("[fail] " + slug + ": " + err.message);
@@ -665,5 +802,7 @@ if (require.main === module) {
 
 // Test seams: the boot-verify drill drives processCode programmatically against
 // a mock MissAV (JAVDL_SITE) instead of spawning the CLI as a child.
-module.exports = { normalizeCode, processCode, buildQueue,
-  _internals: { SITE, SLUG_SUFFIXES, resolveBySlug, relayUrl, ensureRelay, stopRelay } };
+module.exports = { normalizeCode, processCode, buildQueue, parseArgs,
+  _internals: { SITE, SLUG_SUFFIXES, resolveBySlug, relayUrl, ensureRelay, stopRelay,
+    pyEnginePath, pyFallbackEnabled, pyEngineAvailable, unrelayUrl, pyEngineArgs,
+    runPyEngine, pyFallback, urlSlug } };
