@@ -22,6 +22,14 @@
 //                        local origin, and ensureRelay() must ADOPT an already-
 //                        listening relay (stopRelay() leaves it alive — only a
 //                        relay the CLI spawned dies with it).
+//   10 jav-add wiring  — lib/ipc.js's queue-panel handler driven END-TO-END
+//                        without Electron: registerIpc() against a fake
+//                        ipcMain/dm/statusLog ctx, the captured jav-add
+//                        handler resolving a code through the CLI's chain
+//                        (JAVDL_SITE/JAVDL_CDX_BASE repointed at a local mock
+//                        MissAV after a require-cache purge) and enqueueing
+//                        the resolved stream into the fake queue; a dead code
+//                        reports not-found and enqueues nothing.
 
 const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
@@ -237,6 +245,99 @@ async function testRelayEnabled() {
   assert("--no-relay parses through", m.parseArgs(["--no-relay"]).noRelay === true);
 }
 
+// ------------------------------------------------- 10 jav-add app wiring
+// The queue panel's JAV-code input rides the SAME chain the CLI uses, but
+// in-process inside the Electron app: main.js requires scripts/jav-dl.js and
+// lib/ipc.js's jav-add handler runs normalizeCode -> resolveBySlug ->
+// fallbackResolve, then enqueues the resolved stream into the APP's
+// DownloadManager. lib/ipc.js has no electron require at load time (handlers
+// only capture the ctx bag), so the whole handler is drivable here with fakes.
+async function testJavAdd() {
+  section("10: jav-add app wiring (lib/ipc.js queue-panel handler)");
+  const ipcSrc = fs.readFileSync(path.join(__dirname, "lib", "ipc.js"), "utf8");
+  assert("jav-add handler registered", ipcSrc.includes('ipcMain.handle("jav-add"'), "no ipcMain.handle for jav-add");
+  assert("handler reuses the CLI chain", ipcSrc.includes("J.resolveBySlug(") && ipcSrc.includes("J.fallbackResolve(") && ipcSrc.includes(".normalizeCode("),
+    "jav-add must run the CLI's own resolution functions");
+  assert("handler enqueues into the app queue", ipcSrc.includes("dm.enqueue({ url: m3u8"), "the resolved stream must go through dm.enqueue");
+  assert("handler is fire-and-forget", ipcSrc.includes("return { ok: true, slug }"), "the invoke must return before the resolve finishes");
+  assert("console-primary logging", /console\.log\(line\)/.test(ipcSrc) && ipcSrc.includes("ctx.statusLog.push(line)"),
+    "jav-add logs must hit the console AND mirror into the Status log ring");
+  const mainSrc = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
+  assert("main.js requires the jav-dl CLI", mainSrc.includes('require("./scripts/jav-dl")'), "main.js must wire the CLI into the ctx bag");
+  assert("main.js statusLog exposes push", mainSrc.includes("push: statusLogPush"), "ctx.statusLog.push backs the jav-add lines");
+  const preloadSrc = fs.readFileSync(path.join(__dirname, "preload.js"), "utf8");
+  assert("preload exposes javAdd -> jav-add", preloadSrc.includes("javAdd:") && preloadSrc.includes('invoke("jav-add"'), "preload must expose the channel");
+  const rendererSrc = fs.readFileSync(path.join(__dirname, "renderer.js"), "utf8");
+  assert("renderer calls window.api.javAdd", rendererSrc.includes("window.api.javAdd("), "the queue panel must ride the exposed API");
+  const shimSrc = fs.readFileSync(path.join(__dirname, "demo-api-shim.js"), "utf8");
+  assert("demo shim mirrors javAdd", shimSrc.includes("javAdd:"), "demo parity");
+
+  // Functional half: a mock MissAV + a fake app ctx. The CLI module is dropped
+  // from the require cache FIRST so the handler's lazy require re-reads
+  // JAVDL_SITE/JAVDL_CDX_BASE — its SITE/CDX constants bake at require time.
+  const mock = http.createServer((req, res) => {
+    if (req.url === "/en/bvd-777") {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html><body>stream https://surrit.com/bdd77700-1111-2222-3333-444444444444/playlist.m3u8 end</body></html>");
+      return;
+    }
+    if (req.url.startsWith("/cdx/")) { res.writeHead(200, { "Content-Type": "application/json" }); res.end("[]"); return; }
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("mock missav: not found");
+  });
+  await new Promise((r) => mock.listen(0, "127.0.0.1", r));
+  const mockPort = mock.address().port;
+  process.env.JAVDL_SITE = "http://127.0.0.1:" + mockPort;
+  process.env.JAVDL_CDX_BASE = "http://127.0.0.1:" + mockPort;
+  delete require.cache[require.resolve("./scripts/jav-dl.js")];
+
+  const handlers = new Map();
+  const enqueued = [];
+  const logLines = [];
+  const fakeCtx = {
+    ipcMain: { handle: (c, fn) => handlers.set(c, fn), on: (c, fn) => handlers.set(c, fn) },
+    dm: { enqueue: async (opts) => { enqueued.push(opts); return "dl-jav-test-1"; } },
+    statusLog: { recent: () => [], clear: () => {}, push: (l) => logLines.push(String(l)) }
+  };
+  const ipc = require("./lib/ipc.js");
+  ipc.registerIpc(fakeCtx);
+  const javAdd = handlers.get("jav-add");
+  assert("registerIpc captures the jav-add handler", typeof javAdd === "function", "jav-add missing from the captured handler map");
+
+  // Dead input: synchronous validation, nothing async ever starts.
+  const bad = javAdd(null, "", null);
+  assert("empty code rejected synchronously", bad && bad.ok === false && /JAV code/.test(bad.error), JSON.stringify(bad));
+  assert("empty code enqueues nothing", enqueued.length === 0, JSON.stringify(enqueued));
+
+  // Happy path: the invoke returns at once; the resolve + enqueue lands later.
+  const r = javAdd(null, "BVD-777", null);
+  assert("invoke returns {ok, slug} immediately", r && r.ok === true && r.slug === "bvd-777", JSON.stringify(r));
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline && !enqueued.length) await sleep(150);
+  assert("resolved stream enqueued", enqueued.length === 1, "dm.enqueue never fired; log lines: " + logLines.join(" | ").slice(0, 300));
+  if (enqueued.length === 1) {
+    const e = enqueued[0];
+    assert("enqueue url is the page's surrit m3u8", e.url === "https://surrit.com/bdd77700-1111-2222-3333-444444444444/playlist.m3u8", String(e.url));
+    assert("enqueue title is the resolved slug", e.title === "bvd-777", String(e.title));
+    assert("enqueue referer is the mock SITE root", e.referer === process.env.JAVDL_SITE + "/", String(e.referer));
+    assert("duplicates skip silently (markDuplicate:false)", e.markDuplicate === false, String(e.markDuplicate));
+  }
+  assert("status log carries the [jav] lines", logLines.some((l) => l === "[jav] resolving bvd-777 ...") && logLines.some((l) => l.startsWith("[jav] bvd-777 queued")), logLines.join(" | ").slice(0, 300));
+
+  // Miss path: every slug 404s, the search page 404s, the CDX index is empty.
+  const r2 = javAdd(null, "bvd-404", null);
+  assert("miss invoke still accepts the job", r2 && r2.ok === true && r2.slug === "bvd-404", JSON.stringify(r2));
+  const deadline2 = Date.now() + 20000;
+  while (Date.now() < deadline2 && !logLines.some((l) => l.includes("bvd-404: not found"))) await sleep(200);
+  assert("miss reports not found", logLines.some((l) => l.includes("bvd-404: not found")), logLines.join(" | ").slice(0, 300));
+  assert("miss enqueues nothing", enqueued.length === 1, "a dead code must never reach dm.enqueue");
+
+  mock.close();
+  delete process.env.JAVDL_SITE;
+  delete process.env.JAVDL_CDX_BASE;
+  delete require.cache[require.resolve("./scripts/jav-dl.js")]; // later sections see the pristine module again
+}
+
 // ------------------------------------------ 9 LIVE relay selftest + lifecycle
 async function testRelayLive() {
   section("9: live surrit-relay selftest + ensureRelay/stopRelay reuse contract");
@@ -300,6 +401,7 @@ async function testRelayLive() {
   await testPyFallback();
   await testRelayEnabled();
   await testRelayLive();
+  await testJavAdd();
 })().then(() => {
   // Restore the caller's env (the suite mutated it heavily).
   for (const k of ENV_KEYS) {

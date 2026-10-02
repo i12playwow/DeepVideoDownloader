@@ -334,6 +334,19 @@
 
     add: async (url, dirOverride) => { enqueue([url]); return { ok: true }; },
     addMany: async (urls) => { enqueue(urls); return { ok: true, count: urls.length }; },
+    // Mirror of jav-add (lib/ipc.js): the queue panel's JAV-code input resolves
+    // through the jav-dl chain and enqueues the resolved stream. The demo
+    // skips the network and queues a synthetic surrit playlist directly.
+    javAdd: async (code) => {
+      const slug = String(code || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      if (!slug) return { ok: false, error: "give a JAV code (e.g. IPZ-721)" };
+      const url = "https://surrit.com/v/" + slug.toUpperCase() + "/playlist.m3u8";
+      pushStatusLog("[jav] resolving " + slug + " ...");
+      pushStatusLog("[jav] " + slug + " -> " + slug + " (demo): " + url);
+      enqueue([url]);
+      pushStatusLog("[jav] " + slug + " queued (demo)");
+      return { ok: true, slug };
+    },
 
     openBrowser: async () => { toast("Built-in browser would open here (demo)"); return { ok: true }; },
     openExternal: async (url, browser) => { toast("Opened in " + browser + " (demo): " + url); return { ok: true }; },
@@ -460,6 +473,7 @@
     api,
     fireClients: () => { if (clientsCb) clientsCb(bridgeSnapshot()); },
     fireStatusLog: (line) => pushStatusLog(line || "[demo] manual status event"),
+    fireJav: (code) => api.javAdd(code || "DEMO-777"), // live demo: exercises the queue-panel JAV-code input
     fireWsPort: () => pushStatusLog("[ws] listening on port " + (8800 + Math.floor(Math.random() * 100)) + " (moved from 8766)"),
     fireWsClient: () => { const label = "Chrome extension"; pushStatusLog("[ws] " + label + " connected on port 8766"); setTimeout(() => pushStatusLog("[ws] " + label + " disconnected"), 1200); },
     fireGrab: () => pushStatusLog("[grab] video URL picked up from the clipboard: https://missav.ws/w/SEED-DEMO"),

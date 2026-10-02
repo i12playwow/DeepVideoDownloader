@@ -20,6 +20,7 @@ const { setCfBrowserFallback, setCfFallbackLogSink } = require("./lib/cf-fallbac
 const { createBuiltinBrowser } = require("./lib/browser");
 const { registerIpc } = require("./lib/ipc");
 const cfFallback = require("./lib/cf-fallback");
+const javDl = require("./scripts/jav-dl"); // the JAV-code resolution chain (lib/ipc.js jav-add reuses it in-process)
 
 // Dev builds read/write config.json next to main.js (gitignored). Packaged
 // apps must NOT write into the read-only app.asar — use the writable userData
@@ -124,6 +125,7 @@ function pushStatusLog(line) {
   if (statusLogEntries.length > STATUS_LOG_MAX) statusLogEntries.splice(0, statusLogEntries.length - STATUS_LOG_MAX);
   try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("status-log", statusLogEntries[statusLogEntries.length - 1]); } catch (e) { /* window closing */ }
 }
+function statusLogPush(line) { pushStatusLog(line); } // ctx seam: lib/ipc.js jav-add logs its resolve/queue steps into the same ring
 function clearStatusLog() { // the panel's Clear button: wipe the ring so a reloaded window cannot resurrect cleared entries
   statusLogEntries.length = 0;
 }
@@ -838,7 +840,8 @@ if (gotLock) {
     },
     bv: browser.bv,
     bridge: { snapshot: clientSnapshot, push: pushClients },
-    statusLog: { recent: () => statusLogEntries.slice().reverse(), clear: clearStatusLog } // newest-first, matching the live push order the renderer prepends; clear backs the panel's Clear button (empties the ring, so a reload cannot resurrect cleared entries)
+    statusLog: { recent: () => statusLogEntries.slice().reverse(), clear: clearStatusLog, push: statusLogPush }, // newest-first, matching the live push order the renderer prepends; clear backs the panel's Clear button (empties the ring, so a reload cannot resurrect cleared entries); push feeds lib/ipc.js's jav-add resolve/queue lines into the same ring
+    javDl, // the jav-dl CLI module (scripts/jav-dl.js): lib/ipc.js jav-add resolves codes through its exported chain
   });
 
 

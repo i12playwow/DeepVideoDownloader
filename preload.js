@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld("api", {
   forceDownload: (id) => ipcRenderer.invoke("downloads-force", id),
   add: (url, dirOverride) => ipcRenderer.invoke("downloads-add", url, dirOverride || null),
   addMany: (urls, dirOverride) => ipcRenderer.invoke("downloads-add-many", urls, dirOverride || null),
+  // JAV-code enqueue (queue panel): resolves the code through the jav-dl CLI chain and
+  // enqueues the resolved stream into the app queue. Fire-and-forget: returns {ok, slug}
+  // when the resolve STARTS; progress shows up as a normal row in the Downloads table.
+  javAdd: (code, dirOverride) => ipcRenderer.invoke("jav-add", code, dirOverride || null),
   moveDownload: (id, destDir) => ipcRenderer.invoke("download-move", id, destDir),
   schedule: (data) => ipcRenderer.invoke("download-schedule", data),
   testProxies: (url) => ipcRenderer.invoke("test-proxies", url),

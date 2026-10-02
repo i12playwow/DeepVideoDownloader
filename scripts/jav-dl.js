@@ -785,8 +785,12 @@ if (require.main === module) {
 }
 
 // Test seams: the boot-verify drill drives processCode programmatically against
-// a mock MissAV (JAVDL_SITE) instead of spawning the CLI as a child.
+// a mock MissAV (JAVDL_SITE) instead of spawning the CLI as a child. The app's
+// queue panel (lib/ipc.js jav-add) reuses the SAME resolution chain in-process:
+// normalizeCode -> resolveBySlug -> fallbackResolve, then enqueues the resolved
+// m3u8 into the app's own DownloadManager (lib/ipc.js owns that part — it is
+// where dm, the Status-log sink and the real queue live).
 module.exports = { normalizeCode, processCode, buildQueue, parseArgs,
   _internals: { SITE, SLUG_SUFFIXES, resolveBySlug, relayUrl, ensureRelay, stopRelay,
     pyEnginePath, pyFallbackEnabled, pyEngineAvailable, unrelayUrl, pyEngineArgs,
-    runPyEngine, pyFallback, urlSlug, relayEnabled } };
+    runPyEngine, pyFallback, urlSlug, relayEnabled, fallbackResolve } };

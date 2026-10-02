@@ -283,3 +283,13 @@ assert("mixed classify counts", (() => {
   const c = classifySegments([...AD_SEGS, ...REAL_SEGS]);
   return c.ad === AD_SEGS.length && c.video === REAL_SEGS.length;
 })(), JSON.stringify(classifySegments([...AD_SEGS, ...REAL_SEGS])));
+// surrit (MissAV's CDN) names its genuine MPEG-TS segments *.jpeg — validated
+// live 2026-10-02: 1543/1543 videoN.jpeg segments per variant, every one
+// classified as an ad image, whole stream rejected "ad-polluted". surrit
+// hosts must be exempt from the ad heuristics entirely.
+assert("surrit *.jpeg segments are NOT ads (the real MissAV segment shape)",
+  !isAdSegmentUrl("https://surrit.com/4c43c048-ef72-4d6e-813e-718b625dc361/1280x720/video0.jpeg")
+  && !isAdSegmentUrl("http://127.0.0.1:8931/https/surrit.com/uuid/1280x720/video42.jpeg"),
+  "surrit jpeg segments were classified as ads");
+assert("non-surrit *.jpeg segments still ARE ads",
+  isAdSegmentUrl("https://cdn.example/hls/video0.jpeg") && isAdSegmentUrl("https://surrit.com.evil.example/video0.jpeg"));

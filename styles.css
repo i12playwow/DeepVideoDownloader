@@ -150,6 +150,9 @@ body {
   flex-wrap: wrap;
   margin-bottom: 12px;
 }
+
+.jav-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+.jav-code { flex: 1 1 260px; min-width: 200px; }
 .toolbar-left, .toolbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }

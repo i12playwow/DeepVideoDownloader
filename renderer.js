@@ -636,6 +636,44 @@ async function clearStatusLogPanel() {
 $("statusLogCopy").addEventListener("click", copyStatusLog);
 $("statusLogClear").addEventListener("click", clearStatusLogPanel);
 
+// ---------------- JAV-code enqueue (queue panel) ----------------
+// The queue panel's JAV-code input rides the SAME path the jav-dl CLI uses:
+// main resolves the code through the CLI's own chain (MissAV slug sweep +
+// search/mirror fallback) and enqueues the resolved stream into the normal
+// queue, so progress, retries and history all show up in the table below.
+// Fire-and-forget: {ok, slug} means the resolve STARTED — the [jav] lines land
+// in the Status log panel and the row appears in the Downloads table.
+let javHintTimer = null;
+function hintJav(msg) {
+  const el = $("javHint");
+  if (!el) return;
+  el.textContent = msg;
+  if (javHintTimer) clearTimeout(javHintTimer);
+  javHintTimer = setTimeout(() => { el.textContent = ""; javHintTimer = null; }, 4000);
+}
+
+async function javAdd() {
+  const code = ($("javCode").value || "").trim();
+  if (!code) { hintJav("Type a JAV code first (e.g. IPZ-721)."); return; }
+  const btn = $("javAdd");
+  btn.disabled = true;
+  hintJav("Resolving " + code + " via the jav-dl chain...");
+  try {
+    const r = await window.api.javAdd(code, destOverride || null);
+    if (r && r.ok) {
+      $("javCode").value = "";
+      hintJav("Resolving " + (r.slug || code) + " — watch the Status log and the table below.");
+    } else {
+      hintJav((r && r.error) || "Could not queue " + code + ".");
+    }
+  } catch (e) {
+    hintJav("jav-add failed: " + (e && e.message ? e.message : e));
+  }
+  btn.disabled = false;
+}
+$("javAdd").addEventListener("click", javAdd);
+$("javCode").addEventListener("keydown", (e) => { if (e.key === "Enter") javAdd(); });
+
 // ---------------- settings ----------------
 async function loadSettings() {
   const s = await window.api.getSettings();
