@@ -290,15 +290,20 @@ function startFixture() {
         return;
       }
       const O_SLUG = "bvd-888";
-      if (p === "/en/" + O_SLUG) {
+      // Phase O's batch check pastes "bvd-889 bvd-404": bvd-889 reuses this
+      // same bounce+packer shape under its own uuid (bdd88900-…), so the list
+      // mixes a real hit with a real miss.
+      const oSlug = p === "/en/bvd-889" ? "bvd-889" : O_SLUG;
+      if (p === "/en/" + oSlug) {
         const host = req.headers.host;
         res.writeHead(200, { "Content-Type": "text/html" });
-        res.end("<!doctype html><html><head><meta http-equiv=\"refresh\" content=\"0;url='http://" + host + "/dm9/en/" + O_SLUG + "'\" /><title>Redirecting</title></head><body></body></html>");
+        res.end("<!doctype html><html><head><meta http-equiv=\"refresh\" content=\"0;url='http://" + host + "/dm9/en/" + oSlug + "'\" /><title>Redirecting</title></head><body></body></html>");
         return;
       }
-      if (p === "/dm9/en/" + O_SLUG) {
+      const dSlug = p === "/dm9/en/bvd-889" ? "bvd-889" : O_SLUG;
+      if (p === "/dm9/en/" + dSlug) {
         const host = req.headers.host;
-        const m3u8 = "http://" + host + "/hls/bdd88800-2222-3333-4444-555555555555/playlist.m3u8";
+        const m3u8 = "http://" + host + "/hls/bdd" + (dSlug === "bvd-889" ? "889" : "888") + "00-2222-3333-4444-555555555555/playlist.m3u8";
         // Dean Edwards packer WITH backslash-escaped quotes (the real-page
         // shape resolveMissav's unpacker exists for). The m3u8 URL goes in the
         // KEY TABLE (k0), not the payload: the unpacker rewrites every
@@ -862,7 +867,20 @@ async function phaseO(port) {
   if (!diskHit) return fail("O jav-add output file", outPath + " missing/empty after the done push");
   const d = spawnSync(ff, ["-v", "error", "-i", outPath, "-f", "null", "-"], { encoding: "utf8", timeout: 30000 });
   if (d.status !== 0) return fail("O jav-add output decodes", "ffmpeg exit " + d.status + ": " + String(d.stderr || "").split("\n")[0]);
-  pass("O jav-add enqueues + downloads", "bvd-888 typed into the queue panel resolved via the jav-dl chain and downloaded to " + outPath);
+  // Stage badge: the row jav-add produced must say WHICH stage of the chain
+  // resolved it (the slug sweep here) — the javStage tag is the whole point.
+  // The table is VIRTUALIZED (only the scroll window renders), and in a full
+  // run the earlier phases have filled it — scroll the newest row into the
+  // DOM before hunting for its badge (seen live: 'no-row' in the full run
+  // right after the same check passed a --only=O run).
+  try { await cdpEvalExpr("(function(){var s=document.getElementById('dlsScroll');if(s){s.scrollTop=s.scrollHeight;}return 'scrolled';})()", 8000); } catch (e) { /* table absent */ }
+  await sleep(600); // the scroll listener re-renders synchronously; give the frame a beat
+  let badge = "";
+  try {
+    badge = await cdpEvalExpr("(function(){var rows=document.querySelectorAll('#dlsBody tr');for(var i=0;i<rows.length;i++){if(rows[i].textContent.indexOf('bvd-888')!==-1){var t=rows[i].querySelector('.jav-stage');return t?t.textContent:'no-chip';}}return 'no-row';})()", 8000);
+  } catch (e) { badge = "cdp-error"; }
+  if (!/slug sweep/.test(String(badge))) return fail("O jav-add stage badge", "the bvd-888 row shows no stage badge: " + JSON.stringify(badge));
+  pass("O jav-add enqueues + downloads", "bvd-888 typed into the queue panel resolved via the jav-dl chain and downloaded to " + outPath + " (row badge: " + String(badge).trim() + ")");
   // Negative: a code no slug answers (the fixture 404s every suffix; its CDX
   // serves no rows) must report not-found and enqueue NOTHING — the chain's
   // honest not-found path, not a junk queue row. The console line is the
@@ -874,6 +892,7 @@ async function phaseO(port) {
   await cdpEvalExpr("(function(){var i=document.getElementById(\'javCode\');i.value=\'bvd-404\';document.getElementById(\'javAdd\').click();return \'clicked\';})()", 8000);
   const missLine = await waitAppLog(/\[jav\] bvd-404: not found/, 60000);
   if (!missLine) return fail("O jav-add miss reports", "no '[jav] bvd-404: not found' in the app log within 60s");
+  if (!/slug sweep/.test(missLine)) return fail("O jav-add miss reasons", "the not-found line lacks the per-stage reasons: " + missLine.trim());
   let panelMirrored = false;
   try {
     const lines = await cdpEvalExpr("Array.from(document.querySelectorAll('#statusLog li')).map(function(n){return n.textContent;}).join('\n')", 8000) || "";
@@ -882,6 +901,35 @@ async function phaseO(port) {
   const after = await cdpEvalExpr("document.querySelectorAll(\'#dlsBody tr\').length", 8000);
   if (after !== before) return fail("O jav-add miss enqueues nothing", "table rows " + before + " -> " + after + " for an unresolvable code");
   pass("O jav-add miss reports + enqueues nothing", missLine.trim() + (panelMirrored ? " (mirrored in the panel)" : " (console origin; panel push pinned by Phase J)"));
+  // Batch: a pasted list resolves ONE code at a time — the button label
+  // previews the parsed count, the invoke acks at once, each code's [jav]
+  // lines stream, and a batch-done summary closes the chain. One hit + one
+  // miss in a single paste proves the serial order, the per-code outcomes,
+  // and that a miss inside a batch neither kills the batch nor enqueues junk.
+  const m3u8b = "http://127.0.0.1:" + port + "/hls/bdd88900-2222-3333-4444-555555555555/playlist.m3u8";
+  let blabel = null;
+  try {
+    blabel = await cdpEvalExpr("(function(){var i=document.getElementById('javCode');i.value='bvd-889 bvd-404';i.dispatchEvent(new Event('input'));var b=document.getElementById('javAdd');return b.textContent;})()", 8000);
+  } catch (e) { return fail("O jav-add batch label", "cdp: " + e.message); }
+  if (!/Queue 2 codes/.test(String(blabel))) return fail("O jav-add batch label", "the button did not preview the batch count: " + JSON.stringify(blabel));
+  const obsB = wsObserve([m3u8b], 120000); // armed BEFORE the click: no push can be missed
+  try { await cdpEvalExpr("document.getElementById('javAdd').click()", 8000); }
+  catch (e) { return fail("O jav-add batch click", "cdp: " + e.message); }
+  const rb = await obsB;
+  if (rb.why !== "terminal" || !rb.seen.some((s) => s.url === m3u8b && s.status === "done")) {
+    return fail("O jav-add batch enqueues", "no done push for the batch's resolved m3u8 (observed " + rb.seen.length + " pushes: " +
+      rb.seen.slice(0, 5).map((s) => s.url.slice(-30) + " -> " + s.status).join(" | ") + ")");
+  }
+  const batchLine = await waitAppLog(/\[jav\] batch done: 1 queued, 1 not resolved \(bvd-404\)/, 90000);
+  if (!batchLine) return fail("O jav-add batch summary", "no '[jav] batch done: 1 queued, 1 not resolved (bvd-404)' in the app log within 90s");
+  const outB = path.join(dlDir, "bvd-889.mp4");
+  let diskB = hasFile(outB) && fileSize(outB) > 0;
+  for (let i = 0; !diskB && i < 20; i++) { await sleep(500); diskB = hasFile(outB) && fileSize(outB) > 0; }
+  if (!diskB) return fail("O jav-add batch output", outB + " missing/empty after the done push");
+  const dB = spawnSync(ff, ["-v", "error", "-i", outB, "-f", "null", "-"], { encoding: "utf8", timeout: 30000 });
+  if (dB.status !== 0) return fail("O jav-add batch decodes", "ffmpeg exit " + dB.status + ": " + String(dB.stderr || "").split("\n")[0]);
+  pass("O jav-add batch (pasted list)", "bvd-889 bvd-404 pasted as a list: the label previewed 2, bvd-889 downloaded to " + outB +
+    ", bvd-404 not-found inside the batch; summary: " + batchLine.trim());
 }
 // Phase E: the exhausted Phase-D item, manually retried, must get a FRESH budget:
 // re-run, re-arm scheduled (a stale budget would error terminally here instead),
@@ -2131,7 +2179,11 @@ async function main() {
   fs.mkdirSync(dl2Dir, { recursive: true });
   fs.mkdirSync(udDir, { recursive: true });
   if (fs.existsSync(CONFIG_PATH)) {
-    configBackup = CONFIG_PATH + ".bv-bak";
+    // Per-PID name: the rescue child (spawned with --force mid-teardown) runs
+    // the same dance and used to OVERWRITE then UNLINK this exact path — seen
+    // live: the child deleted the parent's clean-config backup, the parent's
+    // final restore had nothing to restore, and the drill config survived.
+    configBackup = CONFIG_PATH + ".bv-bak-" + process.pid;
     fs.copyFileSync(CONFIG_PATH, configBackup);
   }
   const port = await startFixture();

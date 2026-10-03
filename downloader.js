@@ -439,6 +439,7 @@ class DownloadManager {
       errorCode: errorCodeFor(item.errorCategory),
       retryable: isTransientError(item.errorCategory, item.errorStatus),
       finalPath: item.finalPath || "",
+      javStage: item.javStage || "", // survives into the History tab so the stage badge re-renders after a restart
       thumb: item.thumb || "",
       timestamp: Date.now(),
       endTime: Date.now(),
@@ -565,7 +566,7 @@ class DownloadManager {
     grant();
   }
 
-  async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", cookieHeader = null, force = false, markDuplicate = true, dirOverride = null, reqId = "" }) {
+  async enqueue({ url, title, referer, resolvedUrl = null, scheduledStart = null, scheduledStop = null, label = "", cookieHeader = null, force = false, markDuplicate = true, dirOverride = null, reqId = "", javStage = null }) {
     // Unwrap tab-suspender/lazy-load chrome-extension wrappers to their real
     // target (…/suspended.html#…uri=<url>) and reject unfetchable schemes.
     url = unwrapExtensionUrl(url);
@@ -635,6 +636,7 @@ class DownloadManager {
       reqId: reqId || "",
       cookieHeader: cookieHeader || null,
       dirOverride: effDirOverride,
+      javStage: javStage || null, // which stage of the jav-dl chain resolved this (slug/search/mirror) — badges the queue row
       _windowBypass: windowBypass,
       kind: hls ? "hls" : "mp4",
       fileName: sanitizeName(effectiveTitle) + (label ? "[" + sanitizeName(label) + "]" : "") + ".mp4",
@@ -687,6 +689,7 @@ class DownloadManager {
           resolveAttempt: this._resolveAttempt || 0,
           retryCount: this.retryCount || 0,
           finalPath: this.finalPath,
+          javStage: this.javStage || "", // the jav-dl chain stage that resolved this — badges the queue row
           thumb: this.thumb || "",
           dirOverride: this.dirOverride || "",
           scheduledStart: this.scheduledStart,

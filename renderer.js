@@ -143,16 +143,24 @@ function watchScrollMetrics(id, key) {
 watchScrollMetrics("dlsScroll", "dls");
 watchScrollMetrics("histScroll", "hist");
 
+// The jav-dl chain's resolution stages — the queue-panel input tags each row
+// with the one that landed the stream, and the table badges it. "python engine"
+// is the CLI's last resort: the in-app resolution path never sets it today,
+// but the vocabulary carries it so any future engine-sourced row renders the
+// same way.
+const JAV_STAGE_LABELS = { slug: "slug sweep", search: "missav search", mirror: "wayback mirror", python: "python engine" };
+
 function rowHtml(it, showing) {
   const pct = it.total ? Math.min(100, (it.received / it.total) * 100) : 0;
   const done = it.status === "done" || it.status === "cancelled";
+  const stageLabel = it.javStage ? (JAV_STAGE_LABELS[it.javStage] || it.javStage) : "";
   return `
       <td class="sel">${showing === "history" ? "" : `<input type="checkbox" aria-label="Select ${esc(it.fileName)}" data-sel="${esc(it.id)}" ${selected.has(it.id) ? "checked" : ""}>`}</td>
       <td class="name-cell" title="${esc(it.url)}">
         ${it.thumb ? `<img class="thumb" src="file:///${String(it.thumb).replace(/\\/g, "/")}" alt="" onerror="this.remove()">` : ""}
         <div class="name-col">
           <div class="name">${esc(it.fileName)}</div>
-          <div class="sub">${esc(it.url)}</div>
+          <div class="sub">${stageLabel ? `<span class="jav-stage" title="Resolved via the ${esc(stageLabel)} stage of the jav-dl chain">${esc(stageLabel)}</span>` : ""}${esc(it.url)}</div>
         </div>
       </td>
       <td>${fmtBytes(it.total)}</td>
@@ -643,6 +651,10 @@ $("statusLogClear").addEventListener("click", clearStatusLogPanel);
 // queue, so progress, retries and history all show up in the table below.
 // Fire-and-forget: {ok, slug} means the resolve STARTED — the [jav] lines land
 // in the Status log panel and the row appears in the Downloads table.
+// A pasted list (space/comma/semicolon/newline separated) is a BATCH: the same
+// input takes one code or many, the button label previews the count live, and
+// the batch handler resolves one code at a time with per-code [jav] lines and
+// a closing batch-done summary in the Status log.
 let javHintTimer = null;
 function hintJav(msg) {
   const el = $("javHint");
@@ -652,19 +664,46 @@ function hintJav(msg) {
   javHintTimer = setTimeout(() => { el.textContent = ""; javHintTimer = null; }, 4000);
 }
 
+function javParseCodes(raw) {
+  return String(raw || "").split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean);
+}
+function javSyncButtonLabel() {
+  const b = $("javAdd");
+  if (!b) return;
+  const n = javParseCodes($("javCode").value).length;
+  b.textContent = n > 1 ? "\u25B6 Queue " + n + " codes" : "\u25B6 Queue code";
+}
 async function javAdd() {
-  const code = ($("javCode").value || "").trim();
-  if (!code) { hintJav("Type a JAV code first (e.g. IPZ-721)."); return; }
+  const codes = javParseCodes($("javCode").value);
+  if (!codes.length) { hintJav("Type a JAV code first (e.g. IPZ-721), or paste a list."); return; }
   const btn = $("javAdd");
   btn.disabled = true;
-  hintJav("Resolving " + code + " via the jav-dl chain...");
   try {
-    const r = await window.api.javAdd(code, destOverride || null);
-    if (r && r.ok) {
-      $("javCode").value = "";
-      hintJav("Resolving " + (r.slug || code) + " — watch the Status log and the table below.");
+    if (codes.length === 1) {
+      hintJav("Resolving " + codes[0] + " via the jav-dl chain...");
+      const r = await window.api.javAdd(codes[0], destOverride || null);
+      if (r && r.ok) {
+        $("javCode").value = "";
+        hintJav("Resolving " + (r.slug || codes[0]) + " — watch the Status log and the table below.");
+      } else {
+        hintJav((r && r.error) || "Could not queue " + codes[0] + ".");
+      }
     } else {
-      hintJav((r && r.error) || "Could not queue " + code + ".");
+      // Batch: the handler acks the accepted list at once ({ok, total, dropped,
+      // codes}) and resolves the codes SERIALLY — each [jav] line streams into
+      // the Status log and the queue table fills as resolutions land, so the
+      // button frees up immediately instead of locking the panel for minutes.
+      hintJav("Resolving " + codes.length + " codes one at a time...");
+      const r = await window.api.javAddBatch(codes, destOverride || null);
+      if (r && r.ok) {
+        $("javCode").value = "";
+        javSyncButtonLabel();
+        hintJav("Batch of " + r.total + " code" + (r.total === 1 ? "" : "s") + " resolving one at a time" +
+          (r.dropped ? " (" + r.dropped + " duplicate/invalid dropped)" : "") +
+          " — watch the Status log for the batch-done line.");
+      } else {
+        hintJav((r && r.error) || "Batch failed.");
+      }
     }
   } catch (e) {
     hintJav("jav-add failed: " + (e && e.message ? e.message : e));
@@ -673,6 +712,7 @@ async function javAdd() {
 }
 $("javAdd").addEventListener("click", javAdd);
 $("javCode").addEventListener("keydown", (e) => { if (e.key === "Enter") javAdd(); });
+$("javCode").addEventListener("input", javSyncButtonLabel);
 
 // ---------------- settings ----------------
 async function loadSettings() {

@@ -342,10 +342,43 @@
       if (!slug) return { ok: false, error: "give a JAV code (e.g. IPZ-721)" };
       const url = "https://surrit.com/v/" + slug.toUpperCase() + "/playlist.m3u8";
       pushStatusLog("[jav] resolving " + slug + " ...");
-      pushStatusLog("[jav] " + slug + " -> " + slug + " (demo): " + url);
-      enqueue([url]);
+      pushStatusLog("[jav] " + slug + " -> " + slug + " [slug]: " + url);
+      enqueue([url], { javStage: "slug" });
       pushStatusLog("[jav] " + slug + " queued (demo)");
       return { ok: true, slug };
+    },
+
+    // Batch mirror of jav-add-batch: validate + order-preserving dedupe on the
+    // normalized slug, announce, per-code [jav] lines, closing batch-done summary.
+    javAddBatch: async (codes) => {
+      if (!Array.isArray(codes)) return { ok: false, error: "Invalid code list" };
+      const norm = (s) => String(s || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      const seen = new Set();
+      const items = [];
+      let rawCount = 0;
+      for (const c of codes) {
+        if (typeof c !== "string") continue;
+        const t = c.trim();
+        if (!t) continue;
+        rawCount++;
+        const slug = norm(t);
+        if (!slug || seen.has(slug)) continue;
+        seen.add(slug);
+        items.push(slug);
+      }
+      if (!items.length) return { ok: false, error: "No usable JAV code in the list" };
+      const dropped = rawCount - items.length;
+      pushStatusLog("[jav] batch: " + items.length + " code" + (items.length === 1 ? "" : "s") +
+        (dropped ? " (" + dropped + " duplicate/invalid dropped)" : "") + " — resolving one at a time");
+      for (const slug of items) {
+        const url = "https://surrit.com/v/" + slug.toUpperCase() + "/playlist.m3u8";
+        pushStatusLog("[jav] resolving " + slug + " ...");
+        pushStatusLog("[jav] " + slug + " -> " + slug + " [slug]: " + url);
+        enqueue([url], { javStage: "slug" });
+        pushStatusLog("[jav] " + slug + " queued (demo)");
+      }
+      pushStatusLog("[jav] batch done: " + items.length + " queued");
+      return { ok: true, total: items.length, dropped, codes: items };
     },
 
     openBrowser: async () => { toast("Built-in browser would open here (demo)"); return { ok: true }; },
@@ -434,7 +467,7 @@
     it.retryable = false;
   }
 
-  function enqueue(urls) {
+  function enqueue(urls, extra) {
     for (const raw of urls) {
       const u = String(raw);
       const name = decodeURIComponent((u.split("/").pop() || "download").split("?")[0]) || "download";
@@ -446,6 +479,7 @@
         total: Math.round((30 + Math.random() * 900) * MB), received: 0, speed: 0,
         status: startNow ? "running" : "queued",
         dirOverride: rule && rule.folder ? rule.folder : null,
+        javStage: (extra && extra.javStage) || null,
         _windowBypass: !!(rule && rule.start),
         proxy: proxyFor(u) });
     }

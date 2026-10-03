@@ -457,7 +457,7 @@ const SELF_GOLDEN = {
   selHandlers: [{ id: "dlsBody", ref: "closest(input[data-sel])" }],
   selEmitters: [{ fn: "rowHtml", checkbox: true }],
   selPathVia: ["render"],
-  shimExposed: 42 // 41 + javAdd (the queue-panel JAV-code input, mirrors preload.js)
+  shimExposed: 43 // 42 + javAddBatch (the queue panel's batch mode, mirrors preload.js)
 };
 
 const sorted = (xs) => [...xs].sort();

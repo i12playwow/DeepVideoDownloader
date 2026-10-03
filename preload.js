@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld("api", {
   // enqueues the resolved stream into the app queue. Fire-and-forget: returns {ok, slug}
   // when the resolve STARTS; progress shows up as a normal row in the Downloads table.
   javAdd: (code, dirOverride) => ipcRenderer.invoke("jav-add", code, dirOverride || null),
+  // Batch variant: a pasted list of codes resolves one at a time under the same
+  // fire-and-forget contract — {ok, total, dropped, codes} acks the accepted list
+  // while each code's [jav] lines stream into the Status log, ending with a summary.
+  javAddBatch: (codes, dirOverride) => ipcRenderer.invoke("jav-add-batch", codes, dirOverride || null),
   moveDownload: (id, destDir) => ipcRenderer.invoke("download-move", id, destDir),
   schedule: (data) => ipcRenderer.invoke("download-schedule", data),
   testProxies: (url) => ipcRenderer.invoke("test-proxies", url),

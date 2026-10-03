@@ -264,6 +264,10 @@ function extractSurrit(html) {
 
 // --------------------------------------------------------------- resolution
 async function resolveBySlug(slug, ctx) {
+  // Optional miss-reason collector (ctx.missLog): the app's jav-add passes one
+  // so a not-found receipt can say WHERE the chain died; the CLI passes
+  // nothing and is byte-for-byte unchanged.
+  const missLog = ctx && ctx.missLog;
   for (const suffix of SLUG_SUFFIXES) {
     const url = SITE + "/en/" + slug + suffix;
     let page;
@@ -271,6 +275,7 @@ async function resolveBySlug(slug, ctx) {
       page = await fetchPage(url);
     } catch (err) {
       if (err.category === "requires-browser") throw err;
+      if (missLog) missLog.push("slug:404");
       continue; // 404s etc: next suffix
     }
     // Some pages carry the stream in plain form; others (packer-obfuscated) need
@@ -278,13 +283,14 @@ async function resolveBySlug(slug, ctx) {
     // 404 pages; real pages are ~344 KB. resolveMissav refetches the FINAL url
     // itself (one extra fetch per real hit, none for misses).
     const surrit = extractSurrit(page.html);
-    if (surrit) return { m3u8: surrit, slug: slug + suffix };
-    if (page.html.length < 10000) continue;
+    if (surrit) return { m3u8: surrit, slug: slug + suffix, stage: "slug" };
+    if (page.html.length < 10000) { if (missLog) missLog.push("slug:shell"); continue; }
     try {
       const r = await resolveMissav(page.finalUrl, ctx, { Referer: SITE + "/" });
-      return { m3u8: r.resolvedUrl, title: r.title, slug: slug + suffix };
+      return { m3u8: r.resolvedUrl, title: r.title, slug: slug + suffix, stage: "slug" };
     } catch (err) {
       if (/Cloudflare/.test(err.message)) throw err; // bridge exhausted: stop sweeping
+      if (missLog) missLog.push("slug:no-stream");
       continue; // extraction miss (404 shape etc): next suffix
     }
   }
@@ -294,18 +300,19 @@ async function resolveBySlug(slug, ctx) {
 // MissAV's own search page: different slug spelling, same site. Plain fetch of
 // /en/search/<code> is JS-rendered, so this only pays off when the SSR'd HTML
 // already carries result links; the cf-browser bridge body may carry more.
-async function resolveBySearchPage(code, ctx) {
+async function resolveBySearchPage(code, ctx, missLog) {
   const url = SITE + "/en/search/" + code;
   let html = "";
   try {
     html = (await fetchPage(url)).html;
-  } catch { return null; }
+  } catch { if (missLog) missLog.push("search: page unreachable (404/CF)"); return null; }
   // result anchors: /en/<slug> whose nearby text contains the code
   const re = /href="\/en\/([a-z0-9-]+)\/?"[^>]*>([^<]{0,200})/gi;
   let m;
   while ((m = re.exec(html)) !== null) {
     if (m[2].toLowerCase().includes(code.toLowerCase())) return m[1];
   }
+  if (missLog) missLog.push("search: no result anchors");
   return null;
 }
 
@@ -378,22 +385,25 @@ async function renderEmbedForStream(page) {
 }
 
 // Full fallback chain. Returns {m3u8, label, referer} or null.
-async function fallbackResolve(code, slug) {
+async function fallbackResolve(code, slug, missLog) {
   const ctx = { proxyManager: null, config: { maxRetries: 2 }, paceHost: null };
   log("  MissAV slugs exhausted; trying search fallback ...");
-  const hit = await resolveBySearchPage(code, ctx);
+  const hit = await resolveBySearchPage(code, ctx, missLog);
   if (hit) {
     log("  missav search: " + code + " -> /en/" + hit);
     try {
       const page = await fetchPage(SITE + "/en/" + hit);
       const m3u8 = extractSurrit(page.html);
-      if (m3u8) return { m3u8, label: slug + " (" + hit + ")", referer: SITE + "/" };
+      if (m3u8) return { m3u8, label: slug + " (" + hit + ")", referer: SITE + "/", stage: "search" };
     } catch { /* fall through to mirrors */ }
     log("  missav search hit /en/" + hit + " but its stream never surfaced; trying mirror lookup ...");
+    if (missLog) missLog.push("search: hit /en/" + hit + ", no stream surfaced");
   } else {
     log("  missav search: no hit; trying mirror lookup (wayback index) ...");
   }
-  for (const pageUrl of await mirrorPageUrls(code)) {
+  const mirrors = await mirrorPageUrls(code);
+  if (missLog) missLog.push("mirror: " + mirrors.length + " wayback row" + (mirrors.length === 1 ? "" : "s"));
+  for (const pageUrl of mirrors) {
     log("  mirror page: " + pageUrl.slice(0, 100));
     let embeds;
     try {
@@ -404,10 +414,11 @@ async function fallbackResolve(code, slug) {
     for (const embed of ordered) {
       log("  rendering " + embed.kind + " embed: " + embed.url);
       const m3u8 = await renderEmbedForStream(embed.url);
-      if (m3u8) return { m3u8, label: slug + " (mirror)", referer: embed.url };
+      if (m3u8) return { m3u8, label: slug + " (mirror)", referer: embed.url, stage: "mirror" };
     }
     log("  mirror embeds dead or DRM-walled: " + embeds.slice(0, 3).map((e) => e.url).join(", "));
     log("  (these third-party links may still work in a real browser + IDM)");
+    if (missLog) missLog.push("mirror: embeds dead/DRM-walled");
   }
   return null;
 }

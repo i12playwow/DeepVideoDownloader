@@ -153,6 +153,22 @@ body {
 
 .jav-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
 .jav-code { flex: 1 1 260px; min-width: 200px; }
+/* Stage badge on rows the queue panel's JAV-code input enqueued: names the
+   jav-dl chain stage that resolved the stream (slug sweep / missav search /
+   wayback mirror / python engine). */
+.jav-stage {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 7px;
+  border-radius: 9px;
+  font-size: 10.5px;
+  line-height: 16px;
+  vertical-align: 1px;
+  background: rgba(59, 130, 246, 0.14);
+  color: var(--accent-hover, #60a5fa);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  white-space: nowrap;
+}
 .toolbar-left, .toolbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }

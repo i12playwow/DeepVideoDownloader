@@ -272,6 +272,22 @@ async function testJavAdd() {
   const shimSrc = fs.readFileSync(path.join(__dirname, "demo-api-shim.js"), "utf8");
   assert("demo shim mirrors javAdd", shimSrc.includes("javAdd:"), "demo parity");
 
+  // Stage display plumbing: the CLI chain names the stage that landed, the app
+  // carries it on the item (and its history entry), and the table badges it.
+  const javSrc = fs.readFileSync(path.join(__dirname, "scripts", "jav-dl.js"), "utf8");
+  assert("CLI chain reports its stage", javSrc.includes('stage: "slug"') && javSrc.includes('stage: "search"') && javSrc.includes('stage: "mirror"'),
+    "resolveBySlug/fallbackResolve must name the stage that landed the stream");
+  assert("CLI chain collects miss reasons", javSrc.includes("missLog.push(\"slug:404\")") && javSrc.includes("missLog.push(\"search: no result anchors\")"),
+    "per-stage miss tags must feed the not-found receipt");
+  const dlSrc = fs.readFileSync(path.join(__dirname, "downloader.js"), "utf8");
+  assert("queue item + history entry carry javStage", dlSrc.includes("javStage: javStage || null") && dlSrc.includes("javStage: item.javStage || \"\""),
+    "the item and its history entry must persist the stage so the badge survives a restart");
+  assert("renderer badges the stage", rendererSrc.includes("JAV_STAGE_LABELS") && rendererSrc.includes("jav-stage"),
+    "the table must render a stage chip on jav rows");
+  const cssSrc = fs.readFileSync(path.join(__dirname, "styles.css"), "utf8");
+  assert("stage chip styled", cssSrc.includes(".jav-stage"), "styles.css must style .jav-stage");
+  assert("demo shim tags jav items with a stage", shimSrc.includes('javStage: "slug"'), "demo parity");
+
   // Functional half: a mock MissAV + a fake app ctx. The CLI module is dropped
   // from the require cache FIRST so the handler's lazy require re-reads
   // JAVDL_SITE/JAVDL_CDX_BASE — its SITE/CDX constants bake at require time.
@@ -321,6 +337,7 @@ async function testJavAdd() {
     assert("enqueue title is the resolved slug", e.title === "bvd-777", String(e.title));
     assert("enqueue referer is the mock SITE root", e.referer === process.env.JAVDL_SITE + "/", String(e.referer));
     assert("duplicates skip silently (markDuplicate:false)", e.markDuplicate === false, String(e.markDuplicate));
+    assert("enqueue carries the resolution stage (javStage)", e.javStage === "slug", String(e.javStage));
   }
   assert("status log carries the [jav] lines", logLines.some((l) => l === "[jav] resolving bvd-777 ...") && logLines.some((l) => l.startsWith("[jav] bvd-777 queued")), logLines.join(" | ").slice(0, 300));
 
@@ -331,11 +348,115 @@ async function testJavAdd() {
   while (Date.now() < deadline2 && !logLines.some((l) => l.includes("bvd-404: not found"))) await sleep(200);
   assert("miss reports not found", logLines.some((l) => l.includes("bvd-404: not found")), logLines.join(" | ").slice(0, 300));
   assert("miss enqueues nothing", enqueued.length === 1, "a dead code must never reach dm.enqueue");
+  // The not-found receipt must say WHERE the chain died, not just that it did:
+  // the slug sweep's per-suffix outcomes, the search page's verdict, the mirror
+  // (Wayback CDX) row count.
+  const missLine = logLines.find((l) => l.includes("bvd-404: not found"));
+  assert("not-found receipt names the per-stage reasons",
+    missLine && missLine.includes("slug sweep:") && missLine.includes("404")
+      && missLine.includes("search:") && missLine.includes("mirror: 0 wayback rows"),
+    String(missLine));
 
   mock.close();
   delete process.env.JAVDL_SITE;
   delete process.env.JAVDL_CDX_BASE;
   delete require.cache[require.resolve("./scripts/jav-dl.js")]; // later sections see the pristine module again
+}
+
+// ------------------------------------------------ 11 jav-add-batch wiring
+// The batch path reuses the single-code resolution arc (javValidateCode +
+// javResolveJob) behind a new channel: up-front validation, order-preserving
+// dedupe on the normalized slug, SERIAL resolution, per-code [jav] lines and a
+// closing batch-done summary. Same fake-ctx + mock-MissAV harness as section 10.
+async function testJavAddBatch() {
+  section("11: jav-add-batch app wiring (queue-panel batch mode)");
+  const ipcSrc = fs.readFileSync(path.join(__dirname, "lib", "ipc.js"), "utf8");
+  assert("jav-add-batch handler registered", ipcSrc.includes('ipcMain.handle("jav-add-batch"'), "no ipcMain.handle for jav-add-batch");
+  assert("batch reuses the single-code validate/job pair", ipcSrc.includes("await javResolveJob(") && ipcSrc.includes("javValidateCode("),
+    "the batch must drive the same validate/job pair the single-code path uses");
+  assert("batch resolves serially (one code at a time)", /for \(const it of items\) \{[\s\S]*?await javResolveJob\(/.test(ipcSrc),
+    "batch resolution must be one code at a time, not parallel");
+  assert("batch closes with a summary line", ipcSrc.includes("[jav] batch done:"), "the batch-done summary is the operator's receipt");
+  const preloadSrc = fs.readFileSync(path.join(__dirname, "preload.js"), "utf8");
+  assert("preload exposes javAddBatch -> jav-add-batch", preloadSrc.includes("javAddBatch:") && preloadSrc.includes('invoke("jav-add-batch"'), "preload must expose the batch channel");
+  const rendererSrc = fs.readFileSync(path.join(__dirname, "renderer.js"), "utf8");
+  assert("renderer splits a pasted list and calls the batch API", rendererSrc.includes("javParseCodes(") && rendererSrc.includes("window.api.javAddBatch("),
+    "the input must parse multi-code pastes and ride the exposed API");
+  assert("button label previews the parsed count", rendererSrc.includes("javSyncButtonLabel") && rendererSrc.includes("Queue \" + n + \" codes"),
+    "the Queue button must preview the batch count live");
+  const shimSrc = fs.readFileSync(path.join(__dirname, "demo-api-shim.js"), "utf8");
+  assert("demo shim mirrors javAddBatch", shimSrc.includes("javAddBatch:"), "demo parity");
+
+  // Functional half: same fake ctx + mock MissAV as section 10. BOTH caches are
+  // dropped so the handler's lazy require re-reads JAVDL_SITE and the fresh
+  // ipc module starts with a null javDlMod.
+  const mock = http.createServer((req, res) => {
+    if (req.url === "/en/bvd-777") {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html><body>stream https://surrit.com/bdd77700-1111-2222-3333-444444444444/playlist.m3u8 end</body></html>");
+      return;
+    }
+    if (req.url.startsWith("/cdx/")) { res.writeHead(200, { "Content-Type": "application/json" }); res.end("[]"); return; }
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("mock missav: not found");
+  });
+  await new Promise((r) => mock.listen(0, "127.0.0.1", r));
+  const mockPort = mock.address().port;
+  process.env.JAVDL_SITE = "http://127.0.0.1:" + mockPort;
+  process.env.JAVDL_CDX_BASE = "http://127.0.0.1:" + mockPort;
+  delete require.cache[require.resolve("./scripts/jav-dl.js")];
+  delete require.cache[require.resolve("./lib/ipc.js")];
+
+  const handlers = new Map();
+  const enqueued = [];
+  const logLines = [];
+  const fakeCtx = {
+    ipcMain: { handle: (c, fn) => handlers.set(c, fn), on: (c, fn) => handlers.set(c, fn) },
+    dm: { enqueue: async (opts) => { enqueued.push(opts); return "dl-jav-batch-1"; } },
+    statusLog: { recent: () => [], clear: () => {}, push: (l) => logLines.push(String(l)) }
+  };
+  const ipc = require("./lib/ipc.js");
+  ipc.registerIpc(fakeCtx);
+  const batch = handlers.get("jav-add-batch");
+  assert("registerIpc captures the jav-add-batch handler", typeof batch === "function", "jav-add-batch missing from the captured handler map");
+
+  // Contract guards: non-array and all-junk lists reject synchronously.
+  const na = batch(null, null, null);
+  assert("non-array rejected synchronously", na && na.ok === false && /list/i.test(na.error), JSON.stringify(na));
+  const empty = batch(null, [], null);
+  assert("empty list rejected synchronously", empty && empty.ok === false && /No usable JAV code/.test(empty.error), JSON.stringify(empty));
+
+  // The batch: a hit, a miss, a duplicate of the hit, and junk tokens. The
+  // duplicate and junk must collapse BEFORE any resolution; the ack names what
+  // actually queued for resolution (normalized, order kept).
+  const r = batch(null, ["BVD-777", "bvd-404", "bvd-777", "", "   ", 123], null);
+  assert("batch acks the accepted list immediately", r && r.ok === true && r.total === 2 && r.dropped === 1, JSON.stringify(r));
+  assert("batch ack normalizes and keeps order", JSON.stringify(r.codes) === JSON.stringify(["bvd-777", "bvd-404"]), JSON.stringify(r.codes));
+
+  // Serial resolution: the hit lands first (exact CLI-shaped enqueue), then the
+  // miss reports not-found — all before the batch-done summary closes the chain.
+  const deadline = Date.now() + 25000;
+  while (Date.now() < deadline && !logLines.some((l) => l.includes("[jav] batch done:"))) await sleep(200);
+  assert("batch-done summary arrives", logLines.some((l) => l.includes("[jav] batch done:")), logLines.join(" | ").slice(-400));
+  assert("summary counts 1 queued + 1 not resolved",
+    logLines.some((l) => l.includes("[jav] batch done: 1 queued, 1 not resolved (bvd-404)")), logLines.join(" | ").slice(-400));
+  assert("hit enqueued exactly once with the CLI shape",
+    enqueued.length === 1 && enqueued[0].url === "https://surrit.com/bdd77700-1111-2222-3333-444444444444/playlist.m3u8"
+      && enqueued[0].title === "bvd-777" && enqueued[0].markDuplicate === false && enqueued[0].javStage === "slug",
+    JSON.stringify(enqueued));
+  const i777 = logLines.findIndex((l) => l === "[jav] resolving bvd-777 ...");
+  const i404 = logLines.findIndex((l) => l === "[jav] resolving bvd-404 ...");
+  assert("serial order: the hit resolves before the miss", i777 !== -1 && i404 !== -1 && i777 < i404,
+    "resolving bvd-777 @ " + i777 + ", resolving bvd-404 @ " + i404);
+  assert("announce line names the batch",
+    logLines.some((l) => l.includes("[jav] batch: 2 codes") && l.includes("one at a time")),
+    logLines.slice(0, 4).join(" | "));
+
+  mock.close();
+  delete process.env.JAVDL_SITE;
+  delete process.env.JAVDL_CDX_BASE;
+  delete require.cache[require.resolve("./scripts/jav-dl.js")];
+  delete require.cache[require.resolve("./lib/ipc.js")]; // later sections see the pristine module again
 }
 
 // ------------------------------------------ 9 LIVE relay selftest + lifecycle
@@ -402,6 +523,7 @@ async function testRelayLive() {
   await testRelayEnabled();
   await testRelayLive();
   await testJavAdd();
+  await testJavAddBatch();
 })().then(() => {
   // Restore the caller's env (the suite mutated it heavily).
   for (const k of ENV_KEYS) {
