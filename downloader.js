@@ -1983,4 +1983,4 @@ class DownloadManager {
   }
 }
 
-module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, isSignedGetVideoExpired, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, pickHlsVariants, isIFrameOnlyPlaylist, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkHost, isJunkUrl, isBrowserUiUrl, canonicalKeys, findFfmpeg };
+module.exports = { DownloadManager, sanitizeName, requestWithRedirects, resolveUrl, isExpiredError, isSignedGetVideoExpired, categorizeError, resolveStreamtape, resolveSupjav, resolveCnPorn, resolveXVideos, resolveXHamster, isHlsUrl, parseHlsPlaylist, stripPngPrefix, pickHlsVariant, pickHlsVariants, isIFrameOnlyPlaylist, matchHlsMaster, isAdSegmentUrl, isJavNavPage, isJunkNavUrl, isJunkHost, isJunkUrl, isBrowserUiUrl, canonicalKeys, findFfmpeg };

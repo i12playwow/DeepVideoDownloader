@@ -207,6 +207,69 @@ async function main() {
     cf._state.fetchViaCfBrowser = orig;
   }
 
+  console.log("\n=== 5: packaged layout (script resolution, child env, packaging lists) ===\n");
+  {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cfb-pack-"));
+
+    // The bridge runs the script as a SEPARATE process, so a packaged build
+    // must hand it a real path: scripts/cf-browser.js ships asar-unpacked and
+    // the unpacked twin wins when it exists; dev runs (no process.resourcesPath)
+    // use the repo-relative path that resolveScriptPath() also exposes as SCRIPT.
+    assert("SCRIPT_RELATIVE names the runtime script",
+      cf._internal.SCRIPT_RELATIVE === path.join("scripts", "cf-browser.js"),
+      "got=" + cf._internal.SCRIPT_RELATIVE);
+    assert("dev SCRIPT is the tracked script on disk",
+      cf._internal.SCRIPT === path.join(__dirname, "scripts", "cf-browser.js") && fs.existsSync(cf._internal.SCRIPT),
+      "got=" + cf._internal.SCRIPT);
+
+    const fakeResources = path.join(tmp, "resources");
+    const fakeLib = path.join(fakeResources, "app.asar", "lib");
+    const inAsar = path.join(fakeResources, "app.asar", "scripts", "cf-browser.js");
+    const devResolved = cf._internal.resolveScriptPath({ dirname: fakeLib, resourcesPath: undefined });
+    assert("no resourcesPath (dev) -> repo-relative path", devResolved === inAsar, "got=" + devResolved);
+    const asarResolved = cf._internal.resolveScriptPath({ dirname: fakeLib, resourcesPath: fakeResources });
+    assert("packaged, no unpacked twin -> app.asar path (asar-aware child)", asarResolved === inAsar, "got=" + asarResolved);
+
+    const fakeUnpacked = path.join(fakeResources, "app.asar.unpacked", "scripts", "cf-browser.js");
+    fs.mkdirSync(path.dirname(fakeUnpacked), { recursive: true });
+    fs.writeFileSync(fakeUnpacked, "// stub");
+    const packedResolved = cf._internal.resolveScriptPath({ dirname: fakeLib, resourcesPath: fakeResources });
+    assert("packaged -> asar-unpacked twin preferred", packedResolved === fakeUnpacked, "got=" + packedResolved);
+
+    // The child is spawned via process.execPath, which inside the app is
+    // electron.exe: ELECTRON_RUN_AS_NODE makes it the plain Node runtime the
+    // script needs instead of a SECOND Electron app. Proved on the wire by a
+    // stub child that echoes its own environment.
+    const envStub = path.join(tmp, "stub-env.js");
+    fs.writeFileSync(envStub, [
+      "const html = '<html>node=' + String(process.env.ELECTRON_RUN_AS_NODE) + '</html>';",
+      "process.stdout.write('---CFB64---' + Buffer.from(html, 'utf8').toString('base64'));",
+      "process.exit(0);",
+    ].join("\n"));
+    cf._state.scriptPath = envStub;
+    cf._state.timeoutMs = 15000;
+    cf._state.lastWarmupFail = 0;
+    const envHtml = await cf.fetchViaCfBrowser("https://example.test/env");
+    assert("child spawned as plain Node (ELECTRON_RUN_AS_NODE=1)", envHtml === "<html>node=1</html>", "got=" + envHtml);
+    delete cf._state.scriptPath;
+    delete cf._state.timeoutMs;
+    cf._state.lastWarmupFail = 0;
+
+    // Packaging lists: the runtime script must ship inside the installer
+    // (build.files) as a real file (build.asarUnpack) with its only dependency
+    // ws unpacked next to it. check-release-drill.js enforces the same rule on
+    // every `npm run check`; these pins keep the expectation beside the code
+    // that needs it.
+    const build = require("./package.json").build || {};
+    const fileList = (build.files || []).map(String);
+    const unpackList = (build.asarUnpack || []).map(String);
+    assert("build.files ships the runtime script", fileList.includes("scripts/cf-browser.js"), "files=" + fileList.join(","));
+    assert("build.asarUnpack ships it as a real file", unpackList.includes("scripts/cf-browser.js"), "unpack=" + unpackList.join(","));
+    assert("build.asarUnpack ships ws with it", unpackList.some((e) => e.startsWith("node_modules/ws")), "unpack=" + unpackList.join(","));
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 }

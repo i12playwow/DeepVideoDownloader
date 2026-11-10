@@ -18,6 +18,7 @@ const { statusPayload } = require("./lib/status");
 const { createSettings } = require("./lib/settings");
 const { createBuiltinBrowser } = require("./lib/browser");
 const { registerIpc } = require("./lib/ipc");
+const { createCrawlRunner } = require("./lib/crawl-runner");
 
 // Dev builds read/write config.json next to main.js (gitignored). Packaged
 // apps must NOT write into the read-only app.asar — use the writable userData
@@ -222,6 +223,14 @@ function clientSnapshot() {
     protocolVersion: wsBridge.PROTOCOL_VERSION,
     clients
   };
+}
+
+// Web crawl snapshots: one per page (plus start/stop), pushed to the window.
+// The sender lives here (not in lib/) so the IPC surface stays reviewable in
+// one place — the same rule the other pushes follow.
+function pushCrawl(snapshot) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send("crawl-progress", snapshot); } catch (e) { /* window closing */ }
 }
 
 function pushClients() {
@@ -738,6 +747,24 @@ if (gotLock) {
   // All renderer/extension channels live in lib/ipc.js; this ctx object is
   // the seam between the module and the app state main.js owns (settings,
   // proxyManager, the built-in browser's tabs/timers).
+  // The crawl controller the window drives: lib/crawl.js for traversal, the
+  // app fetch stack + guards for the pages, and dm.enqueue for Queue-found.
+  const crawl = createCrawlRunner({
+    emit: pushCrawl,
+    enqueue: async (items) => {
+      let added = 0, skipped = 0;
+      for (const it of items) {
+        try {
+          const u = new URL(it.url);
+          const title = u.pathname.split("/").filter(Boolean).pop() || u.hostname;
+          await dm.enqueue({ url: it.url, title, referer: it.referer || "", markDuplicate: true });
+          added++;
+        } catch (e) { /* per-URL guard/dup rejection — counted, not fatal */ skipped++; }
+      }
+      return { added, skipped };
+    },
+  });
+
   registerIpc({
     ipcMain,
     shell,
@@ -752,6 +779,7 @@ if (gotLock) {
       install: (b) => launchExtensionInBrowser(b)
     },
     bv: browser.bv,
+    crawl,
     bridge: { snapshot: clientSnapshot, push: pushClients }
   });
 

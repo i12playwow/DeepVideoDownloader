@@ -185,6 +185,46 @@
     };
   }
 
+  // ---- web crawl (demo) -------------------------------------------------
+  // Mirrors lib/crawl-runner.js's snapshot shape (and its start/stop rules),
+  // walking a few fake pages on a timer so the panel shows live progress
+  // without a real crawl. Stops at page 3 like a site whose list ends.
+  let crawlCb = null;
+  let crawlRun = null;
+  const CRAWL_SITE = [
+    { page: "https://demo.test/list", found: [
+      { url: "https://demo.test/v/demo-1080p.mp4", kind: "media", referer: "https://demo.test/list" },
+      { url: "https://demo.test/watch/12345", kind: "page", referer: "https://demo.test/list" } ] },
+    { page: "https://demo.test/list?page=2", found: [
+      { url: "https://cdn.demo.test/stream/master.m3u8", kind: "media", referer: "https://demo.test/list?page=2" } ] },
+    { page: "https://demo.test/list?page=3", found: [] }
+  ];
+  function crawlSnapshot() {
+    const r = crawlRun;
+    if (!r) return { running: false, done: false, stopped: false, start: [], pages: 0, fetched: 0, failed: 0, found: [], rejected: 0, retries: 0, waitedMs: 0, currentUrl: "", lastError: "", truncated: false };
+    return { running: !r.done, done: r.done, stopped: !!r.stopped, start: r.start, pages: r.pages, fetched: r.fetched,
+      failed: r.failed, found: r.found.slice(), rejected: r.rejected, retries: 0,
+      waitedMs: r.pages * (r.delayMs || 0), currentUrl: r.currentUrl, lastError: r.lastError, truncated: false };
+  }
+  function crawlPush() { if (crawlCb) crawlCb(crawlSnapshot()); }
+  function crawlStep() {
+    const r = crawlRun;
+    if (!r || r.done) return;
+    if (r.stopped || r.step >= CRAWL_SITE.length) {
+      r.done = true;
+      crawlPush();
+      return;
+    }
+    const step = CRAWL_SITE[r.step++];
+    r.pages++;
+    r.fetched++;
+    r.rejected += step.page.includes("page=2") ? 2 : 1;
+    for (const f of step.found) r.found.push(f);
+    r.currentUrl = step.page;
+    crawlPush();
+    r.timer = setTimeout(crawlStep, 900);
+  }
+
   // ---- the mock bridge --------------------------------------------------
   const api = {
     onUpdate: (cb) => { updateCb = cb; },
@@ -192,6 +232,7 @@
     onClipboardUrl: (cb) => { clipboardCb = cb; },
     onFileOpened: (cb) => { fileCb = cb; },
     onClients: (cb) => { clientsCb = cb; },
+    onCrawl: (cb) => { crawlCb = cb; },
 
     getSettings: async () => clone(settings),
     saveSettings: async (s) => { Object.assign(settings, s); return { ok: true }; },
@@ -200,6 +241,35 @@
     bandwidthStats: async () => bandwidthStats(),
 
     listClients: async () => bridgeSnapshot(),
+
+    startCrawl: async (opts) => {
+      const o = opts || {};
+      const urls = (Array.isArray(o.urls) ? o.urls : [o.urls]).map((u) => String(u || "").trim()).filter(Boolean);
+      if (!urls.length) return { ok: false, error: "no start URL" };
+      if (crawlRun && !crawlRun.done) return { ok: false, error: "a crawl is already running" };
+      if (urls.some((u) => !/^https?:\/\//i.test(u))) return { ok: false, error: "not an http(s) URL: " + urls[0] };
+      crawlRun = { start: urls, pages: 0, fetched: 0, failed: 0, found: [], rejected: 0, done: false, stopped: false,
+        step: 0, currentUrl: urls[0], lastError: "", delayMs: Number(o.delayMs) || 0, timer: 0 };
+      crawlPush();
+      crawlRun.timer = setTimeout(crawlStep, 400);
+      return { ok: true, urls };
+    },
+    stopCrawl: async () => {
+      if (!crawlRun || crawlRun.done) return { ok: false, error: "no crawl is running" };
+      crawlRun.stopped = true;
+      crawlRun.done = true;
+      if (crawlRun.timer) clearTimeout(crawlRun.timer);
+      crawlPush();
+      return { ok: true };
+    },
+    crawlStatus: async () => crawlSnapshot(),
+    queueCrawl: async (list) => {
+      const items_ = (Array.isArray(list) ? list : []).filter((i) => i && i.url);
+      if (!items_.length) return { ok: false, error: "nothing to queue" };
+      enqueue(items_.map((i) => i.url));
+      toast("Queued " + items_.length + " crawl finding(s) (demo)")
+      return { ok: true, added: items_.length, skipped: 0 };
+    },
     getActiveDir: async () => settings.downloadDir,
     chooseDir: async () => "C:\\Users\\Demo\\Downloads\\Picked",
     openDir: async () => { toast("Opening folder (demo)"); return { ok: true }; },
@@ -427,6 +497,7 @@
   window.__demo = {
     api,
     fireClients: () => { if (clientsCb) clientsCb(bridgeSnapshot()); },
+    crawl: () => crawlSnapshot(),
     fireClipboard: (url) => { if (clipboardCb) clipboardCb({ url }); },
     fireFileOpened: (path, name) => { if (fileCb) fileCb({ path, name }); },
     get state() { return { items: items.map((i) => ({ id: i.id, status: i.status, received: i.received })), history: history.length }; }

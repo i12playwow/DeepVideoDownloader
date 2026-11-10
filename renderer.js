@@ -569,6 +569,77 @@ async function loadClients() {
 
 window.api.onClients((snap) => renderBridge(snap));
 
+// ---------------- web crawl ----------------
+// The window end of lib/crawl-runner.js: Start posts the form to main, every
+// page arrives as a crawl-progress push, and Queue found hands the discovered
+// URLs (with the page each was found on) to the download engine.
+function crawlRowHtml(f) {
+  const kind = f.kind === "page" ? "page" : "media";
+  return `<li class="crawl-row"><span class="crawl-kind ${kind}" title="${kind === "media" ? "Direct media URL" : "Detail page the engine resolves"}">${kind}</span><span class="crawl-url" title="${esc(f.url)}">${esc(f.url)}</span><span class="crawl-ref">${esc(f.referer || "")}</span></li>`;
+}
+function renderCrawl(snap) {
+  const s = snap || {};
+  const found = s.found || [];
+  const status = $("crawlStatus");
+  if (status) {
+    status.classList.toggle("client-warn", !!s.lastError && !s.running);
+    status.textContent = s.running
+      ? `crawling \u00b7 ${s.pages} page(s) \u00b7 ${found.length} found${s.rejected ? ` \u00b7 ${s.rejected} skipped` : ""}`
+      : s.done
+        ? `${s.stopped ? "stopped" : "done"} \u00b7 ${s.pages} page(s) \u00b7 ${found.length} found${s.failed ? ` \u00b7 ${s.failed} failed` : ""}`
+        : "idle";
+    status.title = s.lastError || (s.running ? s.currentUrl : "");
+  }
+  const startBtn = $("crawlStart");
+  const stopBtn = $("crawlStop");
+  if (startBtn) startBtn.disabled = !!s.running;
+  if (stopBtn) stopBtn.disabled = !s.running;
+  const list = $("crawlFound");
+  if (!list) return;
+  list.innerHTML = found.length
+    ? found.map(crawlRowHtml).join("")
+    : `<li class="client-empty">${s.running ? "Crawling\u2026" : "No crawl yet."}</li>`;
+}
+async function startCrawl() {
+  const urls = ($("crawlUrl").value || "").split(/\s*\n\s*/).map((x) => x.trim()).filter(Boolean);
+  const res = await window.api.startCrawl({
+    urls,
+    follow: $("crawlFollow").value,
+    collect: $("crawlCollect").value,
+    maxPages: Number($("crawlMaxPages").value) || 25,
+    delayMs: Number($("crawlDelay").value) || 0,
+    sameHostOnly: !$("crawlAnyHost").checked
+  });
+  if (!res || !res.ok) {
+    const status = $("crawlStatus");
+    if (status) {
+      status.classList.add("client-warn");
+      status.textContent = "\u26a0 " + ((res && res.error) || "could not start the crawl");
+    }
+    return;
+  }
+  renderCrawl(await window.api.crawlStatus());
+}
+async function queueFound() {
+  const snap = await window.api.crawlStatus();
+  const items = (snap && snap.found) || [];
+  if (!items.length) return;
+  const res = await window.api.queueCrawl(items);
+  showToast(
+    res && res.ok
+      ? `Queued ${res.added} of ${items.length}` + (res.skipped ? ` (${res.skipped} skipped)` : "")
+      : "Could not queue the crawl findings: " + ((res && res.error) || "unknown error"),
+    []
+  );
+}
+if ($("crawlStart")) $("crawlStart").addEventListener("click", startCrawl);
+if ($("crawlStop")) $("crawlStop").addEventListener("click", () => window.api.stopCrawl());
+if ($("crawlQueue")) $("crawlQueue").addEventListener("click", queueFound);
+window.api.onCrawl && window.api.onCrawl((snap) => renderCrawl(snap));
+async function loadCrawl() {
+  try { renderCrawl(await window.api.crawlStatus()); } catch (e) { /* not wired (demo) */ }
+}
+
 // ---------------- settings ----------------
 async function loadSettings() {
   const s = await window.api.getSettings();
@@ -895,6 +966,7 @@ loadAll();
 loadHistory();
 updateBandwidth();
 loadClients();
+loadCrawl();
 setInterval(loadAll, 5000);
 setInterval(updateBandwidth, 5000);
 setInterval(loadClients, 5000);

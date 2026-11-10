@@ -28,6 +28,16 @@ for (const d of ["extension", "extension-firefox"]) {
     files.push(path.join(dir, f));
   }
 }
+// scripts/ holds the repo's runnable tools (boot-verify, cf-browser, the
+// catalog bridge, web-crawl, the build gates). web-crawl.js and cf-browser.js
+// are also loaded by the app/tests, but only here is EVERY one of them
+// syntax-checked before anything runs.
+const scriptsDir = path.join(__dirname, "scripts");
+if (fs.existsSync(scriptsDir)) {
+  for (const f of fs.readdirSync(scriptsDir)) {
+    if (f.endsWith(".js")) files.push(path.join(scriptsDir, f));
+  }
+}
 for (const f of fs.readdirSync(__dirname)) if (/^test-.*\.js$/.test(f)) files.push(path.join(__dirname, f));
 
 let fail = 0;

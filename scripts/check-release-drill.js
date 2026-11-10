@@ -1,5 +1,5 @@
 "use strict";
-// Enforces the AGENTS.md release checklist. Two independent gates:
+// Enforces the AGENTS.md release checklist. Three independent gates:
 //
 // 1. BUNDLE SOURCE - the tracked ffmpeg binary is the ONLY source of the
 //    resources/ffmpeg.exe that ships in the installer (package.json
@@ -18,8 +18,18 @@
 //    to a green boot-verify drill run (local output or a CI run URL). The
 //    offline gates never boot the app, so the drill is the only real-app gate.
 //    This gate skips gracefully when git history is unavailable (shallow CI
-//    clones) so `npm run check` never breaks for external reasons; gate 1 needs
-//    no git and always runs.
+//    clones) so `npm run check` never breaks for external reasons; gates 1 and
+//    3 need no git and always run.
+//
+// 3. RUNTIME SCRIPT PACKAGED - lib/cf-fallback.js spawns scripts/cf-browser.js
+//    as a separate process at runtime. build.files is an EXPLICIT list (it
+//    replaces electron-builder's default "**/*"), so a script that is not
+//    listed is simply absent from the installer while the dev tree keeps
+//    working - every Cloudflare fallback then dies in spawn() and silently
+//    degrades to "requires-browser", exactly the silent-in-dev/absent-in-the-
+//    installer class as the ffmpeg bundle in gate 1. The child is a separate
+//    process, so the script ships asar-UNPACKED; ws (its only dependency) must
+//    be unpacked next to it or the child cannot require it.
 // NOTE: regexes deliberately use [0-9]/[ ]/[.] classes - no backslash escapes.
 const fs = require("fs");
 const path = require("path");
@@ -35,6 +45,77 @@ function git(args) {
     return execFileSync("git", args, { cwd: ROOT, encoding: "utf8" }).trim();
   } catch (e) {
     return null; // no git / shallow clone / bare env: skip enforcement
+  }
+}
+
+// Minimal glob matcher for the build lists: "**" crosses path separators,
+// "*" does not. Entries are app-dir-relative POSIX-ish paths.
+function globToRe(entry) {
+  const esc = String(entry).split(path.sep).join("/").replace(/^\.\//, "");
+  let re = "";
+  for (let i = 0; i < esc.length; i++) {
+    const c = esc[i];
+    if (c === "*") {
+      if (esc[i + 1] === "*") { re += ".*"; i++; } else { re += "[^/]*"; }
+    } else if ("\\^$.|?+()[]{}".includes(c)) {
+      re += "\\" + c;
+    } else {
+      re += c;
+    }
+  }
+  return new RegExp("^" + re + "$");
+}
+
+// True when a package.json build list (files / asarUnpack) ships `rel`:
+// exact match, a directory entry that contains it, or a glob that matches it.
+function listCovers(list, rel) {
+  const norm = String(rel).split(path.sep).join("/");
+  return (list || []).some((entry) => {
+    const e = String(entry).split(path.sep).join("/").replace(/^\.\//, "").replace(/\/+$/, "");
+    if (e === norm) return true;
+    if (norm.startsWith(e + "/")) return true;
+    return e.includes("*") && globToRe(e).test(norm);
+  });
+}
+
+// ---- gate 3: every runtime-spawned script ships in the installer ----
+function checkRuntimeScripts() {
+  const build = require("../package.json").build || {};
+  const files = build.files || [];
+  const unpacked = build.asarUnpack || [];
+  const rel = require("../lib/cf-fallback")._internal.SCRIPT_RELATIVE;
+  const scriptAbs = path.join(ROOT, rel);
+  let bad = false;
+
+  if (!fs.existsSync(scriptAbs)) {
+    console.log("FAIL runtime script gate: " + rel + " is missing from the working tree");
+    failed = true;
+    return;
+  }
+  if (!listCovers(files, rel)) {
+    console.log("FAIL runtime script gate: " + rel + " is not covered by package.json build.files");
+    console.log("     lib/cf-fallback.js spawns it as a separate process at runtime, and files is an");
+    console.log("     explicit list - the dev tree works, the INSTALLER has no such file and every");
+    console.log("     Cloudflare fallback degrades to requires-browser. Add \"" + rel.replace(/\\/g, "/") + "\" to build.files.");
+    failed = true;
+    bad = true;
+  }
+  if (!listCovers(unpacked, rel)) {
+    console.log("FAIL runtime script gate: " + rel + " is not asar-UNPACKED (package.json build.asarUnpack)");
+    console.log("     The child is a separate process: it needs a real file path, not app.asar/" + rel.replace(/\\/g, "/") + ".");
+    console.log("     Add \"" + rel.replace(/\\/g, "/") + "\" to build.asarUnpack.");
+    failed = true;
+    bad = true;
+  }
+  if (!listCovers(unpacked, "node_modules/ws/index.js")) {
+    console.log("FAIL runtime script gate: node_modules/ws is not asar-UNPACKED next to the script");
+    console.log("     The child requires ws; from an unpacked path Node cannot see app.asar/node_modules.");
+    console.log("     Add \"node_modules/ws/**\" to build.asarUnpack.");
+    failed = true;
+    bad = true;
+  }
+  if (!bad) {
+    console.log("OK   runtime script gate (" + rel.replace(/\\/g, "/") + " packaged, asar-unpacked with ws)");
   }
 }
 
@@ -108,5 +189,6 @@ function checkDrillEvidence() {
 }
 
 checkBundleSource();
+checkRuntimeScripts();
 checkDrillEvidence();
 process.exit(failed ? 1 : 0);

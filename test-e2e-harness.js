@@ -2122,6 +2122,92 @@ function startServer(portRef, segBytesFn) {
     client.close(); wssU.close();
   }
 
+  console.log("\n-- V: web crawl contract --");
+  {
+    // Behavioral first: drive the real runner with an injected page fetcher, so
+    // this pins the app-side semantics (not just the source wiring).
+    const { createCrawlRunner, isRejectedUrl } = require("./lib/crawl-runner");
+    const pages = {
+      "http://site.test/list": '<a href="/v/a.mp4">A</a><a href="/watch/12345">W</a><a href="/list?page=2">Next</a>',
+      "http://site.test/list?page=2": '<a href="/v/b.mp4">B</a>'
+    };
+    const fetched = [];
+    const snaps = [];
+    const runner = createCrawlRunner({
+      emit: (s) => snaps.push(s),
+      fetchPageFor: () => async (url) => {
+        fetched.push(url);
+        if (!pages[url]) { const e = new Error("HTTP 404"); e.status = 404; throw e; }
+        return { status: 200, headers: {}, body: pages[url], finalUrl: url };
+      },
+      enqueue: async (items) => ({ added: items.length, skipped: 0 })
+    });
+    assert("V invalid start URL is refused", runner.start({ urls: ["not-a-url"] }).ok === false &&
+      runner.start({ urls: [] }).ok === false);
+    assert("V runner starts a crawl", runner.start({ urls: ["http://site.test/list"], delayMs: 0, maxPages: 5, collect: "pages" }).ok === true);
+    assert("V a second start is refused while running", runner.start({ urls: ["http://site.test/list"] }).ok === false);
+    await runner.settled();
+    const fin = runner.status();
+    assert("V the crawl walks the pagination chain",
+      fetched.join(" ") === "http://site.test/list http://site.test/list?page=2", fetched.join(" "));
+    assert("V findings carry kind + the page they were found on",
+      fin.found.length === 3 && fin.found.filter((f) => f.kind === "media").length === 2 &&
+      fin.found.filter((f) => f.kind === "page" && f.url === "http://site.test/watch/12345").length === 1 &&
+      fin.found.filter((f) => f.referer === "http://site.test/list").length === 2,
+      JSON.stringify(fin.found));
+    assert("V the snapshot is IPC-serializable (no promise/functions)",
+      typeof JSON.stringify(fin) === "string" && fin.promise === undefined && fin.running === false && fin.done === true);
+    assert("V progress snapshots were emitted per page", snaps.length >= 3 && snaps[0].running === true, "snaps=" + snaps.length);
+    const q = await runner.queue(fin.found);
+    assert("V queue-found reaches the engine seam", q.ok === true && q.added === 3, JSON.stringify(q));
+    assert("V queue rejects an empty list", (await runner.queue([])).ok === false);
+
+    const r2 = createCrawlRunner({
+      emit: () => {},
+      fetchPageFor: () => async (url) => ({ status: 200, headers: {}, body: '<a href="/list?page=2">Next</a>', finalUrl: url })
+    });
+    r2.start({ urls: ["http://site.test/list"], delayMs: 0, maxPages: 5 });
+    assert("V Stop is accepted while running", r2.stop().ok === true);
+    await r2.settled();
+    assert("V a stopped crawl stops at the page boundary",
+      r2.status().stopped === true && r2.status().running === false && r2.status().pages === 1,
+      JSON.stringify({ stopped: r2.status().stopped, pages: r2.status().pages }));
+    assert("V Stop on an idle runner is refused", r2.stop().ok === false);
+
+    // Source pins: the window surface, the sender, and the shared stack.
+    const ipcSrc = fs.readFileSync("lib/ipc.js", "utf8");
+    const mainSrc = fs.readFileSync("main.js", "utf8");
+    const rendererSrc = fs.readFileSync("renderer.js", "utf8");
+    const runnerSrc = fs.readFileSync("lib/crawl-runner.js", "utf8");
+    const cliSrc = fs.readFileSync("scripts/web-crawl.js", "utf8");
+    assert("V ipc delegates the four channels to the runner",
+      /crawl-start[^]*?crawl\.start/.test(ipcSrc) && /crawl-stop[^]*?crawl\.stop/.test(ipcSrc) &&
+      /crawl-status[^]*?crawl\.status/.test(ipcSrc) && /crawl-queue[^]*?crawl\.queue/.test(ipcSrc));
+    assert("V main.js sends the crawl-progress push from the window",
+      /webContents\.send\("crawl-progress"/.test(mainSrc));
+    assert("V main.js queues findings with their referer as a duplicate-marked enqueue",
+      /referer:\s*it\.referer/.test(mainSrc) && /markDuplicate:\s*true/.test(mainSrc));
+    // Each value must come from its own input: a dropped field silently runs
+    // the crawl with the wrong shape (wrong host scope, wrong budget).
+    assert("V the window posts the whole crawl form from its inputs",
+      /window\.api\.startCrawl\(/.test(rendererSrc) &&
+      /follow:\s*\$\("crawlFollow"\)\.value/.test(rendererSrc) &&
+      /collect:\s*\$\("crawlCollect"\)\.value/.test(rendererSrc) &&
+      /maxPages:\s*Number\(\$\("crawlMaxPages"\)\.value\)/.test(rendererSrc) &&
+      /delayMs:\s*Number\(\$\("crawlDelay"\)\.value\)/.test(rendererSrc) &&
+      /sameHostOnly:\s*!\$\("crawlAnyHost"\)\.checked/.test(rendererSrc) &&
+      /window\.api\.queueCrawl\(/.test(rendererSrc) && /onCrawl/.test(rendererSrc));
+    assert("V the runner is built on the app stack (http + CF fallback + guards + engine)",
+      /require\("\.\/http"\)/.test(runnerSrc) && /require\("\.\/cf-fallback"\)/.test(runnerSrc) &&
+      /require\("\.\/crawl"\)/.test(runnerSrc) && /require\("\.\.\/downloader"\)/.test(runnerSrc));
+    assert("V the CLI reuses the runner's fetcher and guards (one definition)",
+      /require\("\.\.\/lib\/crawl-runner"\)/.test(cliSrc) && !/function makeFetchPage/.test(cliSrc));
+    assert("V the crawl suite is wired into npm test",
+      /test-web-crawl\.js/.test(require("./package.json").scripts.test));
+    assert("V the guard composition is the engine's, not a local list",
+      isRejectedUrl("https://github.com/x") === true && isRejectedUrl("http://site.test/v/1.mp4") === false);
+  }
+
   server.close();
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log("\n=== " + passed + " passed, " + failed + " failed, " + skipped + " skipped ===\n");

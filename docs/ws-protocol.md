@@ -436,7 +436,9 @@ there*, not in the protocol they are then allowed to use:
   that can carry a real page `cookieHeader` gathered from the extension's
   partition, and the only client the app treats as the capture source for
   auto-grab (`dv-auto-grab` / `dv-monitor-grab` / `dv-close-tab`).
-- **Native loopback client** — a local tool or test process. It is trusted only
+- **Native loopback client** — a local tool or test process (the shipped ones are
+  `scripts/newtv-catalog-bridge.js`, `mcp-server.js`, and `scripts/web-crawl.js
+  --enqueue`). It is trusted only
   by virtue of being on the same machine and connecting to the loopback port
   without an Origin header. It has the same enqueue/probe/ping/monitor surface,
   but it does **not** bring extension-captured cookies or page context; the
